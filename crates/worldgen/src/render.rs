@@ -17,11 +17,11 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
         let (x, y) = world.coords(idx);
         let mut color = biome_color(tile.biome);
         let variation = hash01(world.seed, x, y);
-        let shade = ((tile.elevation - world.sea_level) * 60.0) as i16;
+        let shade = ((tile.raw_elevation - world.sea_level) * 60.0) as i16;
         color = offset(color, shade + ((variation * 10.0) as i16 - 5));
 
         if matches!(tile.biome, Biome::Ocean) {
-            let depth = ((world.sea_level - tile.elevation).max(0.0) * 50.0) as i16;
+            let depth = ((world.sea_level - tile.raw_elevation).max(0.0) * 50.0) as i16;
             color = offset(color, -depth);
         }
 
@@ -45,7 +45,7 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
         if tile.biome == Biome::Lake {
             draw_lake(&mut image, x as u32, y as u32, scale);
         } else if tile.surface == crate::Surface::River {
-            let flow = tile.flow_accumulation.max(1.0);
+            let flow = tile.contributing_area.max(1.0);
             draw_river(&mut image, x as u32, y as u32, scale, flow);
         }
     }

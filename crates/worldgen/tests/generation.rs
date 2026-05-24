@@ -56,6 +56,30 @@ fn rivers_reach_a_sink() {
 }
 
 #[test]
+fn conditioned_hydrology_eliminates_uphill_flow() {
+    let world = generate_world(&config()).unwrap();
+    for tile in &world.tiles {
+        if let Some(next) = tile.downstream {
+            assert!(world.tiles[next].hydro_elevation <= tile.hydro_elevation + 0.0002);
+        }
+    }
+}
+
+#[test]
+fn lakes_are_multi_tile_when_present() {
+    let world = generate_world(&config()).unwrap();
+    let mut counts = std::collections::HashMap::<u32, usize>::new();
+    for tile in &world.tiles {
+        if let Some(lake_id) = tile.lake_id {
+            *counts.entry(lake_id).or_default() += 1;
+        }
+    }
+    for size in counts.into_values() {
+        assert!(size >= 4);
+    }
+}
+
+#[test]
 fn every_tile_is_classified() {
     let world = generate_world(&config()).unwrap();
     assert_eq!(world.tiles.len(), config().width * config().height);

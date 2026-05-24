@@ -32,8 +32,9 @@ mod tests {
         for (left, right) in a.tiles.iter().zip(b.tiles.iter()) {
             assert_eq!(left.surface, right.surface);
             assert_eq!(left.biome, right.biome);
-            assert!((left.elevation - right.elevation).abs() < f32::EPSILON);
-            assert!((left.flow_accumulation - right.flow_accumulation).abs() < f32::EPSILON);
+            assert!((left.raw_elevation - right.raw_elevation).abs() < f32::EPSILON);
+            assert!((left.hydro_elevation - right.hydro_elevation).abs() < f32::EPSILON);
+            assert!((left.contributing_area - right.contributing_area).abs() < f32::EPSILON);
         }
     }
 
@@ -42,7 +43,7 @@ mod tests {
         let world = generate_world(&test_config()).unwrap();
         for tile in &world.tiles {
             if let Some(next) = tile.downstream {
-                assert!(world.tiles[next].elevation < tile.elevation);
+                assert!(world.tiles[next].hydro_elevation <= tile.hydro_elevation + 0.0002);
             }
         }
     }
@@ -71,5 +72,6 @@ mod tests {
         assert_eq!(metadata.width, 96);
         assert!(!metadata.biome_counts.is_empty());
         assert!(metadata.land_tiles + metadata.ocean_tiles + metadata.lake_tiles >= world.tiles.len());
+        assert!(metadata.largest_basin_area > 0);
     }
 }

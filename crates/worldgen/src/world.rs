@@ -30,25 +30,33 @@ pub enum Biome {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tile {
-    pub elevation: f32,
+    pub raw_elevation: f32,
+    pub hydro_elevation: f32,
     pub temperature: f32,
     pub moisture: f32,
-    pub flow_accumulation: f32,
+    pub contributing_area: f32,
     pub surface: Surface,
     pub biome: Biome,
     pub downstream: Option<usize>,
+    pub basin_id: Option<u32>,
+    pub lake_id: Option<u32>,
+    pub water_level: Option<f32>,
 }
 
 impl Default for Tile {
     fn default() -> Self {
         Self {
-            elevation: 0.0,
+            raw_elevation: 0.0,
+            hydro_elevation: 0.0,
             temperature: 0.0,
             moisture: 0.0,
-            flow_accumulation: 0.0,
+            contributing_area: 0.0,
             surface: Surface::Ocean,
             biome: Biome::Ocean,
             downstream: None,
+            basin_id: None,
+            lake_id: None,
+            water_level: None,
         }
     }
 }
