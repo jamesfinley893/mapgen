@@ -29,6 +29,8 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
 
         if matches!(tile.biome, Biome::Alpine) {
             draw_peak(&mut image, x as u32, y as u32, scale);
+        } else if matches!(tile.biome, Biome::Foothills) {
+            draw_hills(&mut image, x as u32, y as u32, scale);
         } else if matches!(tile.biome, Biome::Desert | Biome::PolarDesert) {
             draw_dunes(&mut image, x as u32, y as u32, scale);
         } else if matches!(tile.biome, Biome::TemperateForest | Biome::BorealForest | Biome::Rainforest | Biome::TropicalForest) {
@@ -46,7 +48,7 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
             draw_lake(&mut image, x as u32, y as u32, scale);
         } else if tile.surface == crate::Surface::River {
             let flow = tile.contributing_area.max(1.0);
-            draw_river(&mut image, x as u32, y as u32, scale, flow);
+            draw_river(&mut image, world, x as u32, y as u32, scale, flow);
         }
     }
 
@@ -64,6 +66,7 @@ fn biome_color(biome: Biome) -> Rgba<u8> {
         Biome::TemperateGrassland => Rgba([152, 175, 93, 255]),
         Biome::TemperateForest => Rgba([89, 140, 83, 255]),
         Biome::Woodland => Rgba([117, 153, 88, 255]),
+        Biome::Foothills => Rgba([138, 151, 116, 255]),
         Biome::Steppe => Rgba([172, 169, 101, 255]),
         Biome::Desert => Rgba([214, 195, 132, 255]),
         Biome::Savanna => Rgba([171, 174, 85, 255]),
@@ -93,6 +96,20 @@ fn draw_peak(image: &mut RgbaImage, x: u32, y: u32, scale: u32) {
         if i > 0 {
             image.put_pixel(ox + scale - i, oy + i - 1, dark);
         }
+    }
+}
+
+fn draw_hills(image: &mut RgbaImage, x: u32, y: u32, scale: u32) {
+    let ox = x * scale;
+    let oy = y * scale;
+    let dark = Rgba([102, 111, 84, 255]);
+    if scale > 1 {
+        for px in 0..scale {
+            let py = if px < scale / 2 { scale / 2 } else { scale / 2 + px.saturating_sub(scale / 2) / 2 };
+            image.put_pixel(ox + px, oy + py.min(scale - 1), dark);
+        }
+    } else {
+        image.put_pixel(ox, oy, dark);
     }
 }
 
@@ -137,10 +154,13 @@ fn draw_lake(image: &mut RgbaImage, x: u32, y: u32, scale: u32) {
     }
 }
 
-fn draw_river(image: &mut RgbaImage, x: u32, y: u32, scale: u32, flow: f32) {
+fn draw_river(image: &mut RgbaImage, world: &World, x: u32, y: u32, scale: u32, flow: f32) {
     let ox = x * scale;
     let oy = y * scale;
-    let c = if flow > 120.0 {
+    let base = ((world.width * world.height) as f32 * 0.00075).max(12.0);
+    let c = if flow > base * 18.0 {
+        Rgba([49, 132, 201, 255])
+    } else if flow > base * 6.5 {
         Rgba([66, 160, 219, 255])
     } else {
         Rgba([95, 185, 235, 255])
@@ -148,8 +168,11 @@ fn draw_river(image: &mut RgbaImage, x: u32, y: u32, scale: u32, flow: f32) {
     let mid = scale / 2;
     for py in 0..scale {
         image.put_pixel(ox + mid, oy + py, c);
-        if flow > 180.0 && scale > 2 && mid > 0 {
+        if flow > base * 6.5 && scale > 2 && mid > 0 {
             image.put_pixel(ox + mid - 1, oy + py, c);
+        }
+        if flow > base * 18.0 && scale > 3 && mid + 1 < scale {
+            image.put_pixel(ox + mid + 1, oy + py, c);
         }
     }
 }

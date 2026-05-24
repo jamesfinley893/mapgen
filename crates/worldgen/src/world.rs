@@ -20,6 +20,7 @@ pub enum Biome {
     TemperateGrassland,
     TemperateForest,
     Woodland,
+    Foothills,
     Steppe,
     Desert,
     Savanna,
