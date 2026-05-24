@@ -108,6 +108,8 @@ fn metadata_reports_multiple_river_bands() {
     assert!(metadata.river_band_counts.iter().sum::<usize>() >= metadata.river_tiles);
     assert!(metadata.longest_trunk_length > 0);
     assert!(metadata.largest_contiguous_foothill_region <= metadata.land_tiles);
+    assert!((0.0..=1.0).contains(&metadata.confined_trunk_fraction));
+    assert!((0.0..=1.0).contains(&metadata.average_trunk_confinement));
 }
 
 #[test]
@@ -210,6 +212,27 @@ fn alpine_strips_are_not_overly_isolated() {
     assert!(isolated < 180, "too many isolated alpine tiles: {isolated}");
 }
 
+#[test]
+fn trunk_rivers_are_less_mountain_confined_than_headwaters() {
+    let world = generate_world(&WorldConfig {
+        seed: 42,
+        width: 256,
+        height: 256,
+        render_scale: 2,
+        ..WorldConfig::default()
+    })
+    .unwrap();
+    let stream_threshold = (((world.width * world.height) as f32 * 0.00075).max(12.0)) * 6.5;
+    let trunk_threshold = (((world.width * world.height) as f32 * 0.00075).max(12.0)) * 18.0;
+    let headwater = mountain_banked_fraction(&world, stream_threshold, trunk_threshold);
+    let trunk = mountain_banked_fraction(&world, trunk_threshold, f32::INFINITY);
+    assert!(trunk < 0.42, "trunk rivers still too mountain-confined: {trunk}");
+    assert!(
+        trunk < headwater,
+        "trunk rivers should be less confined than headwaters: trunk={trunk}, headwater={headwater}"
+    );
+}
+
 fn longest_same_direction_run(world: &worldgen::World) -> usize {
     let mut longest = 0;
     for (idx, tile) in world.tiles.iter().enumerate() {
@@ -244,4 +267,51 @@ fn longest_same_direction_run(world: &worldgen::World) -> usize {
         }
     }
     longest
+}
+
+fn mountain_banked_fraction(world: &worldgen::World, min_area: f32, max_area: f32) -> f32 {
+    let mut total = 0_usize;
+    let mut mountain_banked = 0_usize;
+
+    for (idx, tile) in world.tiles.iter().enumerate() {
+        if tile.surface != Surface::River
+            || tile.contributing_area < min_area
+            || tile.contributing_area >= max_area
+        {
+            continue;
+        }
+        let Some(next) = tile.downstream else {
+            continue;
+        };
+        let (x, y) = world.coords(idx);
+        let (nx, ny) = world.coords(next);
+        let dx = (nx as isize - x as isize).signum();
+        let dy = (ny as isize - y as isize).signum();
+        if dx == 0 && dy == 0 {
+            continue;
+        }
+        let banks = [(-dy, dx), (dy, -dx)];
+        let mut bank_count = 0_usize;
+        for bank in banks {
+            let bx = x as isize + bank.0;
+            let by = y as isize + bank.1;
+            if !world.in_bounds(bx, by) {
+                continue;
+            }
+            let bidx = world.idx(bx as usize, by as usize);
+            if matches!(world.tiles[bidx].biome, Biome::Foothills | Biome::Alpine) {
+                bank_count += 1;
+            }
+        }
+        total += 1;
+        if bank_count == 2 {
+            mountain_banked += 1;
+        }
+    }
+
+    if total == 0 {
+        0.0
+    } else {
+        mountain_banked as f32 / total as f32
+    }
 }

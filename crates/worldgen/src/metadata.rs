@@ -21,6 +21,8 @@ pub struct WorldMetadata {
     pub max_river_discharge: f32,
     pub river_band_counts: [usize; 3],
     pub longest_trunk_length: usize,
+    pub confined_trunk_fraction: f32,
+    pub average_trunk_confinement: f32,
     pub highest_elevation: f32,
     pub alpine_fraction: f32,
     pub foothill_fraction: f32,
@@ -85,6 +87,8 @@ pub fn build_metadata(world: &World, config: &WorldConfig) -> WorldMetadata {
 
     let mut biome_counts: Vec<_> = counts.into_values().collect();
     biome_counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    let (confined_trunk_fraction, average_trunk_confinement) =
+        trunk_confinement_stats(world, thresholds.1);
 
     WorldMetadata {
         seed: world.seed,
@@ -104,6 +108,8 @@ pub fn build_metadata(world: &World, config: &WorldConfig) -> WorldMetadata {
         max_river_discharge,
         river_band_counts,
         longest_trunk_length: longest_trunk_length(world, thresholds.1),
+        confined_trunk_fraction,
+        average_trunk_confinement,
         highest_elevation,
         alpine_fraction: alpine_tiles as f32 / land_tiles.max(1) as f32,
         foothill_fraction: foothill_tiles as f32 / land_tiles.max(1) as f32,
@@ -145,6 +151,72 @@ fn longest_trunk_length(world: &World, trunk_threshold: f32) -> usize {
         best = best.max(len);
     }
     best
+}
+
+fn trunk_confinement_stats(world: &World, trunk_threshold: f32) -> (f32, f32) {
+    let mut trunk_tiles = 0_usize;
+    let mut confined = 0_usize;
+    let mut total = 0.0_f32;
+
+    for (idx, tile) in world.tiles.iter().enumerate() {
+        if tile.surface != Surface::River || tile.contributing_area < trunk_threshold {
+            continue;
+        }
+        let Some(next) = tile.downstream else {
+            continue;
+        };
+        let conf = local_trunk_confinement(world, idx, next);
+        trunk_tiles += 1;
+        if conf > 0.52 {
+            confined += 1;
+        }
+        total += conf;
+    }
+
+    if trunk_tiles == 0 {
+        (0.0, 0.0)
+    } else {
+        (
+            confined as f32 / trunk_tiles as f32,
+            total / trunk_tiles as f32,
+        )
+    }
+}
+
+fn local_trunk_confinement(world: &World, idx: usize, next: usize) -> f32 {
+    let (x, y) = world.coords(idx);
+    let (nx, ny) = world.coords(next);
+    let dx = (nx as isize - x as isize).signum();
+    let dy = (ny as isize - y as isize).signum();
+    if dx == 0 && dy == 0 {
+        return 0.0;
+    }
+    let current = world.tiles[idx].raw_elevation;
+    let side_a = (-dy, dx);
+    let side_b = (dy, -dx);
+    let mut rise = 0.0_f32;
+    let mut weight_sum = 0.0_f32;
+
+    for distance in 1..=2 {
+        let weight = if distance == 1 { 1.0 } else { 0.55 };
+        for side in [side_a, side_b] {
+            let sx = x as isize + side.0 * distance;
+            let sy = y as isize + side.1 * distance;
+            if !world.in_bounds(sx, sy) {
+                continue;
+            }
+            let sidx = world.idx(sx as usize, sy as usize);
+            rise += (world.tiles[sidx].raw_elevation - current).max(0.0) * weight;
+            weight_sum += weight;
+        }
+    }
+
+    if weight_sum <= f32::EPSILON {
+        0.0
+    } else {
+        let avg_rise = rise / weight_sum;
+        ((avg_rise - 0.015) / (0.13 - 0.015)).clamp(0.0, 1.0)
+    }
 }
 
 fn largest_biome_region(world: &World, biome: Biome) -> usize {

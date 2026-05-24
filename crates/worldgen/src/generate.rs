@@ -160,6 +160,7 @@ fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridge: &OpenSim
 
         let flow = simulate_erosion_flow(world, &terrain);
         let mut next = terrain.clone();
+        let mut lateral_erosion = vec![0.0_f32; terrain.len()];
 
         for idx in 0..terrain.len() {
             let (x, y) = world.coords(idx);
@@ -198,7 +199,19 @@ fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridge: &OpenSim
                 let relief_factor =
                     0.58 + relief * 2.7 + interior_high * 1.18 + alpine * (0.62 + uplift_core * 0.72);
                 let tectonic_factor = 0.28 + axial_uplift[idx] * 1.54 + shoulder_uplift[idx] * 0.42;
-                discharge * slope * 0.012 * relief_factor * tectonic_factor
+                let alluvial_brake = 1.0 - flow.floodplain_scale[idx] * 0.55;
+                discharge * slope * 0.012 * relief_factor * tectonic_factor * alluvial_brake
+            };
+            let confinement = flow.confinement[idx];
+            let valley_scale = flow.valley_scale[idx];
+            let floodplain_scale = flow.floodplain_scale[idx];
+            let deposition = flow.deposition[idx];
+            let sediment_flux = flow.sediment_flux[idx];
+            let transport_capacity = flow.transport_capacity[idx];
+            let sediment_ratio = if transport_capacity <= f32::EPSILON {
+                0.0
+            } else {
+                (sediment_flux / transport_capacity).clamp(0.0, 2.5)
             };
             let diffusion = (avg_neighbor - current)
                 * (0.019
@@ -207,6 +220,8 @@ fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridge: &OpenSim
                     + shoulder_zone * 0.022
                     + plain_zone * 0.03
                     + basin_zone * 0.028
+                    + valley_scale * 0.022 * (1.0 - confinement)
+                    + floodplain_scale * (0.02 + sediment_ratio.min(1.0) * 0.012)
                     + alpine * 0.016 * (1.0 - uplift_core * 0.35)
                     + glacial_band * 0.02);
             let slope_failure = max_neighbor_drop
@@ -226,6 +241,14 @@ fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridge: &OpenSim
             let glacial_erosion = glacial_band
                 * (0.004 + max_neighbor_drop * 0.012 + relief * 0.008)
                 * (0.5 + axial_uplift[idx] * 0.62 + shoulder_uplift[idx] * 0.18);
+            let valley_floor_lowering = valley_scale
+                * (1.0 - confinement)
+                * (0.0015 + plain_zone * 0.003 + basin_zone * 0.0025)
+                * (0.55 + smoothstep(0.0, 0.09, flow.local_slope[idx]));
+            let alluvial_fill = deposition
+                * floodplain_scale
+                * (0.006 + plain_zone * 0.01 + basin_zone * 0.012 + sediment_ratio.min(1.2) * 0.004)
+                * (0.65 + (1.0 - confinement) * 0.35);
             let plain_planation = relief
                 * (0.012 + plain_zone * 0.038 + basin_zone * 0.025)
                 * (1.0 - uplift_core * 0.75);
@@ -240,8 +263,57 @@ fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridge: &OpenSim
                     * (0.62 + progress * 0.48);
 
             next[idx] = (current - incision + diffusion - ridge_decay - alpine_relax - slope_failure - glacial_erosion - plain_planation
-                - shoulder_denudation - basin_subsidence)
+                - shoulder_denudation - basin_subsidence - valley_floor_lowering + alluvial_fill)
                 .max(0.0);
+
+            if !flow.is_ocean[idx] && valley_scale > 0.02 {
+                if let Some(next_idx) = flow.downstream[idx] {
+                    let (nx, ny) = world.coords(next_idx);
+                    let step_x = (nx as isize - x as isize).signum();
+                    let step_y = (ny as isize - y as isize).signum();
+                    if step_x != 0 || step_y != 0 {
+                        let side_a = (-step_y, step_x);
+                        let side_b = (step_y, -step_x);
+                        let lateral_strength = (valley_scale * (1.0 - confinement) * (0.0024 + basin_zone * 0.003 + plain_zone * 0.002))
+                            + (floodplain_scale * (0.0045 + basin_zone * 0.0045 + plain_zone * 0.0035));
+                        let lateral_strength = lateral_strength * (0.65 + (1.0 - uplift_core) * 0.35);
+                        for (distance, weight) in [(1_isize, 1.0_f32), (2_isize, 0.45_f32)] {
+                            for side in [side_a, side_b] {
+                                let sx = x as isize + side.0 * distance;
+                                let sy = y as isize + side.1 * distance;
+                                if !world.in_bounds(sx, sy) {
+                                    continue;
+                                }
+                                let sidx = world.idx(sx as usize, sy as usize);
+                                let height_above = (terrain[sidx] - current).max(0.0);
+                                let carve = lateral_strength * weight * (0.45 + height_above * 3.4);
+                                lateral_erosion[sidx] += carve.min(0.015);
+                            }
+                        }
+                        if floodplain_scale > 0.08 {
+                            for (distance, weight) in [(1_isize, 0.55_f32), (2_isize, 0.32_f32)] {
+                                for side in [side_a, side_b] {
+                                    let sx = x as isize + side.0 * distance;
+                                    let sy = y as isize + side.1 * distance;
+                                    if !world.in_bounds(sx, sy) {
+                                        continue;
+                                    }
+                                    let sidx = world.idx(sx as usize, sy as usize);
+                                    let build = deposition
+                                        * floodplain_scale
+                                        * weight
+                                        * (0.003 + basin_zone * 0.0035 + plain_zone * 0.0025);
+                                    next[sidx] = (next[sidx] + build.min(0.006)).min(1.0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for idx in 0..next.len() {
+            next[idx] = (next[idx] - lateral_erosion[idx]).max(0.0);
         }
 
         terrain = next;
@@ -398,8 +470,15 @@ fn wrap_delta(delta: f32) -> f32 {
 }
 
 struct ErosionFlow {
+    downstream: Vec<Option<usize>>,
     contributing_area: Vec<f32>,
     local_slope: Vec<f32>,
+    confinement: Vec<f32>,
+    valley_scale: Vec<f32>,
+    transport_capacity: Vec<f32>,
+    sediment_flux: Vec<f32>,
+    deposition: Vec<f32>,
+    floodplain_scale: Vec<f32>,
     is_ocean: Vec<bool>,
 }
 
@@ -443,7 +522,7 @@ fn simulate_erosion_flow(world: &World, terrain: &[f32]) -> ErosionFlow {
     }
 
     let mut contributing_area = vec![0.0_f32; terrain.len()];
-    for idx in order {
+    for idx in order.iter().copied() {
         if is_ocean[idx] {
             continue;
         }
@@ -453,10 +532,105 @@ fn simulate_erosion_flow(world: &World, terrain: &[f32]) -> ErosionFlow {
         }
     }
 
+    let mut confinement = vec![0.0_f32; terrain.len()];
+    let mut valley_scale = vec![0.0_f32; terrain.len()];
+    let mut transport_capacity = vec![0.0_f32; terrain.len()];
+    let mut sediment_flux = vec![0.0_f32; terrain.len()];
+    let mut deposition = vec![0.0_f32; terrain.len()];
+    let mut floodplain_scale = vec![0.0_f32; terrain.len()];
+    for idx in 0..terrain.len() {
+        if is_ocean[idx] {
+            continue;
+        }
+        let Some(next) = downstream[idx] else {
+            continue;
+        };
+        let conf = flow_confinement(world, terrain, idx, next);
+        let discharge = contributing_area[idx].max(1.0).ln();
+        let slope = local_slope[idx];
+        confinement[idx] = conf;
+        valley_scale[idx] = smoothstep(3.1, 5.7, discharge)
+            * (1.0 - smoothstep(0.045, 0.17, slope))
+            * (0.58 + (1.0 - conf) * 0.42);
+        transport_capacity[idx] =
+            (contributing_area[idx].max(1.0).ln().powf(1.28) * slope.max(0.0008).sqrt()) * 0.9;
+    }
+
+    for idx in order.iter().copied() {
+        if is_ocean[idx] {
+            continue;
+        }
+        let slope = local_slope[idx];
+        let discharge = contributing_area[idx].max(1.0).ln();
+        let local_supply = (0.015 + slope * 0.22 + valley_scale[idx] * 0.06)
+            * (0.45 + discharge * 0.12)
+            * (0.75 + confinement[idx] * 0.35);
+        let incoming = sediment_flux[idx] + local_supply;
+        let capacity = transport_capacity[idx];
+        let deposited = (incoming - capacity).max(0.0);
+        deposition[idx] = deposited.min(0.18);
+        let carried = (incoming - deposition[idx] * 0.72).max(0.0);
+        if let Some(next) = downstream[idx] {
+            sediment_flux[next] += carried;
+        }
+        let low_slope = 1.0 - smoothstep(0.03, 0.12, slope);
+        let overcapacity = if incoming <= f32::EPSILON {
+            0.0
+        } else {
+            (deposition[idx] / incoming).clamp(0.0, 1.0)
+        };
+        floodplain_scale[idx] = smoothstep(2.7, 5.6, discharge)
+            * low_slope
+            * (0.45 + overcapacity * 0.55)
+            * (0.6 + (1.0 - confinement[idx]) * 0.4);
+    }
+
     ErosionFlow {
+        downstream,
         contributing_area,
         local_slope,
+        confinement,
+        valley_scale,
+        transport_capacity,
+        sediment_flux,
+        deposition,
+        floodplain_scale,
         is_ocean,
+    }
+}
+
+fn flow_confinement(world: &World, terrain: &[f32], idx: usize, next: usize) -> f32 {
+    let (x, y) = world.coords(idx);
+    let (nx, ny) = world.coords(next);
+    let dx = (nx as isize - x as isize).signum();
+    let dy = (ny as isize - y as isize).signum();
+    if dx == 0 && dy == 0 {
+        return 0.0;
+    }
+    let current = terrain[idx];
+    let side_a = (-dy, dx);
+    let side_b = (dy, -dx);
+    let mut rise = 0.0_f32;
+    let mut weight_sum = 0.0_f32;
+
+    for distance in 1..=2 {
+        let weight = if distance == 1 { 1.0 } else { 0.55 };
+        for side in [side_a, side_b] {
+            let sx = x as isize + side.0 * distance;
+            let sy = y as isize + side.1 * distance;
+            if !world.in_bounds(sx, sy) {
+                continue;
+            }
+            let sidx = world.idx(sx as usize, sy as usize);
+            rise += (terrain[sidx] - current).max(0.0) * weight;
+            weight_sum += weight;
+        }
+    }
+
+    if weight_sum <= f32::EPSILON {
+        0.0
+    } else {
+        smoothstep(0.015, 0.13, rise / weight_sum)
     }
 }
 
@@ -1239,6 +1413,7 @@ fn biome_for_world_tile(world: &World, idx: usize) -> Biome {
     let tile = &world.tiles[idx];
     let support = mountain_support(world, idx);
     let proximity = mountain_proximity(world, idx);
+    let trunk_river = trunk_river_proximity(world, idx);
     let local_relief = local_relief(world, idx);
     biome_for_tile_with_support(
         tile.surface,
@@ -1248,6 +1423,7 @@ fn biome_for_world_tile(world: &World, idx: usize) -> Biome {
         tile.moisture,
         support,
         proximity,
+        trunk_river,
         local_relief,
     )
 }
@@ -1339,6 +1515,40 @@ fn local_relief(world: &World, idx: usize) -> f32 {
     (max_drop + max_rise * 0.5).clamp(0.0, 1.0)
 }
 
+fn trunk_river_proximity(world: &World, idx: usize) -> f32 {
+    let (x, y) = world.coords(idx);
+    let trunk_threshold = (((world.width * world.height) as f32 * 0.00075).max(12.0)) * 18.0;
+    let mut influence = 0.0_f32;
+    let mut total = 0.0_f32;
+
+    for dy in -3..=3 {
+        for dx in -3..=3 {
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+            let nx = x as isize + dx;
+            let ny = y as isize + dy;
+            if !world.in_bounds(nx, ny) {
+                continue;
+            }
+            let nidx = world.idx(nx as usize, ny as usize);
+            let dist = ((dx * dx + dy * dy) as f32).sqrt();
+            let weight = (1.0 / (1.0 + dist)).clamp(0.14, 0.75);
+            total += weight;
+            let neighbor = &world.tiles[nidx];
+            if neighbor.surface == Surface::River && neighbor.contributing_area >= trunk_threshold {
+                influence += weight;
+            }
+        }
+    }
+
+    if total <= f32::EPSILON {
+        0.0
+    } else {
+        (influence / total).clamp(0.0, 1.0)
+    }
+}
+
 pub fn biome_for_tile(
     surface: Surface,
     elevation: f32,
@@ -1346,7 +1556,7 @@ pub fn biome_for_tile(
     temperature: f32,
     moisture: f32,
 ) -> Biome {
-    biome_for_tile_with_support(surface, elevation, sea_level, temperature, moisture, 1.0, 1.0, 0.08)
+    biome_for_tile_with_support(surface, elevation, sea_level, temperature, moisture, 1.0, 1.0, 0.0, 0.08)
 }
 
 fn biome_for_tile_with_support(
@@ -1357,6 +1567,7 @@ fn biome_for_tile_with_support(
     moisture: f32,
     support: f32,
     proximity: f32,
+    trunk_river: f32,
     relief: f32,
 ) -> Biome {
     match surface {
@@ -1366,20 +1577,34 @@ fn biome_for_tile_with_support(
         Surface::River => {
             if elevation > sea_level + 0.38 && support > 0.48 {
                 Biome::Alpine
-            } else if elevation > sea_level + 0.30 && support > 0.22 && proximity > 0.18 && relief > 0.04 {
+            } else if elevation > sea_level + 0.30
+                && support > 0.22
+                && proximity > 0.18
+                && relief > 0.04
+                && (trunk_river < 0.18 || (support > 0.34 && proximity > 0.28))
+            {
                 Biome::Foothills
             } else {
                 land_biome(temperature, (moisture + 0.18).clamp(0.0, 1.0), elevation, sea_level)
             }
         }
         Surface::Land => {
-            land_biome_with_support(temperature, moisture, elevation, sea_level, support, proximity, relief)
+            land_biome_with_support(
+                temperature,
+                moisture,
+                elevation,
+                sea_level,
+                support,
+                proximity,
+                trunk_river,
+                relief,
+            )
         }
     }
 }
 
 fn land_biome(temperature: f32, moisture: f32, elevation: f32, sea_level: f32) -> Biome {
-    land_biome_with_support(temperature, moisture, elevation, sea_level, 1.0, 1.0, 0.08)
+    land_biome_with_support(temperature, moisture, elevation, sea_level, 1.0, 1.0, 0.0, 0.08)
 }
 
 fn land_biome_with_support(
@@ -1389,12 +1614,18 @@ fn land_biome_with_support(
     sea_level: f32,
     support: f32,
     proximity: f32,
+    trunk_river: f32,
     relief: f32,
 ) -> Biome {
     if elevation > sea_level + 0.38 && support > 0.5 {
         return Biome::Alpine;
     }
-    if elevation > sea_level + 0.31 && support > 0.24 && proximity > 0.2 && relief > 0.04 {
+    if elevation > sea_level + 0.31
+        && support > 0.24
+        && proximity > 0.2
+        && relief > 0.04
+        && (trunk_river < 0.2 || (support > 0.35 && proximity > 0.3))
+    {
         return Biome::Foothills;
     }
     if temperature < 0.12 {
