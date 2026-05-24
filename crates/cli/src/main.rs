@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use rand::random;
 use time::OffsetDateTime;
 use time::format_description::FormatItem;
 use time::macros::format_description;
@@ -19,7 +20,7 @@ struct Cli {
 enum Commands {
     Generate {
         #[arg(long)]
-        seed: u64,
+        seed: Option<u64>,
         #[arg(long, default_value_t = 384)]
         width: usize,
         #[arg(long, default_value_t = 384)]
@@ -57,6 +58,7 @@ fn run() -> Result<(), String> {
             moisture_bias,
             out_dir,
         } => {
+            let seed = select_seed(seed);
             let config = WorldConfig {
                 seed,
                 width,
@@ -82,12 +84,17 @@ fn run() -> Result<(), String> {
                 .map_err(|err| format!("failed to serialize metadata: {err}"))?;
             fs::write(&json_path, json).map_err(|err| format!("failed to write metadata: {err}"))?;
 
+            println!("seed {}", seed);
             println!("wrote {}", run_dir.display());
             println!("wrote {}", png_path.display());
             println!("wrote {}", json_path.display());
             Ok(())
         }
     }
+}
+
+fn select_seed(seed: Option<u64>) -> u64 {
+    seed.unwrap_or_else(|| random::<u64>())
 }
 
 fn build_run_output_dir(base: &std::path::Path, seed: u64, now: OffsetDateTime) -> Result<PathBuf, String> {
@@ -120,5 +127,19 @@ mod tests {
         let now = datetime!(2024-06-02 08:34:56 UTC);
         let path = build_run_output_dir(std::path::Path::new("output/worlds"), 7, now).unwrap();
         assert_eq!(path, PathBuf::from("output/worlds/seed-7_20240602-083456Z"));
+    }
+
+    #[test]
+    fn select_seed_preserves_explicit_seed() {
+        assert_eq!(select_seed(Some(12345)), 12345);
+    }
+
+    #[test]
+    fn select_seed_generates_random_seed_when_missing() {
+        let a = select_seed(None);
+        let b = select_seed(None);
+        assert_ne!(a, 0);
+        assert_ne!(b, 0);
+        assert_ne!(a, b);
     }
 }
