@@ -5,20 +5,20 @@ use crate::World;
 use super::DIAGONAL_COST;
 
 pub(super) fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0).max(f32::EPSILON)).clamp(0.0, 1.0);
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
 pub(super) fn hash01(seed: u64, x: usize, y: usize) -> f32 {
-    let mut v = seed
+    let mut z = seed
         .wrapping_add((x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
         .wrapping_add((y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F));
-    v ^= v >> 33;
-    v = v.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
-    v ^= v >> 33;
-    v = v.wrapping_mul(0xC4CE_B9FE_1A85_EC53);
-    v ^= v >> 33;
-    (v as f64 / u64::MAX as f64) as f32
+    z ^= z >> 30;
+    z = z.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z ^= z >> 27;
+    z = z.wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    (z as f64 / u64::MAX as f64) as f32
 }
 
 pub(super) fn octave_noise(

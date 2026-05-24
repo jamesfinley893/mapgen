@@ -3,7 +3,7 @@ use std::collections::{BinaryHeap, HashMap, VecDeque};
 
 use crate::{Surface, World};
 
-use super::util::{direction_vector, local_aspect, neighbor_distance};
+use super::util::{direction_vector, hash01, local_aspect, neighbor_distance};
 use super::HYDRO_EPSILON;
 
 pub(super) struct HydrologyState {
@@ -65,10 +65,45 @@ impl PartialOrd for QueueCell {
 }
 
 pub(super) fn classify_ocean(world: &World) -> Vec<bool> {
-    world.tiles
-        .iter()
-        .map(|tile| tile.raw_elevation <= world.sea_level)
-        .collect()
+    let mut ocean = vec![false; world.tiles.len()];
+    let mut queue = VecDeque::new();
+
+    for x in 0..world.width {
+        seed_ocean_boundary(world, &mut ocean, &mut queue, x, 0);
+        seed_ocean_boundary(world, &mut ocean, &mut queue, x, world.height - 1);
+    }
+    for y in 0..world.height {
+        seed_ocean_boundary(world, &mut ocean, &mut queue, 0, y);
+        seed_ocean_boundary(world, &mut ocean, &mut queue, world.width - 1, y);
+    }
+
+    while let Some(idx) = queue.pop_front() {
+        let (x, y) = world.coords(idx);
+        for (nx, ny) in world.neighbors8(x, y) {
+            let nidx = world.idx(nx, ny);
+            if ocean[nidx] || world.tiles[nidx].raw_elevation > world.sea_level {
+                continue;
+            }
+            ocean[nidx] = true;
+            queue.push_back(nidx);
+        }
+    }
+
+    ocean
+}
+
+fn seed_ocean_boundary(
+    world: &World,
+    ocean: &mut [bool],
+    queue: &mut VecDeque<usize>,
+    x: usize,
+    y: usize,
+) {
+    let idx = world.idx(x, y);
+    if !ocean[idx] && world.tiles[idx].raw_elevation <= world.sea_level {
+        ocean[idx] = true;
+        queue.push_back(idx);
+    }
 }
 
 pub(super) fn simulate_hydrology(world: &World, ocean: &[bool]) -> HydrologyState {
@@ -228,7 +263,19 @@ fn identify_lakes(
             continue;
         }
 
-        for &cell in &region {
+        let refined_region = refine_lake_region(
+            world,
+            hydro,
+            fill_depth,
+            &region,
+            outlet_level,
+            max_depth,
+        );
+        if refined_region.len() < 4 {
+            continue;
+        }
+
+        for &cell in &refined_region {
             lake_id[cell] = Some(next_lake_id);
             water_level[cell] = Some(hydro[cell]);
         }
@@ -240,6 +287,74 @@ fn identify_lakes(
         water_level,
         lake_count: next_lake_id,
     }
+}
+
+fn refine_lake_region(
+    world: &World,
+    hydro: &[f32],
+    fill_depth: &[f32],
+    region: &[usize],
+    outlet_level: f32,
+    max_depth: f32,
+) -> Vec<usize> {
+    let mut mask = vec![false; world.tiles.len()];
+    for &cell in region {
+        mask[cell] = true;
+    }
+
+    for _ in 0..2 {
+        let mut remove = Vec::new();
+        for &cell in region {
+            if !mask[cell] {
+                continue;
+            }
+            let (x, y) = world.coords(cell);
+            let neighbors = world
+                .neighbors8(x, y)
+                .filter(|(nx, ny)| mask[world.idx(*nx, *ny)])
+                .count();
+            let shallow = fill_depth[cell] < (0.012_f32).max(max_depth * 0.22);
+            if neighbors <= 1 || (neighbors <= 2 && shallow) {
+                remove.push(cell);
+            }
+        }
+        if remove.is_empty() {
+            break;
+        }
+        for cell in remove {
+            mask[cell] = false;
+        }
+    }
+
+    let mut add = Vec::new();
+    for &cell in region {
+        if !mask[cell] {
+            continue;
+        }
+        let (x, y) = world.coords(cell);
+        for (nx, ny) in world.neighbors8(x, y) {
+            let nidx = world.idx(nx, ny);
+            if mask[nidx] {
+                continue;
+            }
+            let ring_neighbors = world
+                .neighbors8(nx, ny)
+                .filter(|(rx, ry)| mask[world.idx(*rx, *ry)])
+                .count();
+            if ring_neighbors >= 4
+                && fill_depth[nidx] > 0.006
+                && hydro[nidx] <= outlet_level + 0.012
+                && world.tiles[nidx].raw_elevation <= outlet_level + 0.01
+            {
+                add.push(nidx);
+            }
+        }
+    }
+    for cell in add {
+        mask[cell] = true;
+    }
+
+    region.iter().copied().filter(|idx| mask[*idx]).collect()
 }
 
 fn build_downstream(
@@ -361,12 +476,20 @@ fn candidate_score(
     } else {
         0.0
     };
+    let meander_bonus = if slope < 0.028 {
+        let signed_bias = hash01(world.seed.wrapping_add(211), idx, next) * 2.0 - 1.0;
+        let cross_flow = dir.0 * -aspect.1 + dir.1 * aspect.0;
+        cross_flow * signed_bias * (0.125 * (1.0 - (slope / 0.028).clamp(0.0, 1.0)))
+    } else {
+        0.0
+    };
 
     slope * 10.0
         + raw_slope.max(0.0) * 3.0
         + alignment * 0.35
-        + persistence_bonus * 0.08
+        + persistence_bonus * 0.04
         + flat_bonus
+        + meander_bonus
         + if is_parent { 0.03 } else { 0.0 }
         - diagonal_penalty
 }

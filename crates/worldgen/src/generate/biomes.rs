@@ -268,9 +268,11 @@ fn land_biome_with_support(
     if temperature < 0.48 {
         if moisture < 0.18 {
             Biome::Desert
-        } else if moisture < 0.35 {
+        } else if moisture < 0.29 {
+            Biome::Steppe
+        } else if moisture < 0.43 {
             Biome::TemperateGrassland
-        } else if moisture < 0.62 {
+        } else if moisture < 0.58 {
             Biome::Woodland
         } else {
             Biome::TemperateForest
@@ -278,18 +280,22 @@ fn land_biome_with_support(
     } else if temperature < 0.72 {
         if moisture < 0.16 {
             Biome::Desert
-        } else if moisture < 0.38 {
+        } else if moisture < 0.26 {
+            Biome::Steppe
+        } else if moisture < 0.48 {
             Biome::Savanna
-        } else if moisture < 0.66 {
+        } else if moisture < 0.62 {
             Biome::Woodland
         } else {
             Biome::TropicalForest
         }
-    } else if moisture < 0.18 {
+    } else if moisture < 0.16 {
         Biome::Desert
-    } else if moisture < 0.42 {
+    } else if moisture < 0.28 {
         Biome::Savanna
-    } else if moisture < 0.72 {
+    } else if moisture < 0.46 {
+        Biome::Savanna
+    } else if moisture < 0.68 {
         Biome::TropicalForest
     } else {
         Biome::Rainforest

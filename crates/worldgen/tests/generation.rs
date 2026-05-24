@@ -26,6 +26,49 @@ fn worlds_contain_land_and_ocean() {
 }
 
 #[test]
+fn ocean_tiles_are_boundary_connected() {
+    let world = generate_world(&config()).unwrap();
+    let mut visited = vec![false; world.tiles.len()];
+    let mut queue = std::collections::VecDeque::new();
+
+    for x in 0..world.width {
+        for y in [0, world.height - 1] {
+            let idx = world.idx(x, y);
+            if world.tiles[idx].surface == Surface::Ocean && !visited[idx] {
+                visited[idx] = true;
+                queue.push_back(idx);
+            }
+        }
+    }
+    for y in 0..world.height {
+        for x in [0, world.width - 1] {
+            let idx = world.idx(x, y);
+            if world.tiles[idx].surface == Surface::Ocean && !visited[idx] {
+                visited[idx] = true;
+                queue.push_back(idx);
+            }
+        }
+    }
+
+    while let Some(idx) = queue.pop_front() {
+        let (x, y) = world.coords(idx);
+        for (nx, ny) in world.neighbors8(x, y) {
+            let nidx = world.idx(nx, ny);
+            if !visited[nidx] && world.tiles[nidx].surface == Surface::Ocean {
+                visited[nidx] = true;
+                queue.push_back(nidx);
+            }
+        }
+    }
+
+    for (idx, tile) in world.tiles.iter().enumerate() {
+        if tile.surface == Surface::Ocean {
+            assert!(visited[idx], "found inland ocean tile at index {idx}");
+        }
+    }
+}
+
+#[test]
 fn worlds_have_at_least_one_river() {
     let world = generate_world(&config()).unwrap();
     assert!(world.tiles.iter().any(|tile| tile.surface == Surface::River));
@@ -170,6 +213,36 @@ fn fixed_seeds_still_produce_meaningful_high_ranges() {
 }
 
 #[test]
+fn lowlands_are_not_overwhelmingly_woodland_and_tundra() {
+    for seed in [42_u64, 97, 12302556654306610728] {
+        let world = generate_world(&WorldConfig {
+            seed,
+            width: 256,
+            height: 256,
+            render_scale: 2,
+            ..WorldConfig::default()
+        })
+        .unwrap();
+        let mut lowland = 0_usize;
+        let mut dominant = 0_usize;
+        for tile in &world.tiles {
+            if matches!(tile.surface, Surface::Ocean | Surface::Lake) {
+                continue;
+            }
+            if tile.raw_elevation > world.sea_level + 0.18 || matches!(tile.biome, Biome::Alpine | Biome::Foothills) {
+                continue;
+            }
+            lowland += 1;
+            if matches!(tile.biome, Biome::Woodland | Biome::Tundra) {
+                dominant += 1;
+            }
+        }
+        let fraction = dominant as f32 / lowland.max(1) as f32;
+        assert!(fraction < 0.78, "lowland biome mix too narrow for seed {seed}: {fraction}");
+    }
+}
+
+#[test]
 fn fixed_seeds_produce_foothill_transitions() {
     let world = generate_world(&WorldConfig {
         seed: 42,
@@ -233,6 +306,57 @@ fn trunk_rivers_are_less_mountain_confined_than_headwaters() {
     );
 }
 
+#[test]
+fn trunk_rivers_avoid_extreme_straight_runs() {
+    let world = generate_world(&WorldConfig {
+        seed: 42,
+        width: 256,
+        height: 256,
+        render_scale: 2,
+        ..WorldConfig::default()
+    })
+    .unwrap();
+    let trunk_threshold = (((world.width * world.height) as f32 * 0.00075).max(12.0)) * 18.0;
+    let run = longest_same_direction_run_for_threshold(&world, trunk_threshold);
+    assert!(
+        run <= 19,
+        "trunk river run too straight: {run}"
+    );
+}
+
+#[test]
+fn lakes_avoid_filamentary_shapes() {
+    let world = generate_world(&WorldConfig {
+        seed: 7073116918442829777,
+        width: 256,
+        height: 256,
+        render_scale: 2,
+        ..WorldConfig::default()
+    })
+    .unwrap();
+    let mut counts = std::collections::HashMap::<u32, (usize, usize)>::new();
+    for (idx, tile) in world.tiles.iter().enumerate() {
+        let Some(lake_id) = tile.lake_id else { continue };
+        let (x, y) = world.coords(idx);
+        let edge_neighbors = world
+            .neighbors8(x, y)
+            .filter(|(nx, ny)| world.tiles[world.idx(*nx, *ny)].lake_id == Some(lake_id))
+            .count();
+        let entry = counts.entry(lake_id).or_insert((0, 0));
+        entry.0 += 1;
+        if edge_neighbors <= 1 {
+            entry.1 += 1;
+        }
+    }
+    for (area, exposed) in counts.into_values() {
+        if area < 6 {
+            continue;
+        }
+        let fraction = exposed as f32 / area as f32;
+        assert!(fraction < 0.28, "lake too filamentary: area={area} fraction={fraction}");
+    }
+}
+
 fn longest_same_direction_run(world: &worldgen::World) -> usize {
     let mut longest = 0;
     for (idx, tile) in world.tiles.iter().enumerate() {
@@ -246,6 +370,42 @@ fn longest_same_direction_run(world: &worldgen::World) -> usize {
         while guard < world.tiles.len() {
             let tile = &world.tiles[current];
             if tile.surface != Surface::River {
+                break;
+            }
+            let next = match tile.downstream {
+                Some(next) => next,
+                None => break,
+            };
+            let (x, y) = world.coords(current);
+            let (nx, ny) = world.coords(next);
+            let dir = ((nx as isize - x as isize).signum(), (ny as isize - y as isize).signum());
+            if Some(dir) == current_dir {
+                streak += 1;
+            } else {
+                current_dir = Some(dir);
+                streak = 1;
+            }
+            longest = longest.max(streak);
+            current = next;
+            guard += 1;
+        }
+    }
+    longest
+}
+
+fn longest_same_direction_run_for_threshold(world: &worldgen::World, min_area: f32) -> usize {
+    let mut longest = 0;
+    for (idx, tile) in world.tiles.iter().enumerate() {
+        if tile.surface != Surface::River || tile.contributing_area < min_area {
+            continue;
+        }
+        let mut current = idx;
+        let mut current_dir = None;
+        let mut streak = 0;
+        let mut guard = 0;
+        while guard < world.tiles.len() {
+            let tile = &world.tiles[current];
+            if tile.surface != Surface::River || tile.contributing_area < min_area {
                 break;
             }
             let next = match tile.downstream {

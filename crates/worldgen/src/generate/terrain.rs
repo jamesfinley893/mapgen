@@ -614,21 +614,18 @@ fn local_aspect_on_surface(world: &World, terrain: &[f32], x: usize, y: usize) -
 }
 
 fn normalize_terrain(terrain: &mut [f32], low_q: f32, high_q: f32) {
-    let mut values = terrain.to_vec();
-    values.sort_by(|a, b| a.total_cmp(b));
-    let low_idx = ((values.len().saturating_sub(1)) as f32 * low_q).round() as usize;
-    let high_idx = ((values.len().saturating_sub(1)) as f32 * high_q).round() as usize;
-    let low = values[low_idx.min(values.len() - 1)];
-    let high = values[high_idx.min(values.len() - 1)].max(low + 0.0001);
+    let mut sorted = terrain.to_vec();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let last = sorted.len().saturating_sub(1);
+    let lo_idx = ((last as f32) * low_q).round() as usize;
+    let hi_idx = ((last as f32) * high_q).round() as usize;
+    let lo = sorted[lo_idx.min(last)];
+    let hi = sorted[hi_idx.min(last)].max(lo + 0.0001);
+
     for value in terrain.iter_mut() {
-        let normalized = ((*value - low) / (high - low)).clamp(0.0, 1.0);
-        let redistributed = if normalized > 0.78 {
-            0.78 + ((normalized - 0.78) / 0.22).powf(1.55) * 0.13
-        } else if normalized > 0.56 {
-            0.56 + ((normalized - 0.56) / 0.22).powf(1.18) * 0.22
-        } else {
-            normalized.powf(0.96) * 0.56 / 0.56f32.powf(0.96)
-        };
-        *value = redistributed.clamp(0.0, 1.0);
+        let mapped = ((*value - lo) / (hi - lo)).clamp(0.0, 1.0);
+        let compressed = smoothstep(0.0, 1.0, mapped).powf(1.04);
+        let top_tail = smoothstep(0.72, 1.0, compressed);
+        *value = (compressed - top_tail * 0.09).clamp(0.0, 1.0);
     }
 }
