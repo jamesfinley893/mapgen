@@ -1,0 +1,10 @@
+[package]
+name = "mapgen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap.workspace = true
+serde_json.workspace = true
+worldgen = { path = "../worldgen" }
