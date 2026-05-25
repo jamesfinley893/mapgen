@@ -3,8 +3,8 @@ use noise::OpenSimplex;
 use crate::World;
 
 use super::util::{
-    direction_vector, hash01, latitude_factor, neighbor_distance, normalize, octave_noise,
-    ridge_noise, smoothstep,
+    direction_vector, hash01, latitude_factor, local_aspect_on_values, neighbor_distance,
+    normalize, octave_noise, ridge_noise, sample_seed_field, smoothstep,
 };
 use super::EROSION_STEPS;
 
@@ -465,6 +465,13 @@ fn simulate_erosion_flow(world: &World, terrain: &[f32]) -> ErosionFlow {
         let (x, y) = world.coords(idx);
         let current = terrain[idx];
         let aspect = local_aspect_on_surface(world, terrain, x, y);
+        let routing_noise = routing_field_vector(world.seed, x, y, 20, 1);
+        let routing_noise_strength = 0.09;
+        let preferred = normalize((
+            aspect.0 * (1.0 - routing_noise_strength) + routing_noise.0 * routing_noise_strength,
+            aspect.1 * (1.0 - routing_noise_strength) + routing_noise.1 * routing_noise_strength,
+        ));
+        let opportunity = sample_seed_field(world.seed, x, y, 24, 0xA11E_0001);
         let mut best = None;
         let mut best_score = f32::MIN;
         for (nx, ny) in world.neighbors8(x, y) {
@@ -475,13 +482,21 @@ fn simulate_erosion_flow(world: &World, terrain: &[f32]) -> ErosionFlow {
                 continue;
             }
             let dir = direction_vector((x, y), (nx, ny)).unwrap_or((0.0, 0.0));
-            let alignment = dir.0 * aspect.0 + dir.1 * aspect.1;
-            let score =
-                drop / distance + alignment * 0.02 - if distance > 1.0 { 0.004 } else { 0.0 };
+            let alignment = dir.0 * preferred.0 + dir.1 * preferred.1;
+            let cross_flow = dir.0 * -preferred.1 + dir.1 * preferred.0;
+            let slope = drop / distance;
+            let meander = if slope < 0.04 {
+                let signed = sample_seed_field(world.seed, x, y, 18, 0xA11E_0002) * 2.0 - 1.0;
+                cross_flow * signed * (0.045 * (1.0 - slope / 0.04))
+            } else {
+                0.0
+            };
+            let clustering = (opportunity - 0.5) * (0.018 + slope.min(0.03));
+            let score = slope + alignment * 0.045 + meander + clustering - if distance > 1.0 { 0.0015 } else { 0.0 };
             if score > best_score {
                 best_score = score;
                 best = Some(nidx);
-                local_slope[idx] = drop / distance;
+                local_slope[idx] = slope;
             }
         }
         downstream[idx] = best;
@@ -514,10 +529,13 @@ fn simulate_erosion_flow(world: &World, terrain: &[f32]) -> ErosionFlow {
         let conf = flow_confinement(world, terrain, idx, next);
         let discharge = contributing_area[idx].max(1.0).ln();
         let slope = local_slope[idx];
+        let (x, y) = world.coords(idx);
+        let tributary_opportunity = sample_seed_field(world.seed, x, y, 28, 0xA11E_0101);
         confinement[idx] = conf;
         valley_scale[idx] = smoothstep(3.1, 5.7, discharge)
             * (1.0 - smoothstep(0.045, 0.17, slope))
-            * (0.58 + (1.0 - conf) * 0.42);
+            * (0.54 + (1.0 - conf) * 0.46)
+            * (0.84 + tributary_opportunity * 0.22);
         transport_capacity[idx] =
             (contributing_area[idx].max(1.0).ln().powf(1.28) * slope.max(0.0008).sqrt()) * 0.9;
     }
@@ -528,8 +546,10 @@ fn simulate_erosion_flow(world: &World, terrain: &[f32]) -> ErosionFlow {
         }
         let slope = local_slope[idx];
         let discharge = contributing_area[idx].max(1.0).ln();
+        let (x, y) = world.coords(idx);
+        let tributary_opportunity = sample_seed_field(world.seed, x, y, 28, 0xA11E_0101);
         let local_supply = (0.015 + slope * 0.22 + valley_scale[idx] * 0.06)
-            * (0.45 + discharge * 0.12)
+            * (0.40 + discharge * 0.13 + (tributary_opportunity - 0.5) * 0.08)
             * (0.75 + confinement[idx] * 0.35);
         let incoming = sediment_flux[idx] + local_supply;
         let capacity = transport_capacity[idx];
@@ -601,16 +621,12 @@ fn flow_confinement(world: &World, terrain: &[f32], idx: usize, next: usize) -> 
 }
 
 fn local_aspect_on_surface(world: &World, terrain: &[f32], x: usize, y: usize) -> (f32, f32) {
-    let sample = |sx: isize, sy: isize| -> f32 {
-        let cx = sx.clamp(0, world.width.saturating_sub(1) as isize) as usize;
-        let cy = sy.clamp(0, world.height.saturating_sub(1) as isize) as usize;
-        terrain[world.idx(cx, cy)]
-    };
-    let x = x as isize;
-    let y = y as isize;
-    let dx = sample(x + 1, y) - sample(x - 1, y);
-    let dy = sample(x, y + 1) - sample(x, y - 1);
-    normalize((-dx, -dy))
+    local_aspect_on_values(terrain, world.width, world.height, x, y)
+}
+
+fn routing_field_vector(seed: u64, x: usize, y: usize, cell_size: usize, channel: u64) -> (f32, f32) {
+    let angle = sample_seed_field(seed, x, y, cell_size, channel) * std::f32::consts::TAU;
+    (angle.cos(), angle.sin())
 }
 
 fn normalize_terrain(terrain: &mut [f32], low_q: f32, high_q: f32) {

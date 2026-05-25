@@ -101,3 +101,51 @@ pub(super) fn local_aspect(world: &World, x: usize, y: usize) -> (f32, f32) {
     let dy = sample(x, y + 1) - sample(x, y - 1);
     normalize((-dx, -dy))
 }
+
+pub(super) fn local_aspect_on_values(
+    values: &[f32],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+) -> (f32, f32) {
+    let sample = |sx: isize, sy: isize| -> f32 {
+        let cx = sx.clamp(0, width.saturating_sub(1) as isize) as usize;
+        let cy = sy.clamp(0, height.saturating_sub(1) as isize) as usize;
+        values[cy * width + cx]
+    };
+    let x = x as isize;
+    let y = y as isize;
+    let dx = sample(x + 1, y) - sample(x - 1, y);
+    let dy = sample(x, y + 1) - sample(x, y - 1);
+    normalize((-dx, -dy))
+}
+
+pub(super) fn sample_seed_field(
+    seed: u64,
+    x: usize,
+    y: usize,
+    cell_size: usize,
+    channel: u64,
+) -> f32 {
+    let cell = cell_size.max(1) as f32;
+    let fx = x as f32 / cell;
+    let fy = y as f32 / cell;
+    let x0 = fx.floor() as usize;
+    let y0 = fy.floor() as usize;
+    let tx = fx - x0 as f32;
+    let ty = fy - y0 as f32;
+    let x1 = x0 + 1;
+    let y1 = y0 + 1;
+
+    let v00 = hash01(seed.wrapping_add(channel), x0, y0);
+    let v10 = hash01(seed.wrapping_add(channel), x1, y0);
+    let v01 = hash01(seed.wrapping_add(channel), x0, y1);
+    let v11 = hash01(seed.wrapping_add(channel), x1, y1);
+
+    let sx = smoothstep(0.0, 1.0, tx);
+    let sy = smoothstep(0.0, 1.0, ty);
+    let ix0 = v00 + (v10 - v00) * sx;
+    let ix1 = v01 + (v11 - v01) * sx;
+    (ix0 + (ix1 - ix0) * sy).clamp(0.0, 1.0)
+}

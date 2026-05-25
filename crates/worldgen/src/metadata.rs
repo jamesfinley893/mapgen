@@ -21,6 +21,9 @@ pub struct WorldMetadata {
     pub max_river_discharge: f32,
     pub river_band_counts: [usize; 3],
     pub longest_trunk_length: usize,
+    pub trunk_straight_run_ratio: f32,
+    pub tributary_spacing_variance: f32,
+    pub mountain_exit_irregularity_score: f32,
     pub confined_trunk_fraction: f32,
     pub average_trunk_confinement: f32,
     pub highest_elevation: f32,
@@ -89,6 +92,9 @@ pub fn build_metadata(world: &World, config: &WorldConfig) -> WorldMetadata {
     biome_counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
     let (confined_trunk_fraction, average_trunk_confinement) =
         trunk_confinement_stats(world, thresholds.1);
+    let trunk_straight_run_ratio = trunk_straight_run_ratio(world, thresholds.1);
+    let tributary_spacing_variance = tributary_spacing_variance(world, thresholds.1, thresholds.0);
+    let mountain_exit_irregularity_score = mountain_exit_irregularity_score(world);
 
     WorldMetadata {
         seed: world.seed,
@@ -108,6 +114,9 @@ pub fn build_metadata(world: &World, config: &WorldConfig) -> WorldMetadata {
         max_river_discharge,
         river_band_counts,
         longest_trunk_length: longest_trunk_length(world, thresholds.1),
+        trunk_straight_run_ratio,
+        tributary_spacing_variance,
+        mountain_exit_irregularity_score,
         confined_trunk_fraction,
         average_trunk_confinement,
         highest_elevation,
@@ -183,6 +192,161 @@ fn trunk_confinement_stats(world: &World, trunk_threshold: f32) -> (f32, f32) {
     }
 }
 
+fn trunk_straight_run_ratio(world: &World, trunk_threshold: f32) -> f32 {
+    let mut total = 0_usize;
+    let mut straight = 0_usize;
+
+    for (idx, tile) in world.tiles.iter().enumerate() {
+        if tile.surface != Surface::River || tile.contributing_area < trunk_threshold {
+            continue;
+        }
+        let Some(next) = tile.downstream else {
+            continue;
+        };
+        if world.tiles[next].surface != Surface::River
+            || world.tiles[next].contributing_area < trunk_threshold
+        {
+            continue;
+        }
+        let Some(next2) = world.tiles[next].downstream else {
+            continue;
+        };
+        if world.tiles[next2].surface != Surface::River {
+            continue;
+        }
+        total += 1;
+        if direction(world, idx, next) == direction(world, next, next2) {
+            straight += 1;
+        }
+    }
+
+    if total == 0 {
+        0.0
+    } else {
+        straight as f32 / total as f32
+    }
+}
+
+fn tributary_spacing_variance(world: &World, trunk_threshold: f32, stream_threshold: f32) -> f32 {
+    let mut upstream = vec![Vec::new(); world.tiles.len()];
+    for (idx, tile) in world.tiles.iter().enumerate() {
+        if let Some(next) = tile.downstream {
+            upstream[next].push(idx);
+        }
+    }
+
+    let mut intervals = Vec::new();
+    for (idx, tile) in world.tiles.iter().enumerate() {
+        if tile.surface != Surface::River || tile.contributing_area < trunk_threshold {
+            continue;
+        }
+        let upstream_trunk = upstream[idx]
+            .iter()
+            .filter(|&&source| {
+                let source_tile = &world.tiles[source];
+                source_tile.surface == Surface::River && source_tile.contributing_area >= trunk_threshold
+            })
+            .count();
+        if upstream_trunk != 0 {
+            continue;
+        }
+        let mut current = idx;
+        let mut since_junction = 0_usize;
+        let mut guard = 0;
+        while guard < world.tiles.len() {
+            let tile = &world.tiles[current];
+            if tile.surface != Surface::River || tile.contributing_area < trunk_threshold {
+                break;
+            }
+            let major_inputs = upstream[current]
+                .iter()
+                .filter(|&&source| {
+                    let source_tile = &world.tiles[source];
+                    source_tile.surface == Surface::River && source_tile.contributing_area >= stream_threshold
+                })
+                .count();
+            if major_inputs >= 2 {
+                intervals.push(since_junction as f32);
+                since_junction = 0;
+            } else {
+                since_junction += 1;
+            }
+            let Some(next) = tile.downstream else {
+                break;
+            };
+            current = next;
+            guard += 1;
+        }
+    }
+
+    if intervals.len() < 2 {
+        0.0
+    } else {
+        let mean = intervals.iter().sum::<f32>() / intervals.len() as f32;
+        intervals
+            .iter()
+            .map(|interval| {
+                let delta = interval - mean;
+                delta * delta
+            })
+            .sum::<f32>()
+            / intervals.len() as f32
+    }
+}
+
+fn mountain_exit_irregularity_score(world: &World) -> f32 {
+    let mut exits = 0_usize;
+    let mut total_score = 0.0_f32;
+
+    for (idx, tile) in world.tiles.iter().enumerate() {
+        if tile.surface != Surface::River || !matches!(tile.biome, Biome::Alpine | Biome::Foothills) {
+            continue;
+        }
+        let Some(next) = tile.downstream else {
+            continue;
+        };
+        if matches!(world.tiles[next].biome, Biome::Alpine | Biome::Foothills) {
+            continue;
+        }
+        exits += 1;
+        let mut current = idx;
+        let mut previous_dir = None;
+        let mut bends = 0_usize;
+        let mut steps = 0_usize;
+        let mut guard = 0;
+        while guard < 6 {
+            let tile = &world.tiles[current];
+            if tile.surface != Surface::River {
+                break;
+            }
+            let Some(next) = tile.downstream else {
+                break;
+            };
+            let dir = direction(world, current, next);
+            if previous_dir.is_some() && previous_dir != Some(dir) {
+                bends += 1;
+            }
+            previous_dir = Some(dir);
+            steps += 1;
+            if !matches!(world.tiles[next].biome, Biome::Alpine | Biome::Foothills) {
+                current = next;
+            } else {
+                break;
+            }
+            guard += 1;
+        }
+        if steps > 0 {
+            total_score += bends as f32 / steps as f32;
+        }
+    }
+
+    if exits == 0 {
+        0.0
+    } else {
+        total_score / exits as f32
+    }
+}
+
 fn local_trunk_confinement(world: &World, idx: usize, next: usize) -> f32 {
     let (x, y) = world.coords(idx);
     let (nx, ny) = world.coords(next);
@@ -217,6 +381,15 @@ fn local_trunk_confinement(world: &World, idx: usize, next: usize) -> f32 {
         let avg_rise = rise / weight_sum;
         ((avg_rise - 0.015) / (0.13 - 0.015)).clamp(0.0, 1.0)
     }
+}
+
+fn direction(world: &World, idx: usize, next: usize) -> (isize, isize) {
+    let (x, y) = world.coords(idx);
+    let (nx, ny) = world.coords(next);
+    (
+        (nx as isize - x as isize).signum(),
+        (ny as isize - y as isize).signum(),
+    )
 }
 
 fn largest_biome_region(world: &World, biome: Biome) -> usize {

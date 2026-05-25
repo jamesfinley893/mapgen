@@ -3,7 +3,10 @@ use std::collections::{BinaryHeap, HashMap, VecDeque};
 
 use crate::{Surface, World};
 
-use super::util::{direction_vector, hash01, local_aspect, neighbor_distance};
+use super::util::{
+    direction_vector, hash01, local_aspect, local_aspect_on_values, neighbor_distance, normalize,
+    sample_seed_field, smoothstep,
+};
 use super::HYDRO_EPSILON;
 
 pub(super) struct HydrologyState {
@@ -39,6 +42,15 @@ struct LakeData {
     lake_id: Vec<Option<u32>>,
     water_level: Vec<Option<f32>>,
     lake_count: u32,
+}
+
+#[derive(Clone, Copy)]
+struct RoutingCandidate {
+    next: usize,
+    score: f32,
+    slope: f32,
+    direction: (isize, isize),
+    mountain_front: f32,
 }
 
 impl PartialEq for QueueCell {
@@ -376,122 +388,349 @@ fn build_downstream(
         if ocean[idx] {
             continue;
         }
-        let (x, y) = world.coords(idx);
-        let current_hydro = conditioning.hydro_elevation[idx];
-        let current_raw = world.tiles[idx].raw_elevation;
-        let aspect = local_aspect(world, x, y);
-        let persistence = conditioning.parent[idx].and_then(|parent| {
-            let (px, py) = world.coords(parent);
-            direction_vector((x, y), (px, py))
-        });
-        let mut best = conditioning.parent[idx];
-        let mut best_score = conditioning
-            .parent[idx]
-            .map(|parent| {
-                candidate_score(
-                    world,
-                    idx,
-                    parent,
-                    current_hydro,
-                    current_raw,
-                    aspect,
-                    persistence,
-                    conditioning,
-                    true,
-                )
-            })
-            .unwrap_or(f32::MIN);
-
-        for (nx, ny) in world.neighbors8(x, y) {
-            let nidx = world.idx(nx, ny);
-            if lake_id[idx].is_some() && lake_id[idx] == lake_id[nidx] {
-                continue;
-            }
-            let neighbor_hydro = conditioning.hydro_elevation[nidx];
-            if neighbor_hydro > current_hydro + HYDRO_EPSILON {
-                continue;
-            }
-            let is_flat_or_equal = (neighbor_hydro - current_hydro).abs() <= HYDRO_EPSILON;
-            if is_flat_or_equal && conditioning.rank[nidx] >= conditioning.rank[idx] {
-                continue;
-            }
-            let score = candidate_score(
-                world,
-                idx,
-                nidx,
-                current_hydro,
-                current_raw,
-                aspect,
-                persistence,
-                conditioning,
-                nidx == conditioning.parent[idx].unwrap_or(usize::MAX),
-            );
-            if score > best_score {
-                best_score = score;
-                best = Some(nidx);
-            }
-        }
-        downstream[idx] = best;
+        downstream[idx] = routing_candidates(world, idx, conditioning, lake_id)
+            .first()
+            .map(|candidate| candidate.next);
     }
+
+    reduce_directional_bias(world, ocean, conditioning, lake_id, &mut downstream);
+    perturb_mountain_exits(world, ocean, conditioning, lake_id, &mut downstream);
 
     downstream
 }
 
-fn candidate_score(
+fn routing_candidates(
     world: &World,
     idx: usize,
-    next: usize,
-    current_hydro: f32,
-    current_raw: f32,
-    aspect: (f32, f32),
-    persistence: Option<(f32, f32)>,
     conditioning: &ConditioningState,
-    is_parent: bool,
-) -> f32 {
+    lake_id: &[Option<u32>],
+) -> Vec<RoutingCandidate> {
+    let (x, y) = world.coords(idx);
+    let current_hydro = conditioning.hydro_elevation[idx];
+    let current_raw = world.tiles[idx].raw_elevation;
+    let raw_aspect = local_aspect(world, x, y);
+    let hydro_aspect = local_aspect_on_values(
+        &conditioning.hydro_elevation,
+        world.width,
+        world.height,
+        x,
+        y,
+    );
+    let perturb_angle = (sample_seed_field(world.seed, x, y, 18, 0xD1F1_0101) - 0.5) * 0.9;
+    let rotated = rotate_vector(hydro_aspect, perturb_angle);
+    let preferred = normalize((
+        hydro_aspect.0 * 0.72 + raw_aspect.0 * 0.20 + rotated.0 * 0.08,
+        hydro_aspect.1 * 0.72 + raw_aspect.1 * 0.20 + rotated.1 * 0.08,
+    ));
+    let persistence = conditioning.parent[idx].and_then(|parent| {
+        let (px, py) = world.coords(parent);
+        direction_vector((x, y), (px, py))
+    });
+    let tributary_opportunity = sample_seed_field(world.seed, x, y, 22, 0xD1F1_0202);
+    let mountain_front = mountain_front_factor(world, idx);
+    let lowland_opening = lowland_opening_factor(world, idx);
+    let mut candidates = Vec::with_capacity(8);
+
+    for (nx, ny) in world.neighbors8(x, y) {
+        let next = world.idx(nx, ny);
+        if lake_id[idx].is_some() && lake_id[idx] == lake_id[next] {
+            continue;
+        }
+        let neighbor_hydro = conditioning.hydro_elevation[next];
+        if neighbor_hydro > current_hydro + HYDRO_EPSILON {
+            continue;
+        }
+        let is_flat_or_equal = (neighbor_hydro - current_hydro).abs() <= HYDRO_EPSILON;
+        if is_flat_or_equal && conditioning.rank[next] >= conditioning.rank[idx] {
+            continue;
+        }
+
+        let distance = neighbor_distance(x, y, nx, ny);
+        let dir = direction_vector((x, y), (nx, ny)).unwrap_or((0.0, 0.0));
+        let hydro_drop = (current_hydro - conditioning.hydro_elevation[next]).max(0.0);
+        let raw_drop = (current_raw - world.tiles[next].raw_elevation).max(-0.08);
+        let slope = hydro_drop / distance;
+        let raw_slope = raw_drop / distance;
+        let alignment = dir.0 * preferred.0 + dir.1 * preferred.1;
+        let aspect_cross = dir.0 * -preferred.1 + dir.1 * preferred.0;
+        let persistence_bonus = persistence
+            .map(|prev| (dir.0 * prev.0 + dir.1 * prev.1).max(-0.5))
+            .unwrap_or(0.0);
+        let flat_bonus = if hydro_drop <= HYDRO_EPSILON {
+            raw_slope.max(0.0) * 2.1 + alignment * 0.15
+        } else {
+            0.0
+        };
+        let meander_bonus = if slope < 0.03 {
+            let signed_bias = hash01(world.seed.wrapping_add(211), idx, next) * 2.0 - 1.0;
+            aspect_cross * signed_bias * (0.16 * (1.0 - (slope / 0.03).clamp(0.0, 1.0)))
+        } else {
+            0.0
+        };
+        let anisotropy_penalty = if slope < 0.022 {
+            let cardinal = if dir.0.abs() > 0.92 || dir.1.abs() > 0.92 {
+                1.0
+            } else {
+                0.0
+            };
+            let diagonal = if dir.0.abs() > 0.65 && dir.1.abs() > 0.65 {
+                1.0
+            } else {
+                0.0
+            };
+            cardinal * (0.06 + lowland_opening * 0.03) + diagonal * 0.035
+        } else {
+            0.0
+        };
+        let spacing_bonus = (tributary_opportunity - 0.5) * (0.30 + lowland_opening * 0.14);
+        let mountain_exit_bonus = if mountain_front > 0.0 {
+            let exit_noise = sample_seed_field(world.seed, x, y, 14, 0xD1F1_0303) * 2.0 - 1.0;
+            let lateral_preference = aspect_cross * exit_noise;
+            lateral_preference * 0.28 * mountain_front
+        } else {
+            0.0
+        };
+        let parent_bonus = if Some(next) == conditioning.parent[idx] {
+            0.02
+        } else {
+            0.0
+        };
+        let score = slope * 9.4
+            + raw_slope.max(0.0) * 2.8
+            + alignment * 1.05
+            + persistence_bonus * 0.12
+            + flat_bonus
+            + meander_bonus
+            + spacing_bonus
+            + mountain_exit_bonus
+            + parent_bonus
+            - anisotropy_penalty;
+        candidates.push(RoutingCandidate {
+            next,
+            score,
+            slope,
+            direction: (
+                (nx as isize - x as isize).signum(),
+                (ny as isize - y as isize).signum(),
+            ),
+            mountain_front,
+        });
+    }
+
+    candidates.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.next.cmp(&b.next)));
+    candidates
+}
+
+fn reduce_directional_bias(
+    world: &World,
+    ocean: &[bool],
+    conditioning: &ConditioningState,
+    lake_id: &[Option<u32>],
+    downstream: &mut [Option<usize>],
+) {
+    let mut order: Vec<_> = (0..world.tiles.len()).collect();
+    order.sort_by(|a, b| {
+        conditioning.hydro_elevation[*b]
+            .total_cmp(&conditioning.hydro_elevation[*a])
+            .then_with(|| conditioning.rank[*b].cmp(&conditioning.rank[*a]))
+    });
+
+    for _ in 0..3 {
+        for idx in order.iter().copied() {
+            if ocean[idx] || downstream[idx].is_none() || !is_run_start(world, downstream, idx) {
+                continue;
+            }
+            let segment = same_direction_segment(world, downstream, idx);
+            let slope = local_downstream_slope(world, conditioning, downstream, idx);
+            let limit = if slope < 0.012 {
+                4
+            } else if slope < 0.03 {
+                5
+            } else {
+                6
+            };
+            if segment.len() < limit {
+                continue;
+            }
+            let target = segment[segment.len() / 2];
+            let target_slope = local_downstream_slope(world, conditioning, downstream, target);
+            let current = downstream[target].unwrap_or(usize::MAX);
+            let candidates = routing_candidates(world, target, conditioning, lake_id);
+            let current_score = candidates
+                .iter()
+                .find(|candidate| candidate.next == current)
+                .map(|candidate| candidate.score)
+                .unwrap_or(f32::MIN);
+            if let Some(alternative) = candidates.into_iter().find(|candidate| {
+                candidate.next != current
+                    && candidate.direction != direction_for(world, target, current)
+                    && candidate.score
+                        >= current_score - (0.24 + (0.03 - target_slope.min(0.03)) * 4.5)
+            }) {
+                downstream[target] = Some(alternative.next);
+            }
+        }
+    }
+}
+
+fn perturb_mountain_exits(
+    world: &World,
+    ocean: &[bool],
+    conditioning: &ConditioningState,
+    lake_id: &[Option<u32>],
+    downstream: &mut [Option<usize>],
+) {
+    for idx in 0..world.tiles.len() {
+        if ocean[idx] || downstream[idx].is_none() {
+            continue;
+        }
+        let candidates = routing_candidates(world, idx, conditioning, lake_id);
+        let Some(current) = downstream[idx] else {
+            continue;
+        };
+        let Some(best) = candidates.iter().find(|candidate| candidate.next == current) else {
+            continue;
+        };
+        let best_mountain_front = best.mountain_front;
+        let best_slope = best.slope;
+        let best_score = best.score;
+        if best_mountain_front < 0.34 || best_slope > 0.06 {
+            continue;
+        }
+        let current_dir = direction_for(world, idx, current);
+        if let Some(alternative) = candidates.into_iter().find(|candidate| {
+            candidate.next != current
+                && candidate.direction != current_dir
+                && candidate.score >= best_score - (0.24 + best_mountain_front * 0.08)
+        }) {
+            downstream[idx] = Some(alternative.next);
+        }
+    }
+}
+
+fn direction_for(world: &World, idx: usize, next: usize) -> (isize, isize) {
     let (x, y) = world.coords(idx);
     let (nx, ny) = world.coords(next);
-    let distance = neighbor_distance(x, y, nx, ny);
-    let dir = direction_vector((x, y), (nx, ny)).unwrap_or((0.0, 0.0));
-    let hydro_drop = (current_hydro - conditioning.hydro_elevation[next]).max(0.0);
-    let raw_drop = (current_raw - world.tiles[next].raw_elevation).max(-0.08);
-    let slope = hydro_drop / distance;
-    let raw_slope = raw_drop / distance;
-    let alignment = dir.0 * aspect.0 + dir.1 * aspect.1;
-    let persistence_bonus = persistence
-        .map(|prev| (dir.0 * prev.0 + dir.1 * prev.1).max(-0.5))
-        .unwrap_or(0.0);
-    let diagonal_penalty = if distance > 1.0 {
-        if hydro_drop <= HYDRO_EPSILON {
-            0.32
-        } else if slope < 0.012 {
-            0.16
-        } else {
-            0.02
-        }
-    } else {
-        0.0
-    };
-    let flat_bonus = if hydro_drop <= HYDRO_EPSILON {
-        raw_slope.max(0.0) * 2.2 + alignment * 0.08
-    } else {
-        0.0
-    };
-    let meander_bonus = if slope < 0.028 {
-        let signed_bias = hash01(world.seed.wrapping_add(211), idx, next) * 2.0 - 1.0;
-        let cross_flow = dir.0 * -aspect.1 + dir.1 * aspect.0;
-        cross_flow * signed_bias * (0.125 * (1.0 - (slope / 0.028).clamp(0.0, 1.0)))
-    } else {
-        0.0
-    };
+    (
+        (nx as isize - x as isize).signum(),
+        (ny as isize - y as isize).signum(),
+    )
+}
 
-    slope * 10.0
-        + raw_slope.max(0.0) * 3.0
-        + alignment * 0.35
-        + persistence_bonus * 0.04
-        + flat_bonus
-        + meander_bonus
-        + if is_parent { 0.03 } else { 0.0 }
-        - diagonal_penalty
+fn same_direction_segment(world: &World, downstream: &[Option<usize>], start: usize) -> Vec<usize> {
+    let mut current = start;
+    let mut direction = None;
+    let mut segment = Vec::new();
+    let mut guard = 0;
+
+    while guard < world.tiles.len() {
+        let Some(next) = downstream[current] else {
+            break;
+        };
+        let dir = direction_for(world, current, next);
+        if Some(dir) == direction {
+            segment.push(current);
+        } else if direction.is_none() {
+            direction = Some(dir);
+            segment.push(current);
+        } else {
+            break;
+        }
+        current = next;
+        guard += 1;
+    }
+
+    segment
+}
+
+fn is_run_start(world: &World, downstream: &[Option<usize>], idx: usize) -> bool {
+    let Some(next) = downstream[idx] else {
+        return false;
+    };
+    let (x, y) = world.coords(idx);
+    let current_dir = direction_for(world, idx, next);
+    for (nx, ny) in world.neighbors8(x, y) {
+        let nidx = world.idx(nx, ny);
+        if downstream[nidx] == Some(idx) && direction_for(world, nidx, idx) == current_dir {
+            return false;
+        }
+    }
+    true
+}
+
+fn local_downstream_slope(
+    world: &World,
+    conditioning: &ConditioningState,
+    downstream: &[Option<usize>],
+    idx: usize,
+) -> f32 {
+    let Some(next) = downstream[idx] else {
+        return 0.0;
+    };
+    let (x, y) = world.coords(idx);
+    let (nx, ny) = world.coords(next);
+    (conditioning.hydro_elevation[idx] - conditioning.hydro_elevation[next]).max(0.0)
+        / neighbor_distance(x, y, nx, ny)
+}
+
+fn rotate_vector(v: (f32, f32), angle: f32) -> (f32, f32) {
+    let (s, c) = angle.sin_cos();
+    (v.0 * c - v.1 * s, v.0 * s + v.1 * c)
+}
+
+fn local_relief(world: &World, idx: usize, radius: isize) -> f32 {
+    let (x, y) = world.coords(idx);
+    let current = world.tiles[idx].raw_elevation;
+    let mut rise = 0.0_f32;
+    let mut count = 0.0_f32;
+
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+            let nx = x as isize + dx;
+            let ny = y as isize + dy;
+            if !world.in_bounds(nx, ny) {
+                continue;
+            }
+            let nidx = world.idx(nx as usize, ny as usize);
+            rise += (world.tiles[nidx].raw_elevation - current).abs();
+            count += 1.0;
+        }
+    }
+
+    if count <= f32::EPSILON {
+        0.0
+    } else {
+        rise / count
+    }
+}
+
+fn mountain_front_factor(world: &World, idx: usize) -> f32 {
+    let current = world.tiles[idx].raw_elevation;
+    let relief = local_relief(world, idx, 2);
+    let highland = smoothstep(world.sea_level + 0.12, world.sea_level + 0.34, current);
+    let relief_factor = smoothstep(0.02, 0.11, relief);
+    let mut downstream_opening = 0.0_f32;
+    let (x, y) = world.coords(idx);
+    for (nx, ny) in world.neighbors8(x, y) {
+        let nidx = world.idx(nx, ny);
+        let drop = (current - world.tiles[nidx].raw_elevation).max(0.0);
+        let relief_gap = (relief - local_relief(world, nidx, 2)).max(0.0);
+        downstream_opening = downstream_opening.max(
+            smoothstep(0.02, 0.12, drop) * smoothstep(0.0, 0.05, relief_gap),
+        );
+    }
+    (highland * relief_factor * downstream_opening).clamp(0.0, 1.0)
+}
+
+fn lowland_opening_factor(world: &World, idx: usize) -> f32 {
+    let current = world.tiles[idx].raw_elevation;
+    let relief = local_relief(world, idx, 2);
+    let lowland = 1.0 - smoothstep(world.sea_level + 0.10, world.sea_level + 0.26, current);
+    let relief_soft = 1.0 - smoothstep(0.025, 0.09, relief);
+    (lowland * relief_soft).clamp(0.0, 1.0)
 }
 
 fn break_downstream_cycles(downstream: &mut [Option<usize>], parent: &[Option<usize>], ocean: &[bool]) {
@@ -613,7 +852,12 @@ fn classify_surfaces(
             surfaces[idx] = Surface::Ocean;
         } else if lake_id[idx].is_some() {
             surfaces[idx] = Surface::Lake;
-        } else if contributing_area[idx] >= thresholds.stream {
+        } else if contributing_area[idx]
+            >= thresholds.stream
+                * (0.82
+                    + (1.0 - sample_seed_field(world.seed, idx % world.width, idx / world.width, 22, 0xD1F1_0404))
+                        * 0.42)
+        {
             surfaces[idx] = Surface::River;
         }
     }
