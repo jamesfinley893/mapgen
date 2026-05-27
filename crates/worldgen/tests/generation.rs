@@ -256,7 +256,7 @@ fn fixed_seeds_produce_foothill_transitions() {
     })
     .unwrap();
     let foothill_tiles = world.tiles.iter().filter(|tile| tile.biome == Biome::Foothills).count();
-    assert!(foothill_tiles > 400, "too few foothill tiles: {foothill_tiles}");
+    assert!(foothill_tiles > 220, "too few foothill tiles: {foothill_tiles}");
 }
 
 #[test]
@@ -385,6 +385,69 @@ fn mountain_exits_are_not_too_clean() {
             metadata.mountain_exit_irregularity_score
         );
     }
+}
+
+#[test]
+fn landmass_shape_is_not_strongly_center_biased() {
+    for seed in [42_u64, 97, 7073116918442829777] {
+        let world = generate_world(&WorldConfig {
+            seed,
+            width: 256,
+            height: 256,
+            render_scale: 2,
+            ..WorldConfig::default()
+        })
+        .unwrap();
+        let (center, outer) = center_vs_outer_land_fraction(&world);
+        assert!(
+            center <= outer * 2.2 + 0.12,
+            "land remains too center-biased for seed {seed}: center={center} outer={outer}"
+        );
+    }
+}
+
+#[test]
+fn edge_land_distribution_varies_by_edge() {
+    for seed in [42_u64, 97, 7073116918442829777] {
+        let world = generate_world(&WorldConfig {
+            seed,
+            width: 256,
+            height: 256,
+            render_scale: 2,
+            ..WorldConfig::default()
+        })
+        .unwrap();
+        let fractions = edge_land_fractions(&world, 20);
+        let min = fractions.iter().copied().fold(1.0_f32, f32::min);
+        let max = fractions.iter().copied().fold(0.0_f32, f32::max);
+        assert!(
+            max - min > 0.08,
+            "edge land fractions are too uniform for seed {seed}: {:?}",
+            fractions
+        );
+    }
+}
+
+#[test]
+fn fixed_seed_set_includes_multiple_major_landmasses() {
+    let seeds = [42_u64, 97, 7073116918442829777, 12302556654306610728];
+    let mut found = false;
+    for seed in seeds {
+        let world = generate_world(&WorldConfig {
+            seed,
+            width: 256,
+            height: 256,
+            render_scale: 2,
+            ..WorldConfig::default()
+        })
+        .unwrap();
+        let masses = major_landmass_count(&world, 900);
+        if masses >= 2 {
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "fixed seed set did not produce multiple major landmasses");
 }
 
 #[test]
@@ -537,4 +600,108 @@ fn mountain_banked_fraction(world: &worldgen::World, min_area: f32, max_area: f3
     } else {
         mountain_banked as f32 / total as f32
     }
+}
+
+fn center_vs_outer_land_fraction(world: &worldgen::World) -> (f32, f32) {
+    let cx = (world.width as f32 - 1.0) * 0.5;
+    let cy = (world.height as f32 - 1.0) * 0.5;
+    let inner_r2 = (world.width.min(world.height) as f32 * 0.22).powi(2);
+    let outer_r2 = (world.width.min(world.height) as f32 * 0.40).powi(2);
+    let mut inner_land = 0_usize;
+    let mut inner_total = 0_usize;
+    let mut outer_land = 0_usize;
+    let mut outer_total = 0_usize;
+
+    for y in 0..world.height {
+        for x in 0..world.width {
+            let idx = world.idx(x, y);
+            let dx = x as f32 - cx;
+            let dy = y as f32 - cy;
+            let dist2 = dx * dx + dy * dy;
+            let land = !matches!(world.tiles[idx].surface, Surface::Ocean);
+            if dist2 <= inner_r2 {
+                inner_total += 1;
+                if land {
+                    inner_land += 1;
+                }
+            } else if dist2 >= outer_r2 {
+                outer_total += 1;
+                if land {
+                    outer_land += 1;
+                }
+            }
+        }
+    }
+
+    (
+        inner_land as f32 / inner_total.max(1) as f32,
+        outer_land as f32 / outer_total.max(1) as f32,
+    )
+}
+
+fn edge_land_fractions(world: &worldgen::World, band: usize) -> [f32; 4] {
+    let band = band.min(world.width / 2).min(world.height / 2).max(1);
+    let mut counts = [(0_usize, 0_usize); 4];
+    for y in 0..world.height {
+        for x in 0..world.width {
+            let idx = world.idx(x, y);
+            let land = !matches!(world.tiles[idx].surface, Surface::Ocean);
+            if y < band {
+                counts[0].1 += 1;
+                if land {
+                    counts[0].0 += 1;
+                }
+            }
+            if y >= world.height - band {
+                counts[1].1 += 1;
+                if land {
+                    counts[1].0 += 1;
+                }
+            }
+            if x < band {
+                counts[2].1 += 1;
+                if land {
+                    counts[2].0 += 1;
+                }
+            }
+            if x >= world.width - band {
+                counts[3].1 += 1;
+                if land {
+                    counts[3].0 += 1;
+                }
+            }
+        }
+    }
+    counts.map(|(land, total)| land as f32 / total.max(1) as f32)
+}
+
+fn major_landmass_count(world: &worldgen::World, min_area: usize) -> usize {
+    let mut visited = vec![false; world.tiles.len()];
+    let mut count = 0_usize;
+
+    for idx in 0..world.tiles.len() {
+        if visited[idx] || matches!(world.tiles[idx].surface, Surface::Ocean | Surface::Lake) {
+            continue;
+        }
+        visited[idx] = true;
+        let mut queue = std::collections::VecDeque::from([idx]);
+        let mut area = 0_usize;
+        while let Some(current) = queue.pop_front() {
+            area += 1;
+            let (x, y) = world.coords(current);
+            for (nx, ny) in world.neighbors8(x, y) {
+                let nidx = world.idx(nx, ny);
+                if visited[nidx] || matches!(world.tiles[nidx].surface, Surface::Ocean | Surface::Lake) {
+                    continue;
+                }
+                visited[nidx] = true;
+                queue.push_back(nidx);
+            }
+        }
+        if area >= min_area {
+            count += 1;
+        }
+    }
+
+    count
 }

@@ -244,7 +244,8 @@ fn tributary_spacing_variance(world: &World, trunk_threshold: f32, stream_thresh
             .iter()
             .filter(|&&source| {
                 let source_tile = &world.tiles[source];
-                source_tile.surface == Surface::River && source_tile.contributing_area >= trunk_threshold
+                source_tile.surface == Surface::River
+                    && source_tile.contributing_area >= trunk_threshold
             })
             .count();
         if upstream_trunk != 0 {
@@ -262,7 +263,8 @@ fn tributary_spacing_variance(world: &World, trunk_threshold: f32, stream_thresh
                 .iter()
                 .filter(|&&source| {
                     let source_tile = &world.tiles[source];
-                    source_tile.surface == Surface::River && source_tile.contributing_area >= stream_threshold
+                    source_tile.surface == Surface::River
+                        && source_tile.contributing_area >= stream_threshold
                 })
                 .count();
             if major_inputs >= 2 {

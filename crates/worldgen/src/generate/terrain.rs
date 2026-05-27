@@ -28,6 +28,42 @@ struct OrogenSample {
     basin_bias: f32,
 }
 
+#[derive(Clone, Copy)]
+struct ContinentalFields {
+    support: f32,
+    interior: f32,
+    seaway_cut: f32,
+    ocean_basin: f32,
+    major_secondary_balance: f32,
+}
+
+// Precomputed per-lobe parameters (seed-only, not tile-dependent).
+struct PreparedLobe {
+    cx: f32,
+    cy: f32,
+    sin_a: f32,
+    cos_a: f32,
+    rx: f32,
+    ry: f32,
+    strength: f32,
+}
+
+struct PreparedCut {
+    cx: f32,
+    cy: f32,
+    sin_a: f32,
+    cos_a: f32,
+    width: f32,
+    extent: f32,
+    strength: f32,
+}
+
+struct ContinentalConfig {
+    land_lobes: Vec<PreparedLobe>,
+    basins: Vec<PreparedLobe>,
+    seaways: Vec<PreparedCut>,
+}
+
 struct ErosionFlow {
     downstream: Vec<Option<usize>>,
     contributing_area: Vec<f32>,
@@ -43,6 +79,7 @@ struct ErosionFlow {
 
 pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridge: &OpenSimplex) {
     let plates = generate_plates(world);
+    let continental_config = build_continental_config(world.seed);
     let mut basement = vec![0.0_f32; world.tiles.len()];
     let mut axial_uplift = vec![0.0_f32; world.tiles.len()];
     let mut shoulder_uplift = vec![0.0_f32; world.tiles.len()];
@@ -55,7 +92,8 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
     for y in 0..world.height {
         for x in 0..world.width {
             let idx = world.idx(x, y);
-            let sample = sample_tectonic_elevation(world, base, ridge, &plates, x, y);
+            let sample =
+                sample_tectonic_elevation(world, base, ridge, &plates, &continental_config, x, y);
             basement[idx] = sample.basement;
             axial_uplift[idx] = sample.axial_uplift;
             shoulder_uplift[idx] = sample.shoulder_uplift;
@@ -313,6 +351,7 @@ fn sample_tectonic_elevation(
     base: &OpenSimplex,
     ridge: &OpenSimplex,
     plates: &[Plate],
+    cfg: &ContinentalConfig,
     x: usize,
     y: usize,
 ) -> OrogenSample {
@@ -320,6 +359,7 @@ fn sample_tectonic_elevation(
     let yf = y as f32 / world.height as f32;
     let xf64 = xf as f64;
     let yf64 = yf as f64;
+    let continental = sample_continental_fields(cfg, xf, yf);
 
     let continent = octave_noise(base, xf64 * 1.15, yf64 * 1.15, 5, 0.53, 2.0);
     let shelves = octave_noise(base, xf64 * 2.4 + 11.0, yf64 * 2.4 - 7.0, 3, 0.55, 2.0);
@@ -335,14 +375,30 @@ fn sample_tectonic_elevation(
         octave_noise(base, xf64 * 1.9 + 37.0, yf64 * 1.9 - 15.0, 3, 0.5, 2.0);
     let plain_bands =
         octave_noise(base, xf64 * 1.25 - 41.0, yf64 * 1.25 + 33.0, 3, 0.54, 2.0);
+    let shelf_break = octave_noise(base, xf64 * 0.78 - 13.0, yf64 * 0.78 + 17.0, 2, 0.5, 2.0);
+    let margin_variation = octave_noise(base, xf64 * 1.6 + 51.0, yf64 * 1.6 - 27.0, 3, 0.55, 2.0);
 
-    let dx = xf - 0.5;
-    let dy = yf - 0.5;
-    let radial = (dx * dx + dy * dy).sqrt();
-    let edge_falloff = smoothstep(0.34, 0.78, radial);
-    let continent_mask =
-        (continent * 0.72 + shelves * 0.18 + craton * 0.16 - edge_falloff * 0.42)
-            .clamp(0.0, 1.0);
+    // Noise provides the broad-scale organic continent texture; lobe support shifts
+    // which noise regions become land without replacing the noise signal entirely.
+    let continental_density = (continental.support * 0.36
+        + continent * 0.40
+        + shelves * 0.10
+        + craton * 0.12
+        - continental.ocean_basin * 0.18
+        - continental.seaway_cut * 0.14
+        + continental.major_secondary_balance * 0.04)
+        .clamp(0.0, 1.0);
+    let continental_margin = (continental.support * 0.42
+        + shelf_break * 0.20
+        + margin_variation * 0.16
+        - continental.ocean_basin * 0.18
+        - continental.seaway_cut * 0.14)
+        .clamp(0.0, 1.0);
+    let continent_mask = (continental_density * 0.72
+        + continental_margin * 0.12
+        + continental.interior * 0.10
+        + plain_bands * 0.06)
+        .clamp(0.0, 1.0);
 
     let tectonics = sample_uplift_field(plates, xf, yf);
     let land_mask = smoothstep(0.38, 0.72, continent_mask);
@@ -380,10 +436,12 @@ fn sample_tectonic_elevation(
         .clamp(0.0, 1.0);
     let craton_stability = (smoothstep(0.48, 0.84, craton)
         * smoothstep(0.34, 0.74, plain_bands)
+        * (0.58 + continental.interior * 0.42)
         * (1.0 - boundary_mid * 0.75)
         * land_mask)
         .clamp(0.0, 1.0);
     let basin_bias = (smoothstep(0.44, 0.82, basin_noise)
+        * (0.78 + continental.seaway_cut * 0.34 + continental.ocean_basin * 0.18)
         * (0.45 + (1.0 - boundary_narrow) * 0.4)
         * land_mask)
         .clamp(0.0, 1.0);
@@ -392,8 +450,10 @@ fn sample_tectonic_elevation(
         + plains * 0.12
         + craton * 0.16
         + plain_bands * 0.08
+        + continental.interior * 0.08
         - basin_bias * 0.10
-        - edge_falloff * 0.12)
+        - continental.ocean_basin * 0.10
+        - continental.seaway_cut * 0.08)
         .clamp(0.0, 1.0);
 
     OrogenSample {
@@ -406,6 +466,129 @@ fn sample_tectonic_elevation(
         craton_stability,
         basin_bias,
     }
+}
+
+fn build_continental_config(seed: u64) -> ContinentalConfig {
+    let land_count = 3 + (seed as usize % 3);
+    let basin_count = 2 + (seed.wrapping_mul(3) as usize % 3);
+    let seaway_count = 1 + (seed.wrapping_mul(5) as usize % 2);
+
+    let mut land_lobes = Vec::with_capacity(land_count);
+    for i in 0..land_count {
+        let cx = hash01(seed.wrapping_add(0xC011_1000), i * 7 + 1, 0) * 1.8 - 0.4;
+        let cy = hash01(seed.wrapping_add(0xC011_2000), i * 11 + 3, 0) * 1.8 - 0.4;
+        let angle =
+            hash01(seed.wrapping_add(0xC011_3000), i * 13 + 5, 0) * std::f32::consts::TAU;
+        let rx = 0.20 + hash01(seed.wrapping_add(0xC011_4000), i * 17 + 7, 0) * 0.30;
+        let ry = 0.16 + hash01(seed.wrapping_add(0xC011_5000), i * 19 + 9, 0) * 0.26;
+        let strength = 0.60 + hash01(seed.wrapping_add(0xC011_6000), i * 23 + 11, 0) * 0.34;
+        let (sin_a, cos_a) = angle.sin_cos();
+        land_lobes.push(PreparedLobe { cx, cy, sin_a, cos_a, rx, ry, strength });
+    }
+
+    let mut basins = Vec::with_capacity(basin_count);
+    for i in 0..basin_count {
+        let cx = hash01(seed.wrapping_add(0xB451_1000), i * 7 + 2, 0) * 1.8 - 0.4;
+        let cy = hash01(seed.wrapping_add(0xB451_2000), i * 11 + 4, 0) * 1.8 - 0.4;
+        let angle =
+            hash01(seed.wrapping_add(0xB451_3000), i * 13 + 6, 0) * std::f32::consts::TAU;
+        let rx = 0.18 + hash01(seed.wrapping_add(0xB451_4000), i * 17 + 8, 0) * 0.24;
+        let ry = 0.14 + hash01(seed.wrapping_add(0xB451_5000), i * 19 + 10, 0) * 0.22;
+        let strength = 0.55 + hash01(seed.wrapping_add(0xB451_6000), i * 23 + 12, 0) * 0.35;
+        let (sin_a, cos_a) = angle.sin_cos();
+        basins.push(PreparedLobe { cx, cy, sin_a, cos_a, rx, ry, strength });
+    }
+
+    let mut seaways = Vec::with_capacity(seaway_count);
+    for i in 0..seaway_count {
+        let cx = hash01(seed.wrapping_add(0x5EA0_1000), i * 5 + 1, 0) * 1.4 - 0.2;
+        let cy = hash01(seed.wrapping_add(0x5EA0_2000), i * 9 + 3, 0) * 1.4 - 0.2;
+        let angle =
+            hash01(seed.wrapping_add(0x5EA0_3000), i * 13 + 5, 0) * std::f32::consts::TAU;
+        let width = 0.035 + hash01(seed.wrapping_add(0x5EA0_4000), i * 17 + 7, 0) * 0.09;
+        let extent = 0.28 + hash01(seed.wrapping_add(0x5EA0_5000), i * 19 + 9, 0) * 0.34;
+        let strength = 0.55 + hash01(seed.wrapping_add(0x5EA0_6000), i * 23 + 11, 0) * 0.30;
+        let (sin_a, cos_a) = angle.sin_cos();
+        seaways.push(PreparedCut { cx, cy, sin_a, cos_a, width, extent, strength });
+    }
+
+    ContinentalConfig { land_lobes, basins, seaways }
+}
+
+fn sample_continental_fields(cfg: &ContinentalConfig, xf: f32, yf: f32) -> ContinentalFields {
+    let land_count = cfg.land_lobes.len();
+
+    let mut strongest = 0.0_f32;
+    let mut second = 0.0_f32;
+    let mut land_sum = 0.0_f32;
+    let mut interior_sum = 0.0_f32;
+    for lobe in &cfg.land_lobes {
+        let lobe_val = eval_lobe(lobe, xf, yf, 1.0) * lobe.strength;
+        let core_val = eval_lobe(lobe, xf, yf, 0.62) * lobe.strength;
+        land_sum += lobe_val;
+        interior_sum += core_val;
+        if lobe_val > strongest {
+            second = strongest;
+            strongest = lobe_val;
+        } else if lobe_val > second {
+            second = lobe_val;
+        }
+    }
+
+    let mut basin_max = 0.0_f32;
+    for basin in &cfg.basins {
+        let val = eval_lobe(basin, xf, yf, 1.0) * basin.strength;
+        basin_max = basin_max.max(val);
+    }
+
+    let mut seaway_cut = 0.0_f32;
+    for cut in &cfg.seaways {
+        seaway_cut = seaway_cut.max(eval_seaway(cut, xf, yf) * cut.strength);
+    }
+
+    let dominant = strongest.clamp(0.0, 1.0);
+    let secondary = second.clamp(0.0, 1.0);
+    let blended = (dominant * 0.60
+        + secondary * 0.24
+        + (land_sum / land_count as f32).min(1.0) * 0.22
+        - basin_max * 0.22
+        - seaway_cut * 0.18)
+        .clamp(0.0, 1.0);
+    let support = (blended + (dominant - secondary).max(0.0) * 0.08).clamp(0.0, 1.0);
+    let interior =
+        ((interior_sum / land_count as f32) * 0.72 + dominant * 0.22 - basin_max * 0.10)
+            .clamp(0.0, 1.0);
+
+    ContinentalFields {
+        support,
+        interior,
+        seaway_cut,
+        ocean_basin: basin_max,
+        major_secondary_balance: (secondary - dominant * 0.55).max(0.0),
+    }
+}
+
+// Evaluates a rotated elliptical influence field at (xf, yf).
+// `scale` shrinks both radii (1.0 = full lobe, 0.62 = inner core).
+fn eval_lobe(lobe: &PreparedLobe, xf: f32, yf: f32, scale: f32) -> f32 {
+    let dx = xf - lobe.cx;
+    let dy = yf - lobe.cy;
+    let lx = dx * lobe.cos_a + dy * lobe.sin_a;
+    let ly = -dx * lobe.sin_a + dy * lobe.cos_a;
+    let rx = lobe.rx * scale;
+    let ry = lobe.ry * scale;
+    let radius = ((lx / rx).powi(2) + (ly / ry).powi(2)).sqrt();
+    (1.0 - smoothstep(0.48, 1.40, radius)).clamp(0.0, 1.0)
+}
+
+fn eval_seaway(cut: &PreparedCut, xf: f32, yf: f32) -> f32 {
+    let dx = xf - cut.cx;
+    let dy = yf - cut.cy;
+    let along = dx * cut.cos_a + dy * cut.sin_a;
+    let perp = -dx * cut.sin_a + dy * cut.cos_a;
+    let width_term = 1.0 - smoothstep(cut.width * 0.55, cut.width, perp.abs());
+    let extent_term = 1.0 - smoothstep(cut.extent * 0.82, cut.extent, along.abs());
+    (width_term * extent_term).clamp(0.0, 1.0)
 }
 
 fn sample_uplift_field(plates: &[Plate], xf: f32, yf: f32) -> f32 {
@@ -472,6 +655,8 @@ fn simulate_erosion_flow(world: &World, terrain: &[f32]) -> ErosionFlow {
             aspect.1 * (1.0 - routing_noise_strength) + routing_noise.1 * routing_noise_strength,
         ));
         let opportunity = sample_seed_field(world.seed, x, y, 24, 0xA11E_0001);
+        // Meander signed direction depends only on (x, y), not on which neighbor is evaluated.
+        let meander_signed = sample_seed_field(world.seed, x, y, 18, 0xA11E_0002) * 2.0 - 1.0;
         let mut best = None;
         let mut best_score = f32::MIN;
         for (nx, ny) in world.neighbors8(x, y) {
@@ -486,8 +671,7 @@ fn simulate_erosion_flow(world: &World, terrain: &[f32]) -> ErosionFlow {
             let cross_flow = dir.0 * -preferred.1 + dir.1 * preferred.0;
             let slope = drop / distance;
             let meander = if slope < 0.04 {
-                let signed = sample_seed_field(world.seed, x, y, 18, 0xA11E_0002) * 2.0 - 1.0;
-                cross_flow * signed * (0.045 * (1.0 - slope / 0.04))
+                cross_flow * meander_signed * (0.045 * (1.0 - slope / 0.04))
             } else {
                 0.0
             };
