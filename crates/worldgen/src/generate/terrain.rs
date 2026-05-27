@@ -80,6 +80,31 @@ struct ErosionFlow {
 pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridge: &OpenSimplex) {
     let plates = generate_plates(world);
     let continental_config = build_continental_config(world.seed);
+    let n = world.tiles.len();
+    let routing_noise_field: Vec<(f32, f32)> = (0..n)
+        .map(|idx| {
+            let (x, y) = world.coords(idx);
+            routing_field_vector(world.seed, x, y, 20, 1)
+        })
+        .collect();
+    let flow_opportunity: Vec<f32> = (0..n)
+        .map(|idx| {
+            let (x, y) = world.coords(idx);
+            sample_seed_field(world.seed, x, y, 24, 0xA11E_0001)
+        })
+        .collect();
+    let trib_opportunity: Vec<f32> = (0..n)
+        .map(|idx| {
+            let (x, y) = world.coords(idx);
+            sample_seed_field(world.seed, x, y, 28, 0xA11E_0101)
+        })
+        .collect();
+    let meander_field: Vec<f32> = (0..n)
+        .map(|idx| {
+            let (x, y) = world.coords(idx);
+            sample_seed_field(world.seed, x, y, 18, 0xA11E_0002) * 2.0 - 1.0
+        })
+        .collect();
     let mut basement = vec![0.0_f32; world.tiles.len()];
     let mut axial_uplift = vec![0.0_f32; world.tiles.len()];
     let mut shoulder_uplift = vec![0.0_f32; world.tiles.len()];
@@ -131,7 +156,14 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
             terrain[idx] += uplift_add * elevation_damping.max(0.18) * core_boost;
         }
 
-        let flow = simulate_erosion_flow(world, &terrain);
+        let flow = simulate_erosion_flow(
+            world,
+            &terrain,
+            &routing_noise_field,
+            &flow_opportunity,
+            &trib_opportunity,
+            &meander_field,
+        );
         let mut next = terrain.clone();
         let mut lateral_erosion = vec![0.0_f32; terrain.len()];
 
@@ -630,7 +662,14 @@ fn wrap_delta(delta: f32) -> f32 {
     }
 }
 
-fn simulate_erosion_flow(world: &World, terrain: &[f32]) -> ErosionFlow {
+fn simulate_erosion_flow(
+    world: &World,
+    terrain: &[f32],
+    routing_noise_field: &[(f32, f32)],
+    flow_opportunity: &[f32],
+    trib_opportunity: &[f32],
+    meander_field: &[f32],
+) -> ErosionFlow {
     let mut is_ocean = vec![false; terrain.len()];
     for idx in 0..terrain.len() {
         is_ocean[idx] = terrain[idx] <= world.sea_level;
@@ -648,15 +687,14 @@ fn simulate_erosion_flow(world: &World, terrain: &[f32]) -> ErosionFlow {
         let (x, y) = world.coords(idx);
         let current = terrain[idx];
         let aspect = local_aspect_on_surface(world, terrain, x, y);
-        let routing_noise = routing_field_vector(world.seed, x, y, 20, 1);
+        let routing_noise = routing_noise_field[idx];
         let routing_noise_strength = 0.09;
         let preferred = normalize((
             aspect.0 * (1.0 - routing_noise_strength) + routing_noise.0 * routing_noise_strength,
             aspect.1 * (1.0 - routing_noise_strength) + routing_noise.1 * routing_noise_strength,
         ));
-        let opportunity = sample_seed_field(world.seed, x, y, 24, 0xA11E_0001);
-        // Meander signed direction depends only on (x, y), not on which neighbor is evaluated.
-        let meander_signed = sample_seed_field(world.seed, x, y, 18, 0xA11E_0002) * 2.0 - 1.0;
+        let opportunity = flow_opportunity[idx];
+        let meander_signed = meander_field[idx];
         let mut best = None;
         let mut best_score = f32::MIN;
         for (nx, ny) in world.neighbors8(x, y) {
@@ -713,8 +751,7 @@ fn simulate_erosion_flow(world: &World, terrain: &[f32]) -> ErosionFlow {
         let conf = flow_confinement(world, terrain, idx, next);
         let discharge = contributing_area[idx].max(1.0).ln();
         let slope = local_slope[idx];
-        let (x, y) = world.coords(idx);
-        let tributary_opportunity = sample_seed_field(world.seed, x, y, 28, 0xA11E_0101);
+        let tributary_opportunity = trib_opportunity[idx];
         confinement[idx] = conf;
         valley_scale[idx] = smoothstep(3.1, 5.7, discharge)
             * (1.0 - smoothstep(0.045, 0.17, slope))
@@ -730,8 +767,7 @@ fn simulate_erosion_flow(world: &World, terrain: &[f32]) -> ErosionFlow {
         }
         let slope = local_slope[idx];
         let discharge = contributing_area[idx].max(1.0).ln();
-        let (x, y) = world.coords(idx);
-        let tributary_opportunity = sample_seed_field(world.seed, x, y, 28, 0xA11E_0101);
+        let tributary_opportunity = trib_opportunity[idx];
         let local_supply = (0.015 + slope * 0.22 + valley_scale[idx] * 0.06)
             * (0.40 + discharge * 0.13 + (tributary_opportunity - 0.5) * 0.08)
             * (0.75 + confinement[idx] * 0.35);
