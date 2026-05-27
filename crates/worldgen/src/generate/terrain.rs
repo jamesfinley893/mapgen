@@ -358,6 +358,16 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
     for (tile, value) in world.tiles.iter_mut().zip(terrain.into_iter()) {
         tile.raw_elevation = value;
     }
+
+    // If the lobes happen to land mostly off-screen the config sea_level can leave
+    // less than 25% of tiles as land. Lower sea_level just enough to clear that floor;
+    // seeds with normal coverage are unaffected.
+    const MIN_LAND_FRAC: f32 = 0.25;
+    let mut elevs: Vec<f32> = world.tiles.iter().map(|t| t.raw_elevation).collect();
+    elevs.sort_by(|a, b| a.total_cmp(b));
+    let threshold_idx = ((elevs.len() as f32 * (1.0 - MIN_LAND_FRAC)) as usize)
+        .min(elevs.len().saturating_sub(1));
+    world.sea_level = world.sea_level.min(elevs[threshold_idx]);
 }
 
 fn generate_plates(world: &World) -> Vec<Plate> {
@@ -507,8 +517,8 @@ fn build_continental_config(seed: u64) -> ContinentalConfig {
 
     let mut land_lobes = Vec::with_capacity(land_count);
     for i in 0..land_count {
-        let cx = hash01(seed.wrapping_add(0xC011_1000), i * 7 + 1, 0) * 1.8 - 0.4;
-        let cy = hash01(seed.wrapping_add(0xC011_2000), i * 11 + 3, 0) * 1.8 - 0.4;
+        let cx = hash01(seed.wrapping_add(0xC011_1000), i * 7 + 1, 0) * 1.4 - 0.2;
+        let cy = hash01(seed.wrapping_add(0xC011_2000), i * 11 + 3, 0) * 1.4 - 0.2;
         let angle =
             hash01(seed.wrapping_add(0xC011_3000), i * 13 + 5, 0) * std::f32::consts::TAU;
         let rx = 0.20 + hash01(seed.wrapping_add(0xC011_4000), i * 17 + 7, 0) * 0.30;
@@ -520,8 +530,8 @@ fn build_continental_config(seed: u64) -> ContinentalConfig {
 
     let mut basins = Vec::with_capacity(basin_count);
     for i in 0..basin_count {
-        let cx = hash01(seed.wrapping_add(0xB451_1000), i * 7 + 2, 0) * 1.8 - 0.4;
-        let cy = hash01(seed.wrapping_add(0xB451_2000), i * 11 + 4, 0) * 1.8 - 0.4;
+        let cx = hash01(seed.wrapping_add(0xB451_1000), i * 7 + 2, 0) * 1.4 - 0.2;
+        let cy = hash01(seed.wrapping_add(0xB451_2000), i * 11 + 4, 0) * 1.4 - 0.2;
         let angle =
             hash01(seed.wrapping_add(0xB451_3000), i * 13 + 6, 0) * std::f32::consts::TAU;
         let rx = 0.18 + hash01(seed.wrapping_add(0xB451_4000), i * 17 + 8, 0) * 0.24;
