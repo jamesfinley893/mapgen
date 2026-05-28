@@ -13,7 +13,7 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
     let height = world.height as u32 * scale;
     let mut image = RgbaImage::new(width, height);
 
-    // Pre-compute hillshade for every tile (including ocean, for use as bilinear corners).
+    // Hillshade computed per tile; bilinear-interpolated at sub-pixel level.
     let hillshade: Vec<f32> = (0..world.tiles.len())
         .map(|idx| {
             let (x, y) = world.coords(idx);
@@ -21,33 +21,27 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
         })
         .collect();
 
+    // Pre-compute land base colors then soften biome-boundary edges.
+    let land_colors = land_base_colors(world);
+    let land_colors = soften_biome_edges(world, &land_colors);
+
     for (idx, tile) in world.tiles.iter().enumerate() {
         let (x, y) = world.coords(idx);
-        let mut color = biome_color(tile.biome);
         let variation = hash01(world.seed, x, y);
 
         if matches!(tile.biome, Biome::Ocean) {
-            let depth = ((world.sea_level - tile.raw_elevation).max(0.0) * 50.0) as i16;
-            color = offset(color, -depth);
-            let near_coast = world
-                .neighbors8(x, y)
-                .any(|(nx, ny)| !matches!(world.tiles[world.idx(nx, ny)].biome, Biome::Ocean));
-            if near_coast {
-                color = offset(color, 34);
-            }
-            draw_tile(&mut image, x as u32, y as u32, scale, color);
+            let depth = (world.sea_level - tile.raw_elevation).max(0.0);
+            let shelf_t = (1.0 - smoothstep(0.0, 0.048, depth)).clamp(0.0, 1.0);
+            let deep_t = smoothstep(0.06, 0.26, depth).clamp(0.0, 1.0);
+            let shelf_color = Rgba([58, 132, 182, 255]);
+            let ocean_color = Rgba([38, 84, 148, 255]);
+            let abyss_color = Rgba([18, 46, 102, 255]);
+            let base = lerp_rgba(lerp_rgba(ocean_color, shelf_color, shelf_t), abyss_color, deep_t);
+            let tex = ((variation - 0.5) * 6.0) as i16;
+            draw_tile(&mut image, x as u32, y as u32, scale, offset(base, tex));
         } else {
-            let elev_shade = ((tile.raw_elevation - world.sea_level) * 22.0) as i16;
-            color = offset(color, elev_shade + ((variation * 8.0) as i16 - 4));
-            // Snow: fades in above a temperature-dependent snow line
-            let snow_line =
-                (world.sea_level + 0.28 + tile.temperature * 0.18).min(world.sea_level + 0.46);
-            let snow = ((tile.raw_elevation - snow_line) / 0.10).clamp(0.0, 1.0);
-            if snow > 0.0 {
-                color = lerp_rgba(color, Rgba([240, 244, 246, 255]), snow);
-            }
             draw_tile_hillshaded(
-                &mut image, &hillshade, world, x as u32, y as u32, scale, color,
+                &mut image, &hillshade, world, x as u32, y as u32, scale, land_colors[idx],
             );
         }
 
@@ -68,14 +62,13 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
         }
 
         if tile.biome == Biome::Coast {
-            draw_coastline(&mut image, x as u32, y as u32, scale);
+            draw_coastline(&mut image, world, idx, scale);
         }
     }
 
     for (idx, tile) in world.tiles.iter().enumerate() {
-        let (x, y) = world.coords(idx);
         if tile.biome == Biome::Lake {
-            draw_lake(&mut image, x as u32, y as u32, scale);
+            draw_lake(&mut image, world, idx, scale);
         }
     }
 
@@ -90,24 +83,173 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
     image
 }
 
+fn land_base_colors(world: &World) -> Vec<Rgba<u8>> {
+    (0..world.tiles.len())
+        .map(|idx| {
+            let tile = &world.tiles[idx];
+            let (x, y) = world.coords(idx);
+            let mut color = biome_color_climatic(tile.biome, tile.temperature, tile.moisture);
+            if !matches!(tile.biome, Biome::Ocean | Biome::Lake) {
+                let variation = hash01(world.seed, x, y);
+                // Medium-scale coherent noise breaks up large uniform biome areas.
+                let regional = sample_noise(world.seed.wrapping_add(0xCAFE_BABE), x, y, 14);
+                let elev_shade = ((tile.raw_elevation - world.sea_level) * 20.0) as i16;
+                let micro = (variation * 12.0) as i16 - 6;
+                let macro_v = ((regional - 0.5) * 10.0) as i16;
+                color = offset(color, elev_shade + micro + macro_v);
+                // Permanent snow line: high enough that only true glaciers/snowfields appear.
+                // Polar lowlands are cold-looking via biome color; no seasonal snow overlay.
+                let snow_line = (world.sea_level + 0.26 + tile.temperature * 0.20)
+                    .min(world.sea_level + 0.46);
+                let snow = ((tile.raw_elevation - snow_line) / 0.10).clamp(0.0, 1.0);
+                if snow > 0.0 {
+                    color = lerp_rgba(color, Rgba([240, 244, 248, 255]), snow);
+                }
+                // Riparian zone: dry biomes adjacent to rivers or lakes get a slight
+                // green push representing water-side vegetation.
+                if matches!(
+                    tile.biome,
+                    Biome::Steppe
+                        | Biome::TemperateGrassland
+                        | Biome::Savanna
+                        | Biome::Desert
+                        | Biome::PolarDesert
+                        | Biome::Tundra
+                        | Biome::Foothills
+                ) {
+                    let near_water = world.neighbors8(x, y).any(|(nx, ny)| {
+                        matches!(
+                            world.tiles[world.idx(nx, ny)].surface,
+                            Surface::River | Surface::Lake
+                        )
+                    });
+                    if near_water {
+                        color = Rgba([
+                            (color[0] as i16 - 5).clamp(0, 255) as u8,
+                            (color[1] as i16 + 8).clamp(0, 255) as u8,
+                            (color[2] as i16 - 4).clamp(0, 255) as u8,
+                            255,
+                        ]);
+                    }
+                }
+            }
+            color
+        })
+        .collect()
+}
+
+// One pass of weighted neighbour blending at biome boundaries.
+// Tiles deep in a biome are unchanged; tiles at edges blend ≈10–30% with neighbours.
+fn soften_biome_edges(world: &World, colors: &[Rgba<u8>]) -> Vec<Rgba<u8>> {
+    let mut out = colors.to_vec();
+    for idx in 0..world.tiles.len() {
+        let my_biome = world.tiles[idx].biome;
+        if matches!(my_biome, Biome::Ocean | Biome::Lake) {
+            continue;
+        }
+        let (x, y) = world.coords(idx);
+        let mut r = colors[idx][0] as f32 * 10.0;
+        let mut g = colors[idx][1] as f32 * 10.0;
+        let mut b = colors[idx][2] as f32 * 10.0;
+        let mut w = 10.0_f32;
+        for (nx, ny) in world.neighbors8(x, y) {
+            let nidx = world.idx(nx, ny);
+            let nb = world.tiles[nidx].biome;
+            if nb == my_biome || matches!(nb, Biome::Ocean | Biome::Lake) {
+                continue;
+            }
+            r += colors[nidx][0] as f32;
+            g += colors[nidx][1] as f32;
+            b += colors[nidx][2] as f32;
+            w += 1.0;
+        }
+        out[idx] = Rgba([(r / w) as u8, (g / w) as u8, (b / w) as u8, 255]);
+    }
+    out
+}
+
+fn biome_color_climatic(biome: Biome, temperature: f32, moisture: f32) -> Rgba<u8> {
+    let base = biome_color(biome);
+    match biome {
+        Biome::Steppe | Biome::TemperateGrassland => {
+            // Drier steppe = warmer/golden; moister = cooler green
+            let dryness = (1.0 - (moisture.clamp(0.15, 0.45) - 0.15) / 0.30).max(0.0);
+            let dr = (dryness * 12.0) as i16;
+            let dg = (dryness * 2.0) as i16;
+            let db = (dryness * 10.0) as i16;
+            Rgba([
+                (base[0] as i16 + dr).clamp(0, 255) as u8,
+                (base[1] as i16 + dg).clamp(0, 255) as u8,
+                (base[2] as i16 - db).clamp(0, 255) as u8,
+                255,
+            ])
+        }
+        Biome::Desert => {
+            // Hot deserts more orange, cooler deserts more grey-brown
+            let heat = ((temperature - 0.4).clamp(0.0, 0.45) / 0.45) as f32;
+            let hr = (heat * 10.0) as i16;
+            Rgba([
+                (base[0] as i16 + hr).clamp(0, 255) as u8,
+                base[1],
+                (base[2] as i16 - hr).clamp(0, 255) as u8,
+                255,
+            ])
+        }
+        Biome::Savanna => {
+            // Dry savanna more golden; moist savanna slightly greener
+            let dry = (1.0 - (moisture.clamp(0.2, 0.4) - 0.2) / 0.2).max(0.0);
+            let dr = (dry * 8.0) as i16;
+            Rgba([
+                (base[0] as i16 + dr).clamp(0, 255) as u8,
+                (base[1] as i16 + dr / 2).clamp(0, 255) as u8,
+                (base[2] as i16 - dr).clamp(0, 255) as u8,
+                255,
+            ])
+        }
+        Biome::BorealForest => {
+            // Cold boreal = darker/denser; warmer margins = slightly lighter
+            let cold = (1.0 - (temperature.clamp(0.12, 0.32) - 0.12) / 0.20).max(0.0);
+            let d = (cold * 7.0) as i16;
+            Rgba([
+                (base[0] as i16 - d).clamp(0, 255) as u8,
+                (base[1] as i16 - d).clamp(0, 255) as u8,
+                (base[2] as i16 - d).clamp(0, 255) as u8,
+                255,
+            ])
+        }
+        Biome::Tundra => {
+            // Wetter tundra = slightly greener; drier = more grey
+            let wet = (moisture.clamp(0.3, 0.7) - 0.3) / 0.4;
+            let g = (wet * 8.0) as i16;
+            Rgba([
+                (base[0] as i16 - g / 2).clamp(0, 255) as u8,
+                (base[1] as i16 + g).clamp(0, 255) as u8,
+                base[2],
+                255,
+            ])
+        }
+        _ => base,
+    }
+}
+
 fn biome_color(biome: Biome) -> Rgba<u8> {
     match biome {
-        Biome::Ocean => Rgba([44, 92, 153, 255]),
-        Biome::Coast => Rgba([198, 192, 131, 255]),
-        Biome::Lake => Rgba([60, 139, 191, 255]),
-        Biome::PolarDesert => Rgba([216, 222, 220, 255]),
-        Biome::Tundra => Rgba([163, 180, 138, 255]),
-        Biome::BorealForest => Rgba([76, 126, 76, 255]),
-        Biome::TemperateGrassland => Rgba([152, 175, 93, 255]),
-        Biome::TemperateForest => Rgba([89, 140, 83, 255]),
-        Biome::Woodland => Rgba([117, 153, 88, 255]),
-        Biome::Foothills => Rgba([138, 151, 116, 255]),
-        Biome::Steppe => Rgba([172, 169, 101, 255]),
-        Biome::Desert => Rgba([214, 195, 132, 255]),
-        Biome::Savanna => Rgba([171, 174, 85, 255]),
-        Biome::TropicalForest => Rgba([65, 147, 78, 255]),
-        Biome::Rainforest => Rgba([42, 122, 58, 255]),
-        Biome::Alpine => Rgba([147, 149, 145, 255]),
+        Biome::Ocean => Rgba([38, 84, 148, 255]),
+        Biome::Coast => Rgba([204, 198, 148, 255]),
+        Biome::Lake => Rgba([62, 148, 204, 255]),
+        Biome::PolarDesert => Rgba([212, 220, 218, 255]),
+        Biome::Tundra => Rgba([148, 168, 126, 255]),
+        Biome::BorealForest => Rgba([64, 112, 68, 255]),
+        Biome::TemperateGrassland => Rgba([158, 184, 90, 255]),
+        Biome::TemperateForest => Rgba([80, 138, 76, 255]),
+        Biome::Woodland => Rgba([106, 150, 78, 255]),
+        Biome::Foothills => Rgba([130, 144, 108, 255]),
+        Biome::Steppe => Rgba([176, 168, 96, 255]),
+        Biome::Desert => Rgba([218, 196, 126, 255]),
+        Biome::Savanna => Rgba([186, 180, 76, 255]),
+        Biome::TropicalForest => Rgba([56, 148, 70, 255]),
+        Biome::Rainforest => Rgba([34, 112, 52, 255]),
+        Biome::Alpine => Rgba([144, 146, 142, 255]),
     }
 }
 
@@ -221,19 +363,39 @@ fn draw_dunes(image: &mut RgbaImage, x: u32, y: u32, scale: u32) {
     }
 }
 
-fn draw_coastline(image: &mut RgbaImage, x: u32, y: u32, scale: u32) {
-    let ox = x * scale;
-    let oy = y * scale;
-    let c = Rgba([233, 225, 166, 255]);
-    for px in 0..scale {
-        image.put_pixel(ox + px, oy, c);
+fn draw_coastline(image: &mut RgbaImage, world: &World, idx: usize, scale: u32) {
+    let (x, y) = world.coords(idx);
+    let ox = (x as u32) * scale;
+    let oy = (y as u32) * scale;
+    let c = Rgba([218, 210, 158, 255]);
+    // Draw the beach line only on sides that face ocean, so it follows the actual shore.
+    for (dx, dy) in [(-1_isize, 0_isize), (1, 0), (0, -1), (0, 1)] {
+        let nx = x as isize + dx;
+        let ny = y as isize + dy;
+        if !world.in_bounds(nx, ny) {
+            continue;
+        }
+        if !matches!(world.tiles[world.idx(nx as usize, ny as usize)].surface, Surface::Ocean) {
+            continue;
+        }
+        match (dx, dy) {
+            (0, -1) => (0..scale).for_each(|px| put_pixel_checked(image, (ox + px) as i32, oy as i32, c)),
+            (0, 1) => (0..scale).for_each(|px| put_pixel_checked(image, (ox + px) as i32, (oy + scale - 1) as i32, c)),
+            (-1, 0) => (0..scale).for_each(|py| put_pixel_checked(image, ox as i32, (oy + py) as i32, c)),
+            (1, 0) => (0..scale).for_each(|py| put_pixel_checked(image, (ox + scale - 1) as i32, (oy + py) as i32, c)),
+            _ => {}
+        }
     }
 }
 
-fn draw_lake(image: &mut RgbaImage, x: u32, y: u32, scale: u32) {
-    let ox = x * scale;
-    let oy = y * scale;
-    let c = Rgba([80, 176, 220, 255]);
+fn draw_lake(image: &mut RgbaImage, world: &World, idx: usize, scale: u32) {
+    let (x, y) = world.coords(idx);
+    let ox = (x as u32) * scale;
+    let oy = (y as u32) * scale;
+    let tile = &world.tiles[idx];
+    let depth = tile.water_level.map(|wl| (wl - tile.raw_elevation).max(0.0)).unwrap_or(0.0);
+    let deep_t = smoothstep(0.0, 0.065, depth);
+    let c = lerp_rgba(Rgba([76, 164, 218, 255]), Rgba([46, 122, 186, 255]), deep_t);
     for py in 1..scale.saturating_sub(1) {
         for px in 1..scale.saturating_sub(1) {
             image.put_pixel(ox + px, oy + py, c);
@@ -294,11 +456,11 @@ fn river_thresholds(world: &World) -> RiverThresholds {
 
 fn river_color(flow: f32, thresholds: RiverThresholds) -> Rgba<u8> {
     if flow > thresholds.trunk {
-        Rgba([49, 132, 201, 255])
+        Rgba([42, 118, 192, 255])
     } else if flow > thresholds.secondary {
-        Rgba([66, 160, 219, 255])
+        Rgba([58, 148, 214, 255])
     } else {
-        Rgba([95, 185, 235, 255])
+        Rgba([88, 176, 228, 255])
     }
 }
 
@@ -317,18 +479,22 @@ fn river_radius_px(
     if tile.channel_order >= 3 || flow >= thresholds.trunk {
         let excess = flow / thresholds.trunk;
         match scale {
-            0 | 1 => i32::from(!steep && (lowland || excess >= 1.45)),
-            2 => i32::from(!steep || excess >= 1.8),
-            3 | 4 => i32::from(!steep && (lowland || excess >= 2.2)) + 1,
+            0 | 1 => i32::from(!steep && (lowland || excess >= 1.3)),
+            2 => 1,
+            3 | 4 => i32::from(!steep && (lowland || excess >= 1.8)) + 1,
             _ => {
                 let width = scale as f32
-                    * (0.66 + (excess.clamp(1.0, 4.0) - 1.0) * 0.10 + f32::from(lowland) * 0.08
-                        - f32::from(steep) * 0.12);
-                ((width.round() as i32) / 2).clamp(1, (scale as i32).max(1))
+                    * (0.72 + (excess.clamp(1.0, 5.0) - 1.0) * 0.10 + f32::from(lowland) * 0.10
+                        - f32::from(steep) * 0.10);
+                ((width.round() as i32) / 2).clamp(1, (scale as i32 * 2).max(2))
             }
         }
     } else if tile.channel_order >= 2 || flow >= thresholds.secondary {
-        i32::from(scale >= 3 && !steep)
+        match scale {
+            0 | 1 => 0,
+            2 | 3 => i32::from(!steep),
+            _ => i32::from(!steep) + i32::from(!steep && lowland),
+        }
     } else {
         0
     }
@@ -421,7 +587,7 @@ fn draw_tile_hillshaded(
                 + h10 * fx * (1.0 - fy)
                 + h01 * (1.0 - fx) * fy
                 + h11 * fx * fy;
-            let color = scale_rgb(base_color, 0.38 + shade * 0.62);
+            let color = scale_rgb(base_color, 0.46 + shade * 0.54);
             image.put_pixel(ox + px, oy + py, color);
         }
     }
@@ -435,16 +601,17 @@ fn compute_hillshade(world: &World, x: usize, y: usize) -> f32 {
     };
     let xi = x as isize;
     let yi = y as isize;
-    // Central-difference gradient in tile space
     let dz_dx = get_elev(xi + 1, yi) - get_elev(xi - 1, yi);
     let dz_dy = get_elev(xi, yi + 1) - get_elev(xi, yi - 1);
-    // Surface normal in (east, up, south) space; z_scale controls perceived steepness
-    let z_scale = 6.0_f32;
+    // Adaptive z_scale: mountains get dramatic relief, plains stay gentle.
+    let elev = get_elev(xi, yi);
+    let height_above_sea = (elev - world.sea_level).max(0.0);
+    let z_scale = 3.5 + height_above_sea * 12.0;
     let nx = -dz_dx * z_scale;
     let ny = 1.0_f32;
     let nz = -dz_dy * z_scale;
     let len = (nx * nx + ny * ny + nz * nz).sqrt().max(1e-6);
-    // Light from NW at 45° elevation: normalize(-1, 1, -1)
+    // Light from NW at 45° elevation
     let inv_sqrt3 = 1.0_f32 / 3.0_f32.sqrt();
     ((nx * (-inv_sqrt3) + ny * inv_sqrt3 + nz * (-inv_sqrt3)) / len).clamp(0.0, 1.0)
 }
@@ -465,6 +632,32 @@ fn lerp_rgba(a: Rgba<u8>, b: Rgba<u8>, t: f32) -> Rgba<u8> {
         ((a[2] as f32 + (b[2] as f32 - a[2] as f32) * t) as u8).min(255),
         255,
     ])
+}
+
+// Bilinearly-interpolated value noise — gives spatially-coherent variation
+// within a biome without needing the generation-side noise functions.
+fn sample_noise(seed: u64, x: usize, y: usize, cell: usize) -> f32 {
+    let cell = cell.max(1);
+    let fx = x as f32 / cell as f32;
+    let fy = y as f32 / cell as f32;
+    let x0 = fx.floor() as usize;
+    let y0 = fy.floor() as usize;
+    let tx = fx - x0 as f32;
+    let ty = fy - y0 as f32;
+    let sx = tx * tx * (3.0 - 2.0 * tx);
+    let sy = ty * ty * (3.0 - 2.0 * ty);
+    let v00 = hash01(seed, x0, y0);
+    let v10 = hash01(seed, x0 + 1, y0);
+    let v01 = hash01(seed, x0, y0 + 1);
+    let v11 = hash01(seed, x0 + 1, y0 + 1);
+    let ix0 = v00 + (v10 - v00) * sx;
+    let ix1 = v01 + (v11 - v01) * sx;
+    ix0 + (ix1 - ix0) * sy
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn hash01(seed: u64, x: usize, y: usize) -> f32 {
