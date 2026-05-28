@@ -129,7 +129,8 @@ pub fn build_metadata(world: &World, config: &WorldConfig) -> WorldMetadata {
 }
 
 fn river_thresholds(world: &World) -> (f32, f32) {
-    let stream = ((world.width * world.height) as f32 * 0.00075).max(12.0);
+    let ws = world.effective_world_size();
+    let stream = (ws * ws * 0.00075).max(12.0);
     (stream * 6.5, stream * 18.0)
 }
 

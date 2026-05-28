@@ -78,31 +78,36 @@ struct ErosionFlow {
 }
 
 pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridge: &OpenSimplex) {
+    let ws = world.effective_world_size();
+    let world_units_x = world.width as f32 / ws;
+    let world_units_y = world.height as f32 / ws;
     let plates = generate_plates(world);
-    let continental_config = build_continental_config(world.seed);
+    let continental_config = build_continental_config(world.seed, world_units_x, world_units_y);
+    // Scale noise cell sizes so texture frequency stays geographically consistent at any resolution.
+    let res_x = (world.width as f32 / ws).max(1.0);
     let n = world.tiles.len();
     let routing_noise_field: Vec<(f32, f32)> = (0..n)
         .map(|idx| {
             let (x, y) = world.coords(idx);
-            routing_field_vector(world.seed, x, y, 20, 1)
+            routing_field_vector(world.seed, x, y, (20.0 * res_x).round().max(1.0) as usize, 1)
         })
         .collect();
     let flow_opportunity: Vec<f32> = (0..n)
         .map(|idx| {
             let (x, y) = world.coords(idx);
-            sample_seed_field(world.seed, x, y, 24, 0xA11E_0001)
+            sample_seed_field(world.seed, x, y, (24.0 * res_x).round().max(1.0) as usize, 0xA11E_0001)
         })
         .collect();
     let trib_opportunity: Vec<f32> = (0..n)
         .map(|idx| {
             let (x, y) = world.coords(idx);
-            sample_seed_field(world.seed, x, y, 28, 0xA11E_0101)
+            sample_seed_field(world.seed, x, y, (28.0 * res_x).round().max(1.0) as usize, 0xA11E_0101)
         })
         .collect();
     let meander_field: Vec<f32> = (0..n)
         .map(|idx| {
             let (x, y) = world.coords(idx);
-            sample_seed_field(world.seed, x, y, 18, 0xA11E_0002) * 2.0 - 1.0
+            sample_seed_field(world.seed, x, y, (18.0 * res_x).round().max(1.0) as usize, 0xA11E_0002) * 2.0 - 1.0
         })
         .collect();
     let mut basement = vec![0.0_f32; world.tiles.len()];
@@ -371,12 +376,18 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
 }
 
 fn generate_plates(world: &World) -> Vec<Plate> {
-    let approx = ((world.width * world.height) as f32 / 18000.0).round() as usize;
-    let plate_count = approx.clamp(8, 18);
+    let ws = world.effective_world_size();
+    let world_units_x = world.width as f32 / ws;
+    let world_units_y = world.height as f32 / ws;
+    let world_area = world_units_x * world_units_y;
+    // Base count for a 1×1 world; scale linearly with geographic area.
+    let base = (ws * ws / 18000.0).round() as usize;
+    let approx = (base as f32 * world_area).round() as usize;
+    let plate_count = approx.clamp(8, 120);
     let mut plates = Vec::with_capacity(plate_count);
     for i in 0..plate_count {
-        let xf = hash01(world.seed.wrapping_add(17), i * 13 + 1, 0);
-        let yf = hash01(world.seed.wrapping_add(29), i * 17 + 3, 0);
+        let xf = hash01(world.seed.wrapping_add(17), i * 13 + 1, 0) * world_units_x;
+        let yf = hash01(world.seed.wrapping_add(29), i * 17 + 3, 0) * world_units_y;
         let angle = hash01(world.seed.wrapping_add(41), i * 19 + 5, 0) * std::f32::consts::TAU;
         plates.push(Plate {
             x: xf,
@@ -397,8 +408,9 @@ fn sample_tectonic_elevation(
     x: usize,
     y: usize,
 ) -> OrogenSample {
-    let xf = x as f32 / world.width as f32;
-    let yf = y as f32 / world.height as f32;
+    let ws = world.effective_world_size();
+    let xf = x as f32 / ws;
+    let yf = y as f32 / ws;
     let xf64 = xf as f64;
     let yf64 = yf as f64;
     let continental = sample_continental_fields(cfg, xf, yf);
@@ -510,15 +522,18 @@ fn sample_tectonic_elevation(
     }
 }
 
-fn build_continental_config(seed: u64) -> ContinentalConfig {
-    let land_count = 3 + (seed as usize % 3);
-    let basin_count = 2 + (seed.wrapping_mul(3) as usize % 3);
-    let seaway_count = 1 + (seed.wrapping_mul(5) as usize % 2);
+fn build_continental_config(seed: u64, world_units_x: f32, world_units_y: f32) -> ContinentalConfig {
+    let world_area = world_units_x * world_units_y;
+    let scale = world_area.sqrt();
+    // For a 1×1 world: 3–5 land lobes, 2–4 basins, 1–2 seaways. Scale counts with world size.
+    let land_count = (3 + (seed as usize % 3)) + (scale * 2.0).floor() as usize;
+    let basin_count = (2 + (seed.wrapping_mul(3) as usize % 3)) + (scale * 1.5).floor() as usize;
+    let seaway_count = (1 + (seed.wrapping_mul(5) as usize % 2)) + (scale * 0.8).floor() as usize;
 
     let mut land_lobes = Vec::with_capacity(land_count);
     for i in 0..land_count {
-        let cx = hash01(seed.wrapping_add(0xC011_1000), i * 7 + 1, 0) * 1.4 - 0.2;
-        let cy = hash01(seed.wrapping_add(0xC011_2000), i * 11 + 3, 0) * 1.4 - 0.2;
+        let cx = hash01(seed.wrapping_add(0xC011_1000), i * 7 + 1, 0) * (world_units_x * 1.4) - world_units_x * 0.2;
+        let cy = hash01(seed.wrapping_add(0xC011_2000), i * 11 + 3, 0) * (world_units_y * 1.4) - world_units_y * 0.2;
         let angle =
             hash01(seed.wrapping_add(0xC011_3000), i * 13 + 5, 0) * std::f32::consts::TAU;
         let rx = 0.20 + hash01(seed.wrapping_add(0xC011_4000), i * 17 + 7, 0) * 0.30;
@@ -530,8 +545,8 @@ fn build_continental_config(seed: u64) -> ContinentalConfig {
 
     let mut basins = Vec::with_capacity(basin_count);
     for i in 0..basin_count {
-        let cx = hash01(seed.wrapping_add(0xB451_1000), i * 7 + 2, 0) * 1.4 - 0.2;
-        let cy = hash01(seed.wrapping_add(0xB451_2000), i * 11 + 4, 0) * 1.4 - 0.2;
+        let cx = hash01(seed.wrapping_add(0xB451_1000), i * 7 + 2, 0) * (world_units_x * 1.4) - world_units_x * 0.2;
+        let cy = hash01(seed.wrapping_add(0xB451_2000), i * 11 + 4, 0) * (world_units_y * 1.4) - world_units_y * 0.2;
         let angle =
             hash01(seed.wrapping_add(0xB451_3000), i * 13 + 6, 0) * std::f32::consts::TAU;
         let rx = 0.18 + hash01(seed.wrapping_add(0xB451_4000), i * 17 + 8, 0) * 0.24;
@@ -543,8 +558,8 @@ fn build_continental_config(seed: u64) -> ContinentalConfig {
 
     let mut seaways = Vec::with_capacity(seaway_count);
     for i in 0..seaway_count {
-        let cx = hash01(seed.wrapping_add(0x5EA0_1000), i * 5 + 1, 0) * 1.4 - 0.2;
-        let cy = hash01(seed.wrapping_add(0x5EA0_2000), i * 9 + 3, 0) * 1.4 - 0.2;
+        let cx = hash01(seed.wrapping_add(0x5EA0_1000), i * 5 + 1, 0) * (world_units_x * 1.4) - world_units_x * 0.2;
+        let cy = hash01(seed.wrapping_add(0x5EA0_2000), i * 9 + 3, 0) * (world_units_y * 1.4) - world_units_y * 0.2;
         let angle =
             hash01(seed.wrapping_add(0x5EA0_3000), i * 13 + 5, 0) * std::f32::consts::TAU;
         let width = 0.035 + hash01(seed.wrapping_add(0x5EA0_4000), i * 17 + 7, 0) * 0.09;
@@ -638,8 +653,8 @@ fn sample_uplift_field(plates: &[Plate], xf: f32, yf: f32) -> f32 {
     let mut second = (usize::MAX, f32::MAX, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
 
     for (i, plate) in plates.iter().enumerate() {
-        let dx = wrap_delta(xf - plate.x);
-        let dy = wrap_delta(yf - plate.y);
+        let dx = xf - plate.x;
+        let dy = yf - plate.y;
         let dist2 = dx * dx + dy * dy;
         if dist2 < best.1 {
             second = best;
@@ -660,16 +675,6 @@ fn sample_uplift_field(plates: &[Plate], xf: f32, yf: f32) -> f32 {
     let orogeny = smoothstep(0.45, 0.92, convergence * 0.9 + shear * 0.18);
 
     boundary * orogeny
-}
-
-fn wrap_delta(delta: f32) -> f32 {
-    if delta > 0.5 {
-        delta - 1.0
-    } else if delta < -0.5 {
-        delta + 1.0
-    } else {
-        delta
-    }
 }
 
 fn simulate_erosion_flow(

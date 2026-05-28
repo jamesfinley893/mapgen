@@ -17,7 +17,7 @@ pub(super) const EROSION_STEPS: usize = 18;
 pub fn generate_world(config: &WorldConfig) -> Result<World, String> {
     config.validate()?;
 
-    let mut world = World::new(config.seed, config.width, config.height, config.sea_level);
+    let mut world = World::new(config.seed, config.width, config.height, config.sea_level, config.world_size);
 
     let base = OpenSimplex::new(config.seed as u32);
     let ridge = OpenSimplex::new(config.seed.wrapping_add(1) as u32);

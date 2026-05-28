@@ -25,14 +25,19 @@ enum Commands {
         width: usize,
         #[arg(long, default_value_t = 384)]
         height: usize,
-        #[arg(long, default_value_t = 4)]
-        scale: u32,
+        /// Render scale (pixels per tile). Defaults to targeting ~1536px on the long axis.
+        #[arg(long)]
+        scale: Option<u32>,
         #[arg(long, default_value_t = 0.52)]
         sea_level: f32,
         #[arg(long, default_value_t = 0.0)]
         temperature_bias: f32,
         #[arg(long, default_value_t = 0.0)]
         moisture_bias: f32,
+        /// Tiles per world unit. 0 or omit = match min(width, height) for a single world unit.
+        /// Set to a fixed value (e.g. 384) to make larger maps cover more geographic area.
+        #[arg(long, default_value_t = 0)]
+        world_size: u32,
         #[arg(long, default_value = "output")]
         out_dir: PathBuf,
     },
@@ -56,9 +61,13 @@ fn run() -> Result<(), String> {
             sea_level,
             temperature_bias,
             moisture_bias,
+            world_size,
             out_dir,
         } => {
             let seed = select_seed(seed);
+            let render_scale = scale.unwrap_or_else(|| {
+                (1536_u32 / width.max(height) as u32).max(1)
+            });
             let config = WorldConfig {
                 seed,
                 width,
@@ -66,12 +75,13 @@ fn run() -> Result<(), String> {
                 sea_level,
                 temperature_bias,
                 moisture_bias,
-                render_scale: scale,
+                render_scale,
+                world_size,
             };
             config.validate()?;
 
             let world = generate_world(&config)?;
-            let image = render_world(&world, RenderConfig { scale });
+            let image = render_world(&world, RenderConfig { scale: render_scale });
             let metadata = build_metadata(&world, &config);
             let run_dir = build_run_output_dir(&out_dir, seed, OffsetDateTime::now_utc())?;
             let png_path = run_dir.join("map.png");

@@ -68,17 +68,28 @@ pub struct World {
     pub width: usize,
     pub height: usize,
     pub sea_level: f32,
+    pub world_size: u32,
     pub tiles: Vec<Tile>,
 }
 
 impl World {
-    pub fn new(seed: u64, width: usize, height: usize, sea_level: f32) -> Self {
+    pub fn new(seed: u64, width: usize, height: usize, sea_level: f32, world_size: u32) -> Self {
         Self {
             seed,
             width,
             height,
             sea_level,
+            world_size,
             tiles: vec![Tile::default(); width * height],
+        }
+    }
+
+    /// Tiles per world unit. Resolves the 0 sentinel to min(width, height).
+    pub fn effective_world_size(&self) -> f32 {
+        if self.world_size == 0 {
+            self.width.min(self.height) as f32
+        } else {
+            self.world_size as f32
         }
     }
 

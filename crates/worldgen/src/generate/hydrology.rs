@@ -214,9 +214,10 @@ fn identify_lakes(
     let mut water_level = vec![None; world.tiles.len()];
     let mut visited = vec![false; world.tiles.len()];
     let mut next_lake_id = 0_u32;
-    let area_threshold = ((world.width * world.height) as f32 * 0.00075).ceil() as usize;
+    let ws = world.effective_world_size();
+    let area_threshold = (ws * ws * 0.00075).ceil() as usize;
     let area_threshold = area_threshold.max(6);
-    let volume_threshold = ((world.width * world.height) as f32 * 0.00011).max(0.06);
+    let volume_threshold = (ws * ws * 0.00011).max(0.06);
     let depth_threshold = 0.018;
 
     for idx in 0..world.tiles.len() {
@@ -948,8 +949,8 @@ pub(super) fn apply_hydrology_to_world(world: &mut World, ocean: &[bool], hydrol
 }
 
 fn river_thresholds(world: &World) -> RiverThresholds {
-    let area = (world.width * world.height) as f32;
-    let stream = (area * 0.00075).max(12.0);
+    let ws = world.effective_world_size();
+    let stream = (ws * ws * 0.00075).max(12.0);
     RiverThresholds {
         stream,
         secondary: stream * 6.5,

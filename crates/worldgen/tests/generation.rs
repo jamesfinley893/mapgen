@@ -298,8 +298,9 @@ fn trunk_rivers_are_less_mountain_confined_than_headwaters() {
         ..WorldConfig::default()
     })
     .unwrap();
-    let stream_threshold = (((world.width * world.height) as f32 * 0.00075).max(12.0)) * 6.5;
-    let trunk_threshold = (((world.width * world.height) as f32 * 0.00075).max(12.0)) * 18.0;
+    let ws = world.effective_world_size();
+    let stream_threshold = ((ws * ws * 0.00075).max(12.0)) * 6.5;
+    let trunk_threshold = ((ws * ws * 0.00075).max(12.0)) * 18.0;
     let headwater = mountain_banked_fraction(&world, stream_threshold, trunk_threshold);
     let trunk = mountain_banked_fraction(&world, trunk_threshold, f32::INFINITY);
     assert!(trunk < 0.42, "trunk rivers still too mountain-confined: {trunk}");
@@ -319,7 +320,8 @@ fn trunk_rivers_avoid_extreme_straight_runs() {
         ..WorldConfig::default()
     })
     .unwrap();
-    let trunk_threshold = (((world.width * world.height) as f32 * 0.00075).max(12.0)) * 18.0;
+    let ws = world.effective_world_size();
+    let trunk_threshold = ((ws * ws * 0.00075).max(12.0)) * 18.0;
     let run = longest_same_direction_run_for_threshold(&world, trunk_threshold);
     assert!(
         run <= 40,
