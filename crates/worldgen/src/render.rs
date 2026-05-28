@@ -592,12 +592,19 @@ fn draw_tile_hillshaded(
     let oy = y * scale;
     let tx = x as usize;
     let ty = y as usize;
+    let center_biome = world.tiles[world.idx(tx, ty)].biome;
+    let h00 = hillshade[world.idx(tx, ty)];
     let get_hs = |cx: usize, cy: usize| -> f32 {
         let cx = cx.min(world.width.saturating_sub(1));
         let cy = cy.min(world.height.saturating_sub(1));
-        hillshade[world.idx(cx, cy)]
+        // Don't interpolate hillshade across biome boundaries — a bright Alpine
+        // face would otherwise bleed into adjacent forest/grassland tiles.
+        if world.tiles[world.idx(cx, cy)].biome != center_biome {
+            h00
+        } else {
+            hillshade[world.idx(cx, cy)]
+        }
     };
-    let h00 = get_hs(tx, ty);
     let h10 = get_hs(tx + 1, ty);
     let h01 = get_hs(tx, ty + 1);
     let h11 = get_hs(tx + 1, ty + 1);
