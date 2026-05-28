@@ -16,17 +16,40 @@ fn biome_for_world_tile(world: &World, idx: usize) -> Biome {
     let proximity = mountain_proximity(world, idx);
     let trunk_river = trunk_river_proximity(world, idx);
     let local_relief = local_relief(world, idx);
+    // River tiles carry inflated climate moisture (they're water bodies), but their
+    // biome should describe the surrounding terrain — the river itself is the blue
+    // line drawn on top. Use neighbor land moisture so the tile blends with its
+    // context rather than forming a visibly distinct green channel.
+    let moisture = if tile.surface == Surface::River {
+        surrounding_land_moisture(world, idx).unwrap_or(tile.moisture)
+    } else {
+        tile.moisture
+    };
     biome_for_tile_with_support(
         tile.surface,
         tile.raw_elevation,
         world.sea_level,
         tile.temperature,
-        tile.moisture,
+        moisture,
         support,
         proximity,
         trunk_river,
         local_relief,
     )
+}
+
+fn surrounding_land_moisture(world: &World, idx: usize) -> Option<f32> {
+    let (x, y) = world.coords(idx);
+    let mut sum = 0.0f32;
+    let mut count = 0u32;
+    for (nx, ny) in world.neighbors8(x, y) {
+        let t = &world.tiles[world.idx(nx, ny)];
+        if matches!(t.surface, Surface::Land | Surface::Coast) {
+            sum += t.moisture;
+            count += 1;
+        }
+    }
+    (count > 0).then(|| sum / count as f32)
 }
 
 fn mountain_support(world: &World, idx: usize) -> f32 {
@@ -197,7 +220,7 @@ fn biome_for_tile_with_support(
             } else {
                 land_biome(
                     temperature,
-                    (moisture + 0.18).clamp(0.0, 1.0),
+                    moisture,
                     elevation,
                     sea_level,
                 )
