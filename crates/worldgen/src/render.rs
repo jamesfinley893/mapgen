@@ -1,5 +1,6 @@
 use image::{Rgba, RgbaImage};
 
+use crate::audit::river_discharge_percentiles;
 use crate::{
     Biome, MountainFeature, Surface, World, mountain_feature_for_tile, permanent_snow_cover,
 };
@@ -105,7 +106,13 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
 fn land_base_colors(world: &World, scale: u32) -> Vec<Rgba<u8>> {
     // Minimum channel_order for riparian influence — matches river_radius_px draw thresholds
     // so the green corridor only appears where a river line is actually rendered.
-    let min_river_order: u8 = if scale <= 1 { 3 } else if scale <= 2 { 2 } else { 1 };
+    let min_river_order: u8 = if scale <= 1 {
+        3
+    } else if scale <= 2 {
+        2
+    } else {
+        1
+    };
     // Keep visual noise blob size roughly constant in pixels across scales.
     let noise_cell = ((56 / scale.max(1)) as usize).clamp(10, 56);
     // Per-tile micro hash: scale down amplitude at scale=1 to avoid salt-and-pepper noise.
@@ -149,8 +156,8 @@ fn land_base_colors(world: &World, scale: u32) -> Vec<Rgba<u8>> {
 
         // Mark land tiles that neighbor any culled river (the riparian fringe).
         let mut is_fringe = vec![false; world.tiles.len()];
-        for idx in 0..world.tiles.len() {
-            if !is_culled[idx] {
+        for (idx, culled) in is_culled.iter().copied().enumerate() {
+            if !culled {
                 continue;
             }
             let (x, y) = world.coords(idx);
@@ -176,8 +183,7 @@ fn land_base_colors(world: &World, scale: u32) -> Vec<Rgba<u8>> {
                 let near_visible = world.neighbors8(x, y).any(|(nx, ny)| {
                     let t = &world.tiles[world.idx(nx, ny)];
                     matches!(t.surface, Surface::Lake)
-                        || (t.surface == Surface::River
-                            && t.channel_order >= min_river_order)
+                        || (t.surface == Surface::River && t.channel_order >= min_river_order)
                 });
                 if near_visible {
                     continue;
@@ -349,7 +355,7 @@ fn biome_color_climatic(biome: Biome, temperature: f32, moisture: f32) -> Rgba<u
         }
         Biome::Desert => {
             // Hot deserts more orange, cooler deserts more grey-brown
-            let heat = ((temperature - 0.4).clamp(0.0, 0.45) / 0.45) as f32;
+            let heat = (temperature - 0.4).clamp(0.0, 0.45) / 0.45;
             let hr = (heat * 10.0) as i16;
             Rgba([
                 (base[0] as i16 + hr).clamp(0, 255) as u8,
@@ -562,7 +568,7 @@ fn draw_hills(image: &mut RgbaImage, x: u32, y: u32, scale: u32) {
                     continue;
                 }
                 let d = (dx / rx).powi(2) + (dy / ry).powi(2);
-                if d >= 0.76 && d <= 1.30 {
+                if (0.76..=1.30).contains(&d) {
                     put_pixel_checked(image, ox as i32 + px as i32, oy as i32 + py as i32, outline);
                 }
             }
@@ -687,22 +693,8 @@ struct RiverThresholds {
 }
 
 fn river_thresholds(world: &World) -> RiverThresholds {
-    let mut discharge: Vec<_> = world
-        .tiles
-        .iter()
-        .filter_map(|tile| (tile.surface == Surface::River).then_some(tile.discharge))
-        .collect();
-    discharge.sort_by(|a, b| a.total_cmp(b));
-    if discharge.is_empty() {
-        return RiverThresholds {
-            secondary: f32::INFINITY,
-            trunk: f32::INFINITY,
-        };
-    }
-    RiverThresholds {
-        secondary: discharge[discharge.len() * 58 / 100],
-        trunk: discharge[discharge.len() * 84 / 100],
-    }
+    let (secondary, trunk) = river_discharge_percentiles(world, 58, 84);
+    RiverThresholds { secondary, trunk }
 }
 
 fn river_color(flow: f32, thresholds: RiverThresholds) -> Rgba<u8> {
@@ -896,18 +888,18 @@ fn compute_hillshade(world: &World, x: usize, y: usize) -> f32 {
 
 fn scale_rgb(color: Rgba<u8>, factor: f32) -> Rgba<u8> {
     Rgba([
-        ((color[0] as f32 * factor) as u8).min(255),
-        ((color[1] as f32 * factor) as u8).min(255),
-        ((color[2] as f32 * factor) as u8).min(255),
+        (color[0] as f32 * factor).clamp(0.0, 255.0) as u8,
+        (color[1] as f32 * factor).clamp(0.0, 255.0) as u8,
+        (color[2] as f32 * factor).clamp(0.0, 255.0) as u8,
         color[3],
     ])
 }
 
 fn lerp_rgba(a: Rgba<u8>, b: Rgba<u8>, t: f32) -> Rgba<u8> {
     Rgba([
-        ((a[0] as f32 + (b[0] as f32 - a[0] as f32) * t) as u8).min(255),
-        ((a[1] as f32 + (b[1] as f32 - a[1] as f32) * t) as u8).min(255),
-        ((a[2] as f32 + (b[2] as f32 - a[2] as f32) * t) as u8).min(255),
+        (a[0] as f32 + (b[0] as f32 - a[0] as f32) * t).clamp(0.0, 255.0) as u8,
+        (a[1] as f32 + (b[1] as f32 - a[1] as f32) * t).clamp(0.0, 255.0) as u8,
+        (a[2] as f32 + (b[2] as f32 - a[2] as f32) * t).clamp(0.0, 255.0) as u8,
         255,
     ])
 }

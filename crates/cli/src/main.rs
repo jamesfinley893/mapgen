@@ -76,13 +76,14 @@ fn run() -> Result<(), String> {
             out_dir,
         } => {
             let seed = select_seed(seed);
+            validate_dimensions(width, height)?;
             // pixels/tile is always derived from the base (unscaled) dimensions so that
             // --scale never changes visual density, only world size.
             let render_scale = (1536_u32 / width.max(height) as u32).clamp(1, 32);
             let (width, height, world_size) = match scale {
                 Some(s) if s > 1 => {
-                    let w = (width * s as usize).min(4096);
-                    let h = (height * s as usize).min(4096);
+                    let w = width.saturating_mul(s as usize).min(4096);
+                    let h = height.saturating_mul(s as usize).min(4096);
                     // If world_size was not set explicitly, fix it to the base tile count
                     // so each tile covers the same geographic area at any scale factor.
                     let ws = if world_size == 0 {
@@ -142,7 +143,17 @@ fn run() -> Result<(), String> {
 }
 
 fn select_seed(seed: Option<u64>) -> u64 {
-    seed.unwrap_or_else(|| random::<u64>())
+    seed.unwrap_or_else(random::<u64>)
+}
+
+fn validate_dimensions(width: usize, height: usize) -> Result<(), String> {
+    if width < 32 || height < 32 {
+        return Err("width and height must be at least 32".into());
+    }
+    if width > 4096 || height > 4096 {
+        return Err("width and height must be at most 4096".into());
+    }
+    Ok(())
 }
 
 fn build_run_output_dir(
@@ -193,5 +204,12 @@ mod tests {
         assert_ne!(a, 0);
         assert_ne!(b, 0);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn validate_dimensions_rejects_out_of_range_values_before_derived_math() {
+        assert!(validate_dimensions(4097, 128).is_err());
+        assert!(validate_dimensions(128, 31).is_err());
+        assert!(validate_dimensions(128, 128).is_ok());
     }
 }

@@ -327,22 +327,36 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
                 + alluvial_fill)
                 .max(0.0);
 
-            if !flow.is_ocean[idx] && valley_scale > 0.02 {
-                if let Some(next_idx) = flow.downstream[idx] {
-                    let (nx, ny) = world.coords(next_idx);
-                    let step_x = (nx as isize - x as isize).signum();
-                    let step_y = (ny as isize - y as isize).signum();
-                    if step_x != 0 || step_y != 0 {
-                        let side_a = (-step_y, step_x);
-                        let side_b = (step_y, -step_x);
-                        let lateral_strength = (valley_scale
-                            * (1.0 - confinement)
-                            * (0.0024 + basin_zone * 0.003 + plain_zone * 0.002))
-                            + (floodplain_scale
-                                * (0.0045 + basin_zone * 0.0045 + plain_zone * 0.0035));
-                        let lateral_strength =
-                            lateral_strength * (0.65 + (1.0 - uplift_core) * 0.35);
-                        for (distance, weight) in [(1_isize, 1.0_f32), (2_isize, 0.45_f32)] {
+            if !flow.is_ocean[idx]
+                && valley_scale > 0.02
+                && let Some(next_idx) = flow.downstream[idx]
+            {
+                let (nx, ny) = world.coords(next_idx);
+                let step_x = (nx as isize - x as isize).signum();
+                let step_y = (ny as isize - y as isize).signum();
+                if step_x != 0 || step_y != 0 {
+                    let side_a = (-step_y, step_x);
+                    let side_b = (step_y, -step_x);
+                    let lateral_strength = (valley_scale
+                        * (1.0 - confinement)
+                        * (0.0024 + basin_zone * 0.003 + plain_zone * 0.002))
+                        + (floodplain_scale * (0.0045 + basin_zone * 0.0045 + plain_zone * 0.0035));
+                    let lateral_strength = lateral_strength * (0.65 + (1.0 - uplift_core) * 0.35);
+                    for (distance, weight) in [(1_isize, 1.0_f32), (2_isize, 0.45_f32)] {
+                        for side in [side_a, side_b] {
+                            let sx = x as isize + side.0 * distance;
+                            let sy = y as isize + side.1 * distance;
+                            if !world.in_bounds(sx, sy) {
+                                continue;
+                            }
+                            let sidx = world.idx(sx as usize, sy as usize);
+                            let height_above = (terrain[sidx] - current).max(0.0);
+                            let carve = lateral_strength * weight * (0.45 + height_above * 3.4);
+                            lateral_erosion[sidx] += carve.min(0.015);
+                        }
+                    }
+                    if floodplain_scale > 0.08 {
+                        for (distance, weight) in [(1_isize, 0.55_f32), (2_isize, 0.32_f32)] {
                             for side in [side_a, side_b] {
                                 let sx = x as isize + side.0 * distance;
                                 let sy = y as isize + side.1 * distance;
@@ -350,26 +364,11 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
                                     continue;
                                 }
                                 let sidx = world.idx(sx as usize, sy as usize);
-                                let height_above = (terrain[sidx] - current).max(0.0);
-                                let carve = lateral_strength * weight * (0.45 + height_above * 3.4);
-                                lateral_erosion[sidx] += carve.min(0.015);
-                            }
-                        }
-                        if floodplain_scale > 0.08 {
-                            for (distance, weight) in [(1_isize, 0.55_f32), (2_isize, 0.32_f32)] {
-                                for side in [side_a, side_b] {
-                                    let sx = x as isize + side.0 * distance;
-                                    let sy = y as isize + side.1 * distance;
-                                    if !world.in_bounds(sx, sy) {
-                                        continue;
-                                    }
-                                    let sidx = world.idx(sx as usize, sy as usize);
-                                    let build = deposition
-                                        * floodplain_scale
-                                        * weight
-                                        * (0.003 + basin_zone * 0.0035 + plain_zone * 0.0025);
-                                    next[sidx] = (next[sidx] + build.min(0.006)).min(1.0);
-                                }
+                                let build = deposition
+                                    * floodplain_scale
+                                    * weight
+                                    * (0.003 + basin_zone * 0.0035 + plain_zone * 0.0025);
+                                next[sidx] = (next[sidx] + build.min(0.006)).min(1.0);
                             }
                         }
                     }

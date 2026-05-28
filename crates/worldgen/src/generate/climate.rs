@@ -86,17 +86,15 @@ fn populate_climate_from_fields(
                 - regional_continentality[idx] * 0.07 * lowland
                 + config.temperature_bias)
                 .clamp(0.0, 1.0);
-            let moisture = (moisture_value(
-                world,
+            let fields = MoistureFields {
                 ocean,
                 distance_to_ocean,
                 climate,
                 nearby_water,
                 regional_continentality,
                 wind,
-                x,
-                y,
-            ) * config.rainfall_scale
+            };
+            let moisture = (moisture_value(world, &fields, x, y) * config.rainfall_scale
                 + config.moisture_bias)
                 .clamp(0.0, 1.0);
             world.tiles[idx].temperature = temperature;
@@ -192,26 +190,25 @@ pub(super) fn fill_ocean_distance(world: &World, ocean: &[bool]) -> Vec<u16> {
     out
 }
 
-fn moisture_value(
-    world: &World,
-    ocean: &[bool],
-    distance_to_ocean: &[u16],
-    climate: &OpenSimplex,
-    nearby_water: &[f32],
-    regional_continentality: &[f32],
+struct MoistureFields<'a> {
+    ocean: &'a [bool],
+    distance_to_ocean: &'a [u16],
+    climate: &'a OpenSimplex,
+    nearby_water: &'a [f32],
+    regional_continentality: &'a [f32],
     wind: (f32, f32),
-    x: usize,
-    y: usize,
-) -> f32 {
+}
+
+fn moisture_value(world: &World, fields: &MoistureFields<'_>, x: usize, y: usize) -> f32 {
     let idx = world.idx(x, y);
-    if ocean[idx] {
+    if fields.ocean[idx] {
         return 1.0;
     }
 
     let ocean_influence = 1.0
-        - (distance_to_ocean[idx] as f32 / (world.width.max(world.height) as f32 * 0.45))
+        - (fields.distance_to_ocean[idx] as f32 / (world.width.max(world.height) as f32 * 0.45))
             .clamp(0.0, 1.0);
-    let shadow = rain_shadow(world, ocean, wind, x, y);
+    let shadow = rain_shadow(world, fields.ocean, fields.wind, x, y);
     let lat = latitude_factor(y, world.height);
     // Wider transitions break the sharp moisture stripe at the Hadley cell boundary.
     let subtropical_dryness = smoothstep(0.12, 0.36, lat) * (1.0_f32 - smoothstep(0.40, 0.66, lat));
@@ -221,7 +218,7 @@ fn moisture_value(
         (0.22 + equatorial_wetness * 0.32 - subtropical_dryness * 0.22 - polar_dryness * 0.08)
             .clamp(0.0, 1.0);
     let noise = octave_noise(
-        climate,
+        fields.climate,
         x as f64 * 0.014 + 7.0,
         y as f64 * 0.014 - 9.0,
         4,
@@ -229,14 +226,14 @@ fn moisture_value(
         2.0,
     );
     let monsoon = octave_noise(
-        climate,
+        fields.climate,
         x as f64 * 0.006 - 41.0,
         y as f64 * 0.006 + 17.0,
         3,
         0.55,
         2.0,
     );
-    let continentality = regional_continentality[idx];
+    let continentality = fields.regional_continentality[idx];
     let lowland = 1.0 - ((world.tiles[idx].raw_elevation - world.sea_level) / 0.24).clamp(0.0, 1.0);
 
     // Shift weight from the latitude-band (zonal) and directional rain-shadow terms toward
@@ -246,7 +243,7 @@ fn moisture_value(
         + noise * 0.22
         + monsoon * 0.08 * equatorial_wetness
         + shadow * 0.14
-        + nearby_water[idx] * 0.16
+        + fields.nearby_water[idx] * 0.16
         - continentality * 0.20 * (0.7 + subtropical_dryness * 0.45) * lowland)
         .clamp(0.0, 1.0)
 }
@@ -260,7 +257,7 @@ fn prevailing_wind_angle(seed: u64) -> f32 {
 // Hadley cell model: tropical easterlies, mid-latitude westerlies, polar easterlies.
 // world_tilt rotates the whole pattern so each seed has a distinct slant.
 fn wind_at_latitude(world_tilt: f32, lat: f32) -> (f32, f32) {
-    let zonal = if lat < 0.24 || lat > 0.70 {
+    let zonal = if !(0.24..=0.70).contains(&lat) {
         -1.0_f32 // easterlies
     } else {
         1.0_f32 // westerlies

@@ -1,3 +1,4 @@
+mod audit;
 mod config;
 mod features;
 mod generate;
@@ -5,6 +6,7 @@ mod metadata;
 mod render;
 mod world;
 
+pub use audit::{RiverAudit, audit_rivers};
 pub use config::WorldConfig;
 pub use features::{MountainFeature, mountain_feature_for_tile, permanent_snow_cover};
 pub use generate::{biome_for_tile, generate_world};
@@ -94,5 +96,14 @@ mod tests {
         let metadata = build_metadata(&world, &config);
         assert_eq!(metadata.world_size, 64);
         assert_eq!(metadata.effective_world_size, 64.0);
+    }
+
+    #[test]
+    fn metadata_reports_effective_world_sea_level() {
+        let config = test_config();
+        let mut world = generate_world(&config).unwrap();
+        world.sea_level = 0.47;
+        let metadata = build_metadata(&world, &config);
+        assert_eq!(metadata.sea_level, world.sea_level);
     }
 }

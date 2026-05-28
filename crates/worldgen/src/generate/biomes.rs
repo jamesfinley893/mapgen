@@ -1,5 +1,18 @@
 use crate::{Biome, Surface, World};
 
+#[derive(Clone, Copy)]
+struct BiomeContext {
+    surface: Surface,
+    elevation: f32,
+    sea_level: f32,
+    temperature: f32,
+    moisture: f32,
+    support: f32,
+    proximity: f32,
+    trunk_river: f32,
+    relief: f32,
+}
+
 pub(super) fn assign_biomes(world: &mut World) {
     let mut biomes = Vec::with_capacity(world.tiles.len());
     for idx in 0..world.tiles.len() {
@@ -25,17 +38,17 @@ fn biome_for_world_tile(world: &World, idx: usize) -> Biome {
     } else {
         tile.moisture
     };
-    biome_for_tile_with_support(
-        tile.surface,
-        tile.raw_elevation,
-        world.sea_level,
-        tile.temperature,
+    biome_for_tile_with_support(BiomeContext {
+        surface: tile.surface,
+        elevation: tile.raw_elevation,
+        sea_level: world.sea_level,
+        temperature: tile.temperature,
         moisture,
         support,
         proximity,
         trunk_river,
-        local_relief,
-    )
+        relief: local_relief,
+    })
 }
 
 fn surrounding_land_moisture(world: &World, idx: usize) -> Option<f32> {
@@ -179,145 +192,111 @@ pub fn biome_for_tile(
     temperature: f32,
     moisture: f32,
 ) -> Biome {
-    biome_for_tile_with_support(
+    biome_for_tile_with_support(BiomeContext {
         surface,
         elevation,
         sea_level,
         temperature,
         moisture,
-        1.0,
-        1.0,
-        0.0,
-        0.08,
-    )
+        support: 1.0,
+        proximity: 1.0,
+        trunk_river: 0.0,
+        relief: 0.08,
+    })
 }
 
-fn biome_for_tile_with_support(
-    surface: Surface,
-    elevation: f32,
-    sea_level: f32,
-    temperature: f32,
-    moisture: f32,
-    support: f32,
-    proximity: f32,
-    trunk_river: f32,
-    relief: f32,
-) -> Biome {
-    match surface {
+fn biome_for_tile_with_support(ctx: BiomeContext) -> Biome {
+    match ctx.surface {
         Surface::Ocean => Biome::Ocean,
         Surface::Coast => Biome::Coast,
         Surface::Lake => Biome::Lake,
         Surface::River => {
-            if elevation > sea_level + 0.38 && support > 0.48 {
+            if ctx.elevation > ctx.sea_level + 0.38 && ctx.support > 0.48 {
                 Biome::Alpine
-            } else if elevation > sea_level + 0.30
-                && support > 0.22
-                && proximity > 0.18
-                && relief > 0.04
-                && (trunk_river < 0.18 || (support > 0.34 && proximity > 0.28))
+            } else if ctx.elevation > ctx.sea_level + 0.30
+                && ctx.support > 0.22
+                && ctx.proximity > 0.18
+                && ctx.relief > 0.04
+                && (ctx.trunk_river < 0.18 || (ctx.support > 0.34 && ctx.proximity > 0.28))
             {
                 Biome::Foothills
             } else {
-                land_biome(
-                    temperature,
-                    moisture,
-                    elevation,
-                    sea_level,
-                )
+                land_biome(ctx.temperature, ctx.moisture, ctx.elevation, ctx.sea_level)
             }
         }
-        Surface::Land => land_biome_with_support(
-            temperature,
-            moisture,
-            elevation,
-            sea_level,
-            support,
-            proximity,
-            trunk_river,
-            relief,
-        ),
+        Surface::Land => land_biome_with_support(ctx),
     }
 }
 
 fn land_biome(temperature: f32, moisture: f32, elevation: f32, sea_level: f32) -> Biome {
-    land_biome_with_support(
+    land_biome_with_support(BiomeContext {
+        surface: Surface::Land,
         temperature,
         moisture,
         elevation,
         sea_level,
-        1.0,
-        1.0,
-        0.0,
-        0.08,
-    )
+        support: 1.0,
+        proximity: 1.0,
+        trunk_river: 0.0,
+        relief: 0.08,
+    })
 }
 
-fn land_biome_with_support(
-    temperature: f32,
-    moisture: f32,
-    elevation: f32,
-    sea_level: f32,
-    support: f32,
-    proximity: f32,
-    trunk_river: f32,
-    relief: f32,
-) -> Biome {
-    if elevation > sea_level + 0.38 && support > 0.5 {
+fn land_biome_with_support(ctx: BiomeContext) -> Biome {
+    if ctx.elevation > ctx.sea_level + 0.38 && ctx.support > 0.5 {
         return Biome::Alpine;
     }
-    if elevation > sea_level + 0.31
-        && support > 0.24
-        && proximity > 0.2
-        && relief > 0.04
-        && (trunk_river < 0.2 || (support > 0.35 && proximity > 0.3))
+    if ctx.elevation > ctx.sea_level + 0.31
+        && ctx.support > 0.24
+        && ctx.proximity > 0.2
+        && ctx.relief > 0.04
+        && (ctx.trunk_river < 0.2 || (ctx.support > 0.35 && ctx.proximity > 0.3))
     {
         return Biome::Foothills;
     }
-    if temperature < 0.12 {
-        return if moisture < 0.35 {
+    if ctx.temperature < 0.12 {
+        return if ctx.moisture < 0.35 {
             Biome::PolarDesert
         } else {
             Biome::Tundra
         };
     }
-    if temperature < 0.28 {
-        return if moisture < 0.30 {
+    if ctx.temperature < 0.28 {
+        return if ctx.moisture < 0.30 {
             Biome::Steppe
         } else {
             Biome::BorealForest
         };
     }
-    if temperature < 0.48 {
-        if moisture < 0.18 {
+    if ctx.temperature < 0.48 {
+        if ctx.moisture < 0.18 {
             Biome::Desert
-        } else if moisture < 0.29 {
+        } else if ctx.moisture < 0.29 {
             Biome::Steppe
-        } else if moisture < 0.43 {
+        } else if ctx.moisture < 0.43 {
             Biome::TemperateGrassland
-        } else if moisture < 0.58 {
+        } else if ctx.moisture < 0.58 {
             Biome::Woodland
         } else {
             Biome::TemperateForest
         }
-    } else if temperature < 0.72 {
-        if moisture < 0.16 {
+    } else if ctx.temperature < 0.72 {
+        if ctx.moisture < 0.16 {
             Biome::Desert
-        } else if moisture < 0.26 {
+        } else if ctx.moisture < 0.26 {
             Biome::Steppe
-        } else if moisture < 0.48 {
+        } else if ctx.moisture < 0.48 {
             Biome::Savanna
-        } else if moisture < 0.62 {
+        } else if ctx.moisture < 0.62 {
             Biome::Woodland
         } else {
             Biome::TropicalForest
         }
-    } else if moisture < 0.16 {
+    } else if ctx.moisture < 0.16 {
         Biome::Desert
-    } else if moisture < 0.28 {
+    } else if ctx.moisture < 0.46 {
         Biome::Savanna
-    } else if moisture < 0.46 {
-        Biome::Savanna
-    } else if moisture < 0.68 {
+    } else if ctx.moisture < 0.68 {
         Biome::TropicalForest
     } else {
         Biome::Rainforest

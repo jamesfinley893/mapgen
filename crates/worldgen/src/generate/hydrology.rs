@@ -137,9 +137,10 @@ pub(super) fn simulate_hydrology(
     );
     let mut downstream = build_downstream(world, ocean, &conditioning, &provisional.lake_id);
     break_downstream_cycles(&mut downstream, &conditioning.parent, ocean);
-    let contributing_area = accumulate_contributing_area(&conditioning, &downstream, ocean);
+    let accumulation_order = flow_accumulation_order(&conditioning);
+    let contributing_area = accumulate_contributing_area(&accumulation_order, &downstream, ocean);
     let runoff = compute_runoff(world, config, ocean, &conditioning, &downstream);
-    let discharge = accumulate_discharge(&conditioning, &downstream, ocean, &runoff);
+    let discharge = accumulate_discharge(&accumulation_order, &downstream, ocean, &runoff);
     let stream_power = compute_stream_power(world, &conditioning, &downstream, &discharge);
     let basin_id = assign_basin_ids(
         world,
@@ -247,7 +248,11 @@ fn identify_lakes(
     let depth_threshold = 0.025;
 
     for idx in 0..world.tiles.len() {
-        if visited[idx] || ocean[idx] || fill_depth[idx] <= depth_threshold {
+        if visited[idx]
+            || ocean[idx]
+            || lake_id[idx].is_some()
+            || fill_depth[idx] <= depth_threshold
+        {
             continue;
         }
         let mut region = Vec::new();
@@ -259,7 +264,11 @@ fn identify_lakes(
             let (x, y) = world.coords(current);
             for (nx, ny) in world.neighbors8(x, y) {
                 let nidx = world.idx(nx, ny);
-                if visited[nidx] || ocean[nidx] || fill_depth[nidx] <= depth_threshold {
+                if visited[nidx]
+                    || ocean[nidx]
+                    || lake_id[nidx].is_some()
+                    || fill_depth[nidx] <= depth_threshold
+                {
                     continue;
                 }
                 if (hydro[nidx] - hydro[current]).abs() > 0.02 {
@@ -290,11 +299,12 @@ fn identify_lakes(
         let mut outlet = None;
         let mut outlet_level = f32::MAX;
         for &cell in &region {
-            if let Some(next) = parent[cell] {
-                if !in_region[next] && hydro[cell] < outlet_level {
-                    outlet_level = hydro[cell];
-                    outlet = Some(next);
-                }
+            if let Some(next) = parent[cell]
+                && !in_region[next]
+                && hydro[cell] < outlet_level
+            {
+                outlet_level = hydro[cell];
+                outlet = Some(next);
             }
         }
 
@@ -387,7 +397,10 @@ fn refine_lake_region(
         mask[cell] = true;
     }
 
-    region.iter().copied().filter(|idx| mask[*idx]).collect()
+    mask.iter()
+        .enumerate()
+        .filter_map(|(idx, included)| included.then_some(idx))
+        .collect()
 }
 
 fn build_downstream(
@@ -801,20 +814,24 @@ fn break_downstream_cycles(
     }
 }
 
-fn accumulate_contributing_area(
-    conditioning: &ConditioningState,
-    downstream: &[Option<usize>],
-    ocean: &[bool],
-) -> Vec<f32> {
-    let mut contributing_area = vec![0.0; downstream.len()];
-    let mut order: Vec<_> = (0..downstream.len()).collect();
+fn flow_accumulation_order(conditioning: &ConditioningState) -> Vec<usize> {
+    let mut order: Vec<_> = (0..conditioning.hydro_elevation.len()).collect();
     order.sort_by(|a, b| {
         conditioning.hydro_elevation[*b]
             .total_cmp(&conditioning.hydro_elevation[*a])
             .then_with(|| conditioning.rank[*b].cmp(&conditioning.rank[*a]))
     });
+    order
+}
 
-    for idx in order {
+fn accumulate_contributing_area(
+    accumulation_order: &[usize],
+    downstream: &[Option<usize>],
+    ocean: &[bool],
+) -> Vec<f32> {
+    let mut contributing_area = vec![0.0; downstream.len()];
+
+    for &idx in accumulation_order {
         if ocean[idx] {
             continue;
         }
@@ -870,20 +887,14 @@ fn compute_runoff(
 }
 
 fn accumulate_discharge(
-    conditioning: &ConditioningState,
+    accumulation_order: &[usize],
     downstream: &[Option<usize>],
     ocean: &[bool],
     runoff: &[f32],
 ) -> Vec<f32> {
     let mut discharge = vec![0.0; downstream.len()];
-    let mut order: Vec<_> = (0..downstream.len()).collect();
-    order.sort_by(|a, b| {
-        conditioning.hydro_elevation[*b]
-            .total_cmp(&conditioning.hydro_elevation[*a])
-            .then_with(|| conditioning.rank[*b].cmp(&conditioning.rank[*a]))
-    });
 
-    for idx in order {
+    for &idx in accumulation_order {
         if ocean[idx] {
             continue;
         }
@@ -1036,10 +1047,10 @@ fn suppress_short_weak_channels(
         if *surface != Surface::River {
             continue;
         }
-        if let Some(next) = downstream[idx] {
-            if surfaces[next] == Surface::River {
-                upstream[next] += 1;
-            }
+        if let Some(next) = downstream[idx]
+            && surfaces[next] == Surface::River
+        {
+            upstream[next] += 1;
         }
     }
 
@@ -1106,10 +1117,11 @@ fn assign_channel_order(
         if surfaces[idx] != Surface::River {
             continue;
         }
-        if let Some(next) = downstream[idx] {
-            if surfaces[next] == Surface::River && order[next] < order[idx] {
-                order[next] = order[idx];
-            }
+        if let Some(next) = downstream[idx]
+            && surfaces[next] == Surface::River
+            && order[next] < order[idx]
+        {
+            order[next] = order[idx];
         }
     }
     order
@@ -1198,7 +1210,7 @@ pub(super) fn apply_hydrology_to_world(
     ocean: &[bool],
     hydrology: &HydrologyState,
 ) {
-    for idx in 0..world.tiles.len() {
+    for (idx, is_ocean) in ocean.iter().copied().enumerate().take(world.tiles.len()) {
         world.tiles[idx].hydro_elevation = hydrology.hydro_elevation[idx];
         world.tiles[idx].contributing_area = hydrology.contributing_area[idx];
         world.tiles[idx].runoff = hydrology.runoff[idx];
@@ -1210,7 +1222,7 @@ pub(super) fn apply_hydrology_to_world(
         world.tiles[idx].basin_id = hydrology.basin_id[idx];
         world.tiles[idx].lake_id = hydrology.lake_id[idx];
         world.tiles[idx].water_level = hydrology.water_level[idx];
-        if ocean[idx] {
+        if is_ocean {
             world.tiles[idx].water_level = Some(world.sea_level);
         }
     }
