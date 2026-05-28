@@ -13,19 +13,41 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
     let height = world.height as u32 * scale;
     let mut image = RgbaImage::new(width, height);
 
+    // Pre-compute hillshade for every tile (including ocean, for use as bilinear corners).
+    let hillshade: Vec<f32> = (0..world.tiles.len())
+        .map(|idx| {
+            let (x, y) = world.coords(idx);
+            compute_hillshade(world, x, y)
+        })
+        .collect();
+
     for (idx, tile) in world.tiles.iter().enumerate() {
         let (x, y) = world.coords(idx);
         let mut color = biome_color(tile.biome);
         let variation = hash01(world.seed, x, y);
-        let shade = ((tile.raw_elevation - world.sea_level) * 60.0) as i16;
-        color = offset(color, shade + ((variation * 10.0) as i16 - 5));
 
         if matches!(tile.biome, Biome::Ocean) {
             let depth = ((world.sea_level - tile.raw_elevation).max(0.0) * 50.0) as i16;
             color = offset(color, -depth);
+            let near_coast = world.neighbors8(x, y).any(|(nx, ny)| {
+                !matches!(world.tiles[world.idx(nx, ny)].biome, Biome::Ocean)
+            });
+            if near_coast {
+                color = offset(color, 34);
+            }
+            draw_tile(&mut image, x as u32, y as u32, scale, color);
+        } else {
+            let elev_shade = ((tile.raw_elevation - world.sea_level) * 22.0) as i16;
+            color = offset(color, elev_shade + ((variation * 8.0) as i16 - 4));
+            // Snow: fades in above a temperature-dependent snow line
+            let snow_line = (world.sea_level + 0.28 + tile.temperature * 0.18)
+                .min(world.sea_level + 0.46);
+            let snow = ((tile.raw_elevation - snow_line) / 0.10).clamp(0.0, 1.0);
+            if snow > 0.0 {
+                color = lerp_rgba(color, Rgba([240, 244, 246, 255]), snow);
+            }
+            draw_tile_hillshaded(&mut image, &hillshade, world, x as u32, y as u32, scale, color);
         }
-
-        draw_tile(&mut image, x as u32, y as u32, scale, color);
 
         if matches!(tile.biome, Biome::Alpine) {
             draw_peak(&mut image, x as u32, y as u32, scale);
@@ -98,33 +120,81 @@ fn draw_tile(image: &mut RgbaImage, x: u32, y: u32, scale: u32, color: Rgba<u8>)
 }
 
 fn draw_peak(image: &mut RgbaImage, x: u32, y: u32, scale: u32) {
+    if scale < 2 {
+        return;
+    }
     let ox = x * scale;
     let oy = y * scale;
-    let white = Rgba([230, 231, 228, 255]);
-    let dark = Rgba([118, 120, 119, 255]);
-    for i in 0..scale {
-        image.put_pixel(ox + i, oy + i.min(scale - 1), white);
-        if i > 0 {
-            image.put_pixel(ox + scale - i, oy + i - 1, dark);
+    let snow   = Rgba([240, 244, 246, 255]);
+    let lit    = Rgba([195, 200, 197, 255]);
+    let shadow = Rgba([88,  91,  89,  255]);
+    let s = scale as f32;
+    let apex_x = s * 0.50;
+    let apex_y = s * 0.08;
+    let base_y = s * 0.90;
+    let base_l = s * 0.06;
+    let base_r = s * 0.94;
+    let snow_y = apex_y + (base_y - apex_y) * 0.42;
+
+    // Explicit apex pixel so the peak tip is always visible
+    put_pixel_checked(image, ox as i32 + (scale / 2) as i32, oy as i32, snow);
+
+    for py in 0..scale {
+        let pf_y = py as f32 + 0.5;
+        if pf_y < apex_y || pf_y > base_y {
+            continue;
+        }
+        let t = (pf_y - apex_y) / (base_y - apex_y);
+        let lx = apex_x + (base_l - apex_x) * t;
+        let rx = apex_x + (base_r - apex_x) * t;
+        let mid_x = (lx + rx) * 0.5;
+        for px in 0..scale {
+            let pf_x = px as f32 + 0.5;
+            if pf_x < lx || pf_x > rx {
+                continue;
+            }
+            let color = if pf_y < snow_y {
+                snow
+            } else if pf_x <= mid_x {
+                lit
+            } else {
+                shadow
+            };
+            put_pixel_checked(image, ox as i32 + px as i32, oy as i32 + py as i32, color);
         }
     }
 }
 
 fn draw_hills(image: &mut RgbaImage, x: u32, y: u32, scale: u32) {
+    if scale < 2 {
+        return;
+    }
     let ox = x * scale;
     let oy = y * scale;
-    let dark = Rgba([102, 111, 84, 255]);
-    if scale > 1 {
-        for px in 0..scale {
-            let py = if px < scale / 2 {
-                scale / 2
-            } else {
-                scale / 2 + px.saturating_sub(scale / 2) / 2
-            };
-            image.put_pixel(ox + px, oy + py.min(scale - 1), dark);
+    let outline = Rgba([74, 84, 58, 255]);
+    let s = scale as f32;
+    // Two overlapping hill arcs — classic cartographic foothills symbol
+    for &(cx_f, cy_f, rx_f, ry_f) in &[
+        (0.60_f32, 0.58_f32, 0.27_f32, 0.17_f32),
+        (0.30_f32, 0.65_f32, 0.18_f32, 0.12_f32),
+    ] {
+        let cx = cx_f * s;
+        let cy = cy_f * s;
+        let rx = rx_f * s;
+        let ry = ry_f * s;
+        for py in 0..scale {
+            for px in 0..scale {
+                let dx = (px as f32 + 0.5) - cx;
+                let dy = (py as f32 + 0.5) - cy;
+                if dy > ry * 0.18 {
+                    continue;
+                }
+                let d = (dx / rx).powi(2) + (dy / ry).powi(2);
+                if d >= 0.76 && d <= 1.30 {
+                    put_pixel_checked(image, ox as i32 + px as i32, oy as i32 + py as i32, outline);
+                }
+            }
         }
-    } else {
-        image.put_pixel(ox, oy, dark);
     }
 }
 
@@ -306,6 +376,82 @@ fn offset(color: Rgba<u8>, delta: i16) -> Rgba<u8> {
         }
     }
     Rgba(out)
+}
+
+fn draw_tile_hillshaded(
+    image: &mut RgbaImage,
+    hillshade: &[f32],
+    world: &World,
+    x: u32,
+    y: u32,
+    scale: u32,
+    base_color: Rgba<u8>,
+) {
+    let ox = x * scale;
+    let oy = y * scale;
+    let tx = x as usize;
+    let ty = y as usize;
+    let get_hs = |cx: usize, cy: usize| -> f32 {
+        let cx = cx.min(world.width.saturating_sub(1));
+        let cy = cy.min(world.height.saturating_sub(1));
+        hillshade[world.idx(cx, cy)]
+    };
+    let h00 = get_hs(tx, ty);
+    let h10 = get_hs(tx + 1, ty);
+    let h01 = get_hs(tx, ty + 1);
+    let h11 = get_hs(tx + 1, ty + 1);
+    let s = scale as f32;
+    for py in 0..scale {
+        for px in 0..scale {
+            let fx = (px as f32 + 0.5) / s;
+            let fy = (py as f32 + 0.5) / s;
+            let shade =
+                h00 * (1.0 - fx) * (1.0 - fy) + h10 * fx * (1.0 - fy)
+                    + h01 * (1.0 - fx) * fy + h11 * fx * fy;
+            let color = scale_rgb(base_color, 0.38 + shade * 0.62);
+            image.put_pixel(ox + px, oy + py, color);
+        }
+    }
+}
+
+fn compute_hillshade(world: &World, x: usize, y: usize) -> f32 {
+    let get_elev = |xi: isize, yi: isize| -> f32 {
+        let cx = xi.clamp(0, world.width as isize - 1) as usize;
+        let cy = yi.clamp(0, world.height as isize - 1) as usize;
+        world.tiles[world.idx(cx, cy)].raw_elevation
+    };
+    let xi = x as isize;
+    let yi = y as isize;
+    // Central-difference gradient in tile space
+    let dz_dx = get_elev(xi + 1, yi) - get_elev(xi - 1, yi);
+    let dz_dy = get_elev(xi, yi + 1) - get_elev(xi, yi - 1);
+    // Surface normal in (east, up, south) space; z_scale controls perceived steepness
+    let z_scale = 6.0_f32;
+    let nx = -dz_dx * z_scale;
+    let ny = 1.0_f32;
+    let nz = -dz_dy * z_scale;
+    let len = (nx * nx + ny * ny + nz * nz).sqrt().max(1e-6);
+    // Light from NW at 45° elevation: normalize(-1, 1, -1)
+    let inv_sqrt3 = 1.0_f32 / 3.0_f32.sqrt();
+    ((nx * (-inv_sqrt3) + ny * inv_sqrt3 + nz * (-inv_sqrt3)) / len).clamp(0.0, 1.0)
+}
+
+fn scale_rgb(color: Rgba<u8>, factor: f32) -> Rgba<u8> {
+    Rgba([
+        ((color[0] as f32 * factor) as u8).min(255),
+        ((color[1] as f32 * factor) as u8).min(255),
+        ((color[2] as f32 * factor) as u8).min(255),
+        color[3],
+    ])
+}
+
+fn lerp_rgba(a: Rgba<u8>, b: Rgba<u8>, t: f32) -> Rgba<u8> {
+    Rgba([
+        ((a[0] as f32 + (b[0] as f32 - a[0] as f32) * t) as u8).min(255),
+        ((a[1] as f32 + (b[1] as f32 - a[1] as f32) * t) as u8).min(255),
+        ((a[2] as f32 + (b[2] as f32 - a[2] as f32) * t) as u8).min(255),
+        255,
+    ])
 }
 
 fn hash01(seed: u64, x: usize, y: usize) -> f32 {
