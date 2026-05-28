@@ -163,14 +163,7 @@ fn soften_biome_edges(world: &World, colors: &[Rgba<u8>]) -> Vec<Rgba<u8>> {
         for (nx, ny) in world.neighbors8(x, y) {
             let nidx = world.idx(nx, ny);
             let nb = world.tiles[nidx].biome;
-            if nb == my_biome || matches!(nb, Biome::Ocean | Biome::Lake) {
-                continue;
-            }
-            // Don't let snow-covered Alpine bleed white into surrounding vegetation.
-            // Foothills are the intentional transition zone and may still blend.
-            if matches!(nb, Biome::Alpine)
-                && !matches!(my_biome, Biome::Alpine | Biome::Foothills)
-            {
+            if nb == my_biome || matches!(nb, Biome::Ocean | Biome::Lake | Biome::Alpine) {
                 continue;
             }
             r += colors[nidx][0] as f32;
