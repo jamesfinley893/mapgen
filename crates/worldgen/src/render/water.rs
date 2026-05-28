@@ -1,7 +1,7 @@
 use image::{Rgba, RgbaImage};
 
 use crate::generate::smoothstep;
-use crate::river::river_discharge_percentiles;
+use crate::river::RiverBandThresholds;
 use crate::{Biome, Surface, World};
 
 use super::shading::{draw_disc, draw_thick_line, lerp_rgba, put_pixel_checked, tile_center_px};
@@ -66,7 +66,7 @@ pub(super) fn draw_river(
     idx: usize,
     scale: u32,
     flow: f32,
-    thresholds: RiverThresholds,
+    thresholds: RiverBandThresholds,
 ) {
     let radius = river_radius_px(world, idx, flow, scale, thresholds);
     if radius < 0 {
@@ -89,18 +89,7 @@ pub(super) fn draw_river(
     draw_disc(image, start, radius, color);
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct RiverThresholds {
-    secondary: f32,
-    trunk: f32,
-}
-
-pub(super) fn river_thresholds(world: &World) -> RiverThresholds {
-    let (secondary, trunk) = river_discharge_percentiles(world, 58, 84);
-    RiverThresholds { secondary, trunk }
-}
-
-fn river_color(flow: f32, thresholds: RiverThresholds) -> Rgba<u8> {
+fn river_color(flow: f32, thresholds: RiverBandThresholds) -> Rgba<u8> {
     if flow > thresholds.trunk {
         Rgba([42, 118, 192, 255])
     } else if flow > thresholds.secondary {
@@ -115,7 +104,7 @@ fn river_radius_px(
     idx: usize,
     flow: f32,
     scale: u32,
-    thresholds: RiverThresholds,
+    thresholds: RiverBandThresholds,
 ) -> i32 {
     let tile = &world.tiles[idx];
     let height_above_sea = tile.raw_elevation - world.sea_level;

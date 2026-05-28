@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::river::{river_direction, river_discharge_percentiles};
+use crate::river::{RiverBandThresholds, river_band_thresholds, river_direction};
 use crate::{Biome, Surface, World, WorldConfig, audit_rivers};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,12 +69,13 @@ struct TileSummary {
 }
 
 pub fn build_metadata(world: &World, config: &WorldConfig) -> WorldMetadata {
-    let thresholds = river_thresholds(world);
+    let thresholds = river_band_thresholds(world);
     let tile_summary = collect_tile_summary(world, thresholds);
     let (confined_trunk_fraction, average_trunk_confinement) =
-        trunk_confinement_stats(world, thresholds.1);
-    let trunk_straight_run_ratio = trunk_straight_run_ratio(world, thresholds.1);
-    let tributary_spacing_variance = tributary_spacing_variance(world, thresholds.1, thresholds.0);
+        trunk_confinement_stats(world, thresholds.trunk);
+    let trunk_straight_run_ratio = trunk_straight_run_ratio(world, thresholds.trunk);
+    let tributary_spacing_variance =
+        tributary_spacing_variance(world, thresholds.trunk, thresholds.secondary);
     let mountain_exit_irregularity_score = mountain_exit_irregularity_score(world);
     let river_audit = audit_rivers(world);
 
@@ -109,7 +110,7 @@ pub fn build_metadata(world: &World, config: &WorldConfig) -> WorldMetadata {
         median_source_segment_length: river_audit.segment_median,
         p90_source_segment_length: river_audit.segment_p90,
         dominant_river_direction_fraction: river_audit.dominant_direction_fraction,
-        longest_trunk_length: longest_trunk_length(world, thresholds.1),
+        longest_trunk_length: longest_trunk_length(world, thresholds.trunk),
         trunk_straight_run_ratio,
         tributary_spacing_variance,
         mountain_exit_irregularity_score,
@@ -125,7 +126,7 @@ pub fn build_metadata(world: &World, config: &WorldConfig) -> WorldMetadata {
     }
 }
 
-fn collect_tile_summary(world: &World, thresholds: (f32, f32)) -> TileSummary {
+fn collect_tile_summary(world: &World, thresholds: RiverBandThresholds) -> TileSummary {
     let mut land_tiles = 0;
     let mut ocean_tiles = 0;
     let mut river_tiles = 0;
@@ -153,9 +154,9 @@ fn collect_tile_summary(world: &World, thresholds: (f32, f32)) -> TileSummary {
                 land_tiles += 1;
                 total_river_discharge += tile.discharge;
                 max_river_discharge = max_river_discharge.max(tile.discharge);
-                let band = if tile.discharge >= thresholds.1 {
+                let band = if tile.discharge >= thresholds.trunk {
                     2
-                } else if tile.discharge >= thresholds.0 {
+                } else if tile.discharge >= thresholds.secondary {
                     1
                 } else {
                     0
@@ -205,10 +206,6 @@ fn collect_tile_summary(world: &World, thresholds: (f32, f32)) -> TileSummary {
         foothill_tiles,
         biome_counts,
     }
-}
-
-fn river_thresholds(world: &World) -> (f32, f32) {
-    river_discharge_percentiles(world, 58, 84)
 }
 
 fn longest_trunk_length(world: &World, trunk_threshold: f32) -> usize {

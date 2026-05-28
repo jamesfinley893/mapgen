@@ -36,7 +36,7 @@ pub(super) struct HydrologyState {
     pub(super) basin_id: Vec<Option<u32>>,
 }
 
-struct RiverThresholds {
+pub(super) struct ChannelThresholds {
     stream: f32,
     secondary: f32,
     trunk: f32,
@@ -148,7 +148,7 @@ pub(super) fn simulate_hydrology(
 }
 
 pub(super) fn apply_channel_carving(world: &mut World, hydrology: &HydrologyState) {
-    let thresholds = river_thresholds(world);
+    let thresholds = channel_thresholds(world);
 
     for idx in 0..world.tiles.len() {
         if hydrology.surfaces[idx] != Surface::River {
@@ -224,10 +224,10 @@ pub(super) fn apply_hydrology_to_world(
     }
 }
 
-fn river_thresholds(world: &World) -> RiverThresholds {
+pub(super) fn channel_thresholds(world: &World) -> ChannelThresholds {
     let ws = world.effective_world_size();
     let stream = (ws * ws * 0.00075).max(12.0);
-    RiverThresholds {
+    ChannelThresholds {
         stream,
         secondary: stream * 6.5,
         trunk: stream * 18.0,

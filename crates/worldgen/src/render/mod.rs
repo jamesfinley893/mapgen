@@ -1,9 +1,10 @@
 use crate::generate::{hash01, smoothstep};
+use crate::river::river_band_thresholds;
 use colors::{apply_snow_overlay, land_base_colors, soften_biome_edges};
 use image::{Rgba, RgbaImage};
 use shading::{compute_hillshade, draw_tile, draw_tile_hillshaded, lerp_rgba, offset};
 use symbols::{draw_dunes, draw_forest, draw_hills, draw_peak, draw_ridge};
-use water::{draw_coastline, draw_lake, draw_river, river_thresholds};
+use water::{draw_coastline, draw_lake, draw_river};
 
 mod colors;
 mod shading;
@@ -99,7 +100,7 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
         }
     }
 
-    let thresholds = river_thresholds(world);
+    let thresholds = river_band_thresholds(world);
     for (idx, tile) in world.tiles.iter().enumerate() {
         if tile.surface == Surface::River {
             let flow = tile.discharge.max(1.0);

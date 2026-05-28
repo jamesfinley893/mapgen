@@ -1,5 +1,16 @@
 use crate::{Surface, World};
 
+#[derive(Clone, Copy)]
+pub(crate) struct RiverBandThresholds {
+    pub(crate) secondary: f32,
+    pub(crate) trunk: f32,
+}
+
+pub(crate) fn river_band_thresholds(world: &World) -> RiverBandThresholds {
+    let (secondary, trunk) = river_discharge_percentiles(world, 58, 84);
+    RiverBandThresholds { secondary, trunk }
+}
+
 pub(crate) fn river_discharge_percentiles(
     world: &World,
     lower_percentile: usize,

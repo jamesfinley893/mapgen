@@ -1,6 +1,6 @@
 use crate::{Surface, World, WorldConfig};
 
-use super::river_thresholds;
+use super::channel_thresholds;
 use crate::generate::util::{sample_seed_field, smoothstep};
 
 pub(super) fn classify_surfaces(
@@ -13,7 +13,7 @@ pub(super) fn classify_surfaces(
     lake_id: &[Option<u32>],
 ) -> Vec<Surface> {
     let mut surfaces = vec![Surface::Land; world.tiles.len()];
-    let thresholds = river_thresholds(world);
+    let thresholds = channel_thresholds(world);
     let density = config.channel_density.clamp(0.25, 4.0);
 
     for idx in 0..world.tiles.len() {

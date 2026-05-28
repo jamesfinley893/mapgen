@@ -9,6 +9,25 @@ use crate::generate::util::{
     sample_seed_field, smoothstep,
 };
 
+struct RoutingScoring {
+    preferred: (f32, f32),
+    persistence: Option<(f32, f32)>,
+    tributary_opportunity: f32,
+    mountain_front: f32,
+    mountain_exit_bias: f32,
+    lowland_opening: f32,
+    meander_bias: f32,
+}
+
+struct CandidateGeometry {
+    next: usize,
+    distance: f32,
+    direction: (isize, isize),
+    unit_direction: (f32, f32),
+    hydro_drop: f32,
+    raw_slope: f32,
+}
+
 pub(super) fn build_downstream(
     world: &World,
     ocean: &[bool],
@@ -52,6 +71,53 @@ fn routing_candidates(
     let (x, y) = world.coords(idx);
     let current_hydro = conditioning.hydro_elevation[idx];
     let current_raw = world.tiles[idx].raw_elevation;
+    let scoring = routing_scoring(world, conditioning, idx);
+    let mut candidates = Vec::with_capacity(8);
+
+    for (nx, ny) in world.neighbors8(x, y) {
+        let next = world.idx(nx, ny);
+        if lake_id[idx].is_some() && lake_id[idx] == lake_id[next] {
+            continue;
+        }
+        let neighbor_hydro = conditioning.hydro_elevation[next];
+        if neighbor_hydro > current_hydro + HYDRO_EPSILON {
+            continue;
+        }
+        let is_flat_or_equal = (neighbor_hydro - current_hydro).abs() <= HYDRO_EPSILON;
+        if is_flat_or_equal && conditioning.rank[next] >= conditioning.rank[idx] {
+            continue;
+        }
+
+        let geometry = candidate_geometry(
+            world,
+            conditioning,
+            (x, y),
+            current_hydro,
+            current_raw,
+            nx,
+            ny,
+        );
+        let slope = geometry.hydro_drop / geometry.distance;
+        let score = score_routing_candidate(&scoring, &geometry, slope, conditioning.parent[idx]);
+        candidates.push(RoutingCandidate {
+            next: geometry.next,
+            score,
+            slope,
+            direction: geometry.direction,
+            mountain_front: scoring.mountain_front,
+        });
+    }
+
+    candidates.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.next.cmp(&b.next))
+    });
+    candidates
+}
+
+fn routing_scoring(world: &World, conditioning: &ConditioningState, idx: usize) -> RoutingScoring {
+    let (x, y) = world.coords(idx);
     let raw_aspect = local_aspect(world, x, y);
     let hydro_aspect = local_aspect_on_values(
         &conditioning.hydro_elevation,
@@ -70,112 +136,113 @@ fn routing_candidates(
         let (px, py) = world.coords(parent);
         direction_vector((x, y), (px, py))
     });
-    let tributary_opportunity = sample_seed_field(world.seed, x, y, 22, 0xD1F1_0202);
-    let mountain_front = mountain_front_factor(world, idx);
-    let lowland_opening = lowland_opening_factor(world, idx);
-    // Per-tile (not per-pair) smooth bias for consistent lateral preference along a path.
-    // Two scales: medium-range arcs (cell 14) plus fine variation (cell 6) to preserve
-    // tributary spacing while reducing per-step erratic zigs.
-    let meander_bias = {
-        let coarse = sample_seed_field(world.seed, x, y, 14, 0xD1F1_0505);
-        let fine = sample_seed_field(world.seed, x, y, 6, 0xD1F1_0506);
-        (coarse * 0.55 + fine * 0.45) * 2.0 - 1.0
-    };
-    let mut candidates = Vec::with_capacity(8);
+    let coarse_meander = sample_seed_field(world.seed, x, y, 14, 0xD1F1_0505);
+    let fine_meander = sample_seed_field(world.seed, x, y, 6, 0xD1F1_0506);
 
-    for (nx, ny) in world.neighbors8(x, y) {
-        let next = world.idx(nx, ny);
-        if lake_id[idx].is_some() && lake_id[idx] == lake_id[next] {
-            continue;
-        }
-        let neighbor_hydro = conditioning.hydro_elevation[next];
-        if neighbor_hydro > current_hydro + HYDRO_EPSILON {
-            continue;
-        }
-        let is_flat_or_equal = (neighbor_hydro - current_hydro).abs() <= HYDRO_EPSILON;
-        if is_flat_or_equal && conditioning.rank[next] >= conditioning.rank[idx] {
-            continue;
-        }
-
-        let distance = neighbor_distance(x, y, nx, ny);
-        let dir = direction_vector((x, y), (nx, ny)).unwrap_or((0.0, 0.0));
-        let hydro_drop = (current_hydro - conditioning.hydro_elevation[next]).max(0.0);
-        let raw_drop = (current_raw - world.tiles[next].raw_elevation).max(-0.08);
-        let slope = hydro_drop / distance;
-        let raw_slope = raw_drop / distance;
-        let alignment = dir.0 * preferred.0 + dir.1 * preferred.1;
-        let aspect_cross = dir.0 * -preferred.1 + dir.1 * preferred.0;
-        let persistence_bonus = persistence
-            .map(|prev| (dir.0 * prev.0 + dir.1 * prev.1).max(-0.5))
-            .unwrap_or(0.0);
-        let flat_bonus = if hydro_drop <= HYDRO_EPSILON {
-            raw_slope.max(0.0) * 2.1 + alignment * 0.15
-        } else {
-            0.0
-        };
-        let meander_bonus = if slope < 0.034 {
-            aspect_cross * meander_bias * (0.18 * (1.0 - (slope / 0.034).clamp(0.0, 1.0)))
-        } else {
-            0.0
-        };
-        let anisotropy_penalty = if slope < 0.022 {
-            let cardinal = if dir.0.abs() > 0.92 || dir.1.abs() > 0.92 {
-                1.0
-            } else {
-                0.0
-            };
-            let diagonal = if dir.0.abs() > 0.65 && dir.1.abs() > 0.65 {
-                1.0
-            } else {
-                0.0
-            };
-            cardinal * (0.06 + lowland_opening * 0.03) + diagonal * 0.035
-        } else {
-            0.0
-        };
-        let spacing_bonus = (tributary_opportunity - 0.5) * (0.30 + lowland_opening * 0.14);
-        let mountain_exit_bonus = if mountain_front > 0.0 {
-            let exit_noise = sample_seed_field(world.seed, x, y, 14, 0xD1F1_0303) * 2.0 - 1.0;
-            let lateral_preference = aspect_cross * exit_noise;
-            lateral_preference * 0.28 * mountain_front
-        } else {
-            0.0
-        };
-        let parent_bonus = if Some(next) == conditioning.parent[idx] {
-            0.02
-        } else {
-            0.0
-        };
-        let score = slope * 9.4
-            + raw_slope.max(0.0) * 2.8
-            + alignment * 1.05
-            + persistence_bonus * 0.12
-            + flat_bonus
-            + meander_bonus
-            + spacing_bonus
-            + mountain_exit_bonus
-            + parent_bonus
-            - anisotropy_penalty;
-        candidates.push(RoutingCandidate {
-            next,
-            score,
-            slope,
-            direction: (
-                (nx as isize - x as isize).signum(),
-                (ny as isize - y as isize).signum(),
-            ),
-            mountain_front,
-        });
+    RoutingScoring {
+        preferred,
+        persistence,
+        tributary_opportunity: sample_seed_field(world.seed, x, y, 22, 0xD1F1_0202),
+        mountain_front: mountain_front_factor(world, idx),
+        mountain_exit_bias: sample_seed_field(world.seed, x, y, 14, 0xD1F1_0303) * 2.0 - 1.0,
+        lowland_opening: lowland_opening_factor(world, idx),
+        // Per-tile (not per-pair) smooth bias for consistent lateral preference along a path.
+        // Two scales preserve tributary spacing while reducing per-step erratic zigs.
+        meander_bias: (coarse_meander * 0.55 + fine_meander * 0.45) * 2.0 - 1.0,
     }
-
-    candidates.sort_by(|a, b| {
-        b.score
-            .total_cmp(&a.score)
-            .then_with(|| a.next.cmp(&b.next))
-    });
-    candidates
 }
 
+fn candidate_geometry(
+    world: &World,
+    conditioning: &ConditioningState,
+    from: (usize, usize),
+    current_hydro: f32,
+    current_raw: f32,
+    nx: usize,
+    ny: usize,
+) -> CandidateGeometry {
+    let (x, y) = from;
+    let next = world.idx(nx, ny);
+    let distance = neighbor_distance(x, y, nx, ny);
+    let unit_direction = direction_vector((x, y), (nx, ny)).unwrap_or((0.0, 0.0));
+    let hydro_drop = (current_hydro - conditioning.hydro_elevation[next]).max(0.0);
+    let raw_drop = (current_raw - world.tiles[next].raw_elevation).max(-0.08);
+
+    CandidateGeometry {
+        next,
+        distance,
+        direction: (
+            (nx as isize - x as isize).signum(),
+            (ny as isize - y as isize).signum(),
+        ),
+        unit_direction,
+        hydro_drop,
+        raw_slope: raw_drop / distance,
+    }
+}
+
+fn score_routing_candidate(
+    scoring: &RoutingScoring,
+    geometry: &CandidateGeometry,
+    slope: f32,
+    parent: Option<usize>,
+) -> f32 {
+    let dir = geometry.unit_direction;
+    let alignment = dir.0 * scoring.preferred.0 + dir.1 * scoring.preferred.1;
+    let aspect_cross = dir.0 * -scoring.preferred.1 + dir.1 * scoring.preferred.0;
+    let persistence_bonus = scoring
+        .persistence
+        .map(|prev| (dir.0 * prev.0 + dir.1 * prev.1).max(-0.5))
+        .unwrap_or(0.0);
+    let flat_bonus = if geometry.hydro_drop <= HYDRO_EPSILON {
+        geometry.raw_slope.max(0.0) * 2.1 + alignment * 0.15
+    } else {
+        0.0
+    };
+    let meander_bonus = if slope < 0.034 {
+        aspect_cross * scoring.meander_bias * (0.18 * (1.0 - (slope / 0.034).clamp(0.0, 1.0)))
+    } else {
+        0.0
+    };
+    let anisotropy_penalty = if slope < 0.022 {
+        let cardinal = if dir.0.abs() > 0.92 || dir.1.abs() > 0.92 {
+            1.0
+        } else {
+            0.0
+        };
+        let diagonal = if dir.0.abs() > 0.65 && dir.1.abs() > 0.65 {
+            1.0
+        } else {
+            0.0
+        };
+        cardinal * (0.06 + scoring.lowland_opening * 0.03) + diagonal * 0.035
+    } else {
+        0.0
+    };
+    let spacing_bonus =
+        (scoring.tributary_opportunity - 0.5) * (0.30 + scoring.lowland_opening * 0.14);
+    let mountain_exit_bonus = if scoring.mountain_front > 0.0 {
+        aspect_cross * scoring.mountain_exit_bias * 0.28 * scoring.mountain_front
+    } else {
+        0.0
+    };
+    let parent_bonus = if Some(geometry.next) == parent {
+        0.02
+    } else {
+        0.0
+    };
+
+    slope * 9.4
+        + geometry.raw_slope.max(0.0) * 2.8
+        + alignment * 1.05
+        + persistence_bonus * 0.12
+        + flat_bonus
+        + meander_bonus
+        + spacing_bonus
+        + mountain_exit_bonus
+        + parent_bonus
+        - anisotropy_penalty
+}
 fn reduce_directional_bias(
     world: &World,
     ocean: &[bool],
