@@ -6,7 +6,7 @@ use rand::random;
 use time::OffsetDateTime;
 use time::format_description::FormatItem;
 use time::macros::format_description;
-use worldgen::{RenderConfig, WorldConfig, build_metadata, generate_world, render_world};
+use worldgen::{RenderConfig, World, WorldConfig, build_metadata, generate_world, render_world};
 
 #[derive(Debug, Parser)]
 #[command(name = "mapgen")]
@@ -18,6 +18,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Re-render a previously exported tiles.json to a PNG for verification.
+    Render {
+        /// Path to a tiles.json file (or a run directory containing one).
+        #[arg(long)]
+        input: PathBuf,
+    },
     Generate {
         #[arg(long)]
         seed: Option<u64>,
@@ -48,6 +54,9 @@ enum Commands {
         world_size: u32,
         #[arg(long, default_value = "output")]
         out_dir: PathBuf,
+        /// Export full per-tile data as tiles.json alongside the PNG.
+        #[arg(long, default_value_t = false)]
+        export_tiles: bool,
     },
 }
 
@@ -61,6 +70,30 @@ fn main() {
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     match cli.command {
+        Commands::Render { input } => {
+            let tiles_path = if input.is_dir() {
+                input.join("tiles.json")
+            } else {
+                input.clone()
+            };
+            let run_dir = tiles_path
+                .parent()
+                .ok_or("tiles.json has no parent directory")?
+                .to_path_buf();
+            let json = fs::read_to_string(&tiles_path)
+                .map_err(|err| format!("failed to read {}: {err}", tiles_path.display()))?;
+            let world: World = serde_json::from_str(&json)
+                .map_err(|err| format!("failed to parse tiles.json: {err}"))?;
+            let render_scale =
+                (1536_u32 / world.width.max(world.height) as u32).clamp(1, 32);
+            let image = render_world(&world, RenderConfig { scale: render_scale });
+            let out_path = run_dir.join("rerendered.png");
+            image
+                .save(&out_path)
+                .map_err(|err| format!("failed to write PNG: {err}"))?;
+            println!("wrote {}", out_path.display());
+            Ok(())
+        }
         Commands::Generate {
             seed,
             width,
@@ -74,6 +107,7 @@ fn run() -> Result<(), String> {
             channel_density,
             world_size,
             out_dir,
+            export_tiles,
         } => {
             let seed = select_seed(seed);
             validate_dimensions(width, height)?;
@@ -132,6 +166,14 @@ fn run() -> Result<(), String> {
                 .map_err(|err| format!("failed to serialize metadata: {err}"))?;
             fs::write(&json_path, json)
                 .map_err(|err| format!("failed to write metadata: {err}"))?;
+            if export_tiles {
+                let tiles_path = run_dir.join("tiles.json");
+                let tiles_json = serde_json::to_string(&world)
+                    .map_err(|err| format!("failed to serialize tiles: {err}"))?;
+                fs::write(&tiles_path, tiles_json)
+                    .map_err(|err| format!("failed to write tiles: {err}"))?;
+                println!("wrote {}", tiles_path.display());
+            }
 
             println!("seed {}", seed);
             println!("wrote {}", run_dir.display());

@@ -7,7 +7,7 @@ Rust workspace that generates seeded procedural world maps as PNG files.
 ```
 crates/
   worldgen/   — library: generation, hydrology, climate, biomes, rendering
-  cli/        — binary: `mapgen generate` CLI
+  cli/        — binary: `mapgen generate` and `mapgen render` CLI
 output/       — generated maps land here (gitignored)
 ```
 
@@ -17,11 +17,15 @@ output/       — generated maps land here (gitignored)
 cargo build
 cargo run --bin mapgen -- generate --seed 42
 cargo run --bin mapgen -- generate --seed 42 --width 1024 --height 1024 --world-size 384
+cargo run --bin mapgen -- generate --seed 42 --export-tiles   # also writes tiles.json
+cargo run --bin mapgen -- render --input output/<run-dir>     # re-render tiles.json → rerendered.png
 cargo run --example river_audit          # river network diagnostics across 5 seeds
 cargo test
 ```
 
 ## CLI flags
+
+### `generate`
 
 | Flag | Default | Notes |
 |------|---------|-------|
@@ -36,8 +40,46 @@ cargo test
 | `--rainfall-scale` | 1.0 | 0.25–4.0; scales precipitation before runoff |
 | `--runoff-scale` | 1.0 | 0.25–4.0; multiplies per-tile runoff coefficient |
 | `--channel-density` | 1.0 | 0.25–4.0; lowers/raises discharge threshold for river classification |
+| `--export-tiles` | off | write `tiles.json` with full per-tile data (see below) |
 
 `--scale` is the main lever for larger worlds. `--scale 2` generates 768×768 tiles with the same ~4 px/tile density as the 384×384 default — a genuinely bigger world, not a zoomed-in view. It automatically sets `world_size=384` so each tile covers the same geographic area at any scale. For asymmetric maps use `--width`/`--height` directly and set `--world-size 384` manually.
+
+### `render`
+
+| Flag | Notes |
+|------|-------|
+| `--input <path>` | path to a `tiles.json` file or a run directory containing one |
+
+Deserializes `tiles.json` and re-renders to `rerendered.png` in the same directory. Output is byte-for-byte identical to the original `map.png`. Useful for verifying that the tile export round-trips correctly.
+
+## Tile export (`tiles.json`)
+
+Produced by `generate --export-tiles`. Top-level shape:
+
+```json
+{ "seed": 42, "width": 384, "height": 384, "sea_level": 0.52, "world_size": 0, "tiles": [...] }
+```
+
+`tiles` is a flat row-major array (`index = y * width + x`). Each tile:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `surface` | string | `"Ocean"` `"Coast"` `"Land"` `"Lake"` `"River"` |
+| `biome` | string | see `Biome` enum in `world.rs` |
+| `raw_elevation` | f32 | 0–1; hillshading baked in PNG, not recoverable from it |
+| `temperature` | f32 | 0–1 |
+| `moisture` | f32 | 0–1 |
+| `discharge` | f32 | accumulated upstream runoff; 0 for non-river tiles |
+| `channel_order` | u8 | 0 (non-river) or 1–4 |
+| `downstream` | int\|null | flat tile index of next drainage tile; null at sinks |
+| `basin_id` | int\|null | shared drainage-basin identifier |
+| `lake_id` | int\|null | lake identifier for lake tiles |
+| `water_level` | f32\|null | lake surface elevation |
+| `hydro_elevation` | f32 | depression-filled elevation used for routing |
+| `contributing_area` | f32 | upstream tile count |
+| `precipitation` | f32 | raw precipitation value |
+| `runoff` | f32 | per-tile runoff coefficient |
+| `stream_power` | f32 | erosive power index |
 
 ## worldgen library — public API
 
