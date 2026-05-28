@@ -23,15 +23,21 @@ pub(super) fn populate_climate(
             let lat = latitude_factor(y, world.height);
             let climate_noise =
                 octave_noise(climate, x as f64 * 0.008, y as f64 * 0.008, 3, 0.5, 2.0);
-            let seasonal_noise =
-                octave_noise(climate, x as f64 * 0.004 - 19.0, y as f64 * 0.004 + 31.0, 2, 0.5, 2.0);
+            let seasonal_noise = octave_noise(
+                climate,
+                x as f64 * 0.004 - 19.0,
+                y as f64 * 0.004 + 31.0,
+                2,
+                0.5,
+                2.0,
+            );
             let lowland = 1.0 - ((elevation - world.sea_level) / 0.24).clamp(0.0, 1.0);
             let equatorial_warmth = (1.0 - lat.powf(1.15)).clamp(0.0, 1.0);
             let subtropical_cooling =
                 smoothstep(0.16, 0.34, lat) * (1.0_f32 - smoothstep(0.46, 0.68, lat));
-            let maritime_temp = nearby_water[idx] * 0.05 + (1.0 - regional_continentality[idx]) * 0.05;
-            let temperature = (equatorial_warmth * 0.88
-                - subtropical_cooling * 0.04
+            let maritime_temp =
+                nearby_water[idx] * 0.05 + (1.0 - regional_continentality[idx]) * 0.05;
+            let temperature = (equatorial_warmth * 0.88 - subtropical_cooling * 0.04
                 + climate_noise * 0.09
                 + seasonal_noise * 0.06
                 + maritime_temp
@@ -110,9 +116,11 @@ fn compute_regional_continentality(world: &World, ocean: &[bool]) -> Vec<f32> {
         } else {
             1.0
         };
-        let distance_bias = (((x.min(world.width - 1 - x) + y.min(world.height - 1 - y)) as f32) / max_extent)
+        let distance_bias = (((x.min(world.width - 1 - x) + y.min(world.height - 1 - y)) as f32)
+            / max_extent)
             .clamp(0.0, 1.0);
-        field[idx] = (distance_bias * 0.5 + mean_fetch * 0.35 + (1.0 - openness) * 0.25).clamp(0.0, 1.0);
+        field[idx] =
+            (distance_bias * 0.5 + mean_fetch * 0.35 + (1.0 - openness) * 0.25).clamp(0.0, 1.0);
     }
     field
 }
@@ -155,17 +163,17 @@ fn moisture_value(
         return 1.0;
     }
 
-    let ocean_influence =
-        1.0 - (distance_to_ocean[idx] as f32 / (world.width.max(world.height) as f32 * 0.45))
+    let ocean_influence = 1.0
+        - (distance_to_ocean[idx] as f32 / (world.width.max(world.height) as f32 * 0.45))
             .clamp(0.0, 1.0);
     let rain_shadow = rain_shadow(world, ocean, x, y);
     let lat = latitude_factor(y, world.height);
-    let subtropical_dryness =
-        smoothstep(0.14, 0.28, lat) * (1.0_f32 - smoothstep(0.42, 0.62, lat));
+    let subtropical_dryness = smoothstep(0.14, 0.28, lat) * (1.0_f32 - smoothstep(0.42, 0.62, lat));
     let equatorial_wetness = (1.0_f32 - smoothstep(0.0, 0.34, lat)).clamp(0.0, 1.0);
     let polar_dryness = smoothstep(0.68, 0.92, lat);
-    let zonal = (0.22 + equatorial_wetness * 0.32 - subtropical_dryness * 0.22 - polar_dryness * 0.08)
-        .clamp(0.0, 1.0);
+    let zonal =
+        (0.22 + equatorial_wetness * 0.32 - subtropical_dryness * 0.22 - polar_dryness * 0.08)
+            .clamp(0.0, 1.0);
     let noise = octave_noise(
         climate,
         x as f64 * 0.014 + 7.0,

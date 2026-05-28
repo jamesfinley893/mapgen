@@ -11,6 +11,8 @@ pub struct WorldMetadata {
     pub temperature_bias: f32,
     pub moisture_bias: f32,
     pub render_scale: u32,
+    pub world_size: u32,
+    pub effective_world_size: f32,
     pub land_tiles: usize,
     pub ocean_tiles: usize,
     pub river_tiles: usize,
@@ -104,6 +106,8 @@ pub fn build_metadata(world: &World, config: &WorldConfig) -> WorldMetadata {
         temperature_bias: config.temperature_bias,
         moisture_bias: config.moisture_bias,
         render_scale: config.render_scale,
+        world_size: config.world_size,
+        effective_world_size: world.effective_world_size(),
         land_tiles,
         ocean_tiles,
         river_tiles,
@@ -302,7 +306,8 @@ fn mountain_exit_irregularity_score(world: &World) -> f32 {
     let mut total_score = 0.0_f32;
 
     for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.surface != Surface::River || !matches!(tile.biome, Biome::Alpine | Biome::Foothills) {
+        if tile.surface != Surface::River || !matches!(tile.biome, Biome::Alpine | Biome::Foothills)
+        {
             continue;
         }
         let Some(next) = tile.downstream else {

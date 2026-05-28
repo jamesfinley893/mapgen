@@ -33,7 +33,13 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
             draw_hills(&mut image, x as u32, y as u32, scale);
         } else if matches!(tile.biome, Biome::Desert | Biome::PolarDesert) {
             draw_dunes(&mut image, x as u32, y as u32, scale);
-        } else if matches!(tile.biome, Biome::TemperateForest | Biome::BorealForest | Biome::Rainforest | Biome::TropicalForest) {
+        } else if matches!(
+            tile.biome,
+            Biome::TemperateForest
+                | Biome::BorealForest
+                | Biome::Rainforest
+                | Biome::TropicalForest
+        ) {
             draw_forest(&mut image, x as u32, y as u32, scale);
         }
 
@@ -105,7 +111,11 @@ fn draw_hills(image: &mut RgbaImage, x: u32, y: u32, scale: u32) {
     let dark = Rgba([102, 111, 84, 255]);
     if scale > 1 {
         for px in 0..scale {
-            let py = if px < scale / 2 { scale / 2 } else { scale / 2 + px.saturating_sub(scale / 2) / 2 };
+            let py = if px < scale / 2 {
+                scale / 2
+            } else {
+                scale / 2 + px.saturating_sub(scale / 2) / 2
+            };
             image.put_pixel(ox + px, oy + py.min(scale - 1), dark);
         }
     } else {
@@ -157,7 +167,8 @@ fn draw_lake(image: &mut RgbaImage, x: u32, y: u32, scale: u32) {
 fn draw_river(image: &mut RgbaImage, world: &World, x: u32, y: u32, scale: u32, flow: f32) {
     let ox = x * scale;
     let oy = y * scale;
-    let base = ((world.width * world.height) as f32 * 0.00075).max(12.0);
+    let ws = world.effective_world_size();
+    let base = (ws * ws * 0.00075).max(12.0);
     let c = if flow > base * 18.0 {
         Rgba([49, 132, 201, 255])
     } else if flow > base * 6.5 {

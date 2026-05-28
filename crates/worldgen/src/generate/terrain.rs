@@ -2,11 +2,11 @@ use noise::OpenSimplex;
 
 use crate::World;
 
+use super::EROSION_STEPS;
 use super::util::{
     direction_vector, hash01, latitude_factor, local_aspect_on_values, neighbor_distance,
     normalize, octave_noise, ridge_noise, sample_seed_field, smoothstep,
 };
-use super::EROSION_STEPS;
 
 #[derive(Clone, Copy)]
 struct Plate {
@@ -89,25 +89,50 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
     let routing_noise_field: Vec<(f32, f32)> = (0..n)
         .map(|idx| {
             let (x, y) = world.coords(idx);
-            routing_field_vector(world.seed, x, y, (20.0 * res_x).round().max(1.0) as usize, 1)
+            routing_field_vector(
+                world.seed,
+                x,
+                y,
+                (20.0 * res_x).round().max(1.0) as usize,
+                1,
+            )
         })
         .collect();
     let flow_opportunity: Vec<f32> = (0..n)
         .map(|idx| {
             let (x, y) = world.coords(idx);
-            sample_seed_field(world.seed, x, y, (24.0 * res_x).round().max(1.0) as usize, 0xA11E_0001)
+            sample_seed_field(
+                world.seed,
+                x,
+                y,
+                (24.0 * res_x).round().max(1.0) as usize,
+                0xA11E_0001,
+            )
         })
         .collect();
     let trib_opportunity: Vec<f32> = (0..n)
         .map(|idx| {
             let (x, y) = world.coords(idx);
-            sample_seed_field(world.seed, x, y, (28.0 * res_x).round().max(1.0) as usize, 0xA11E_0101)
+            sample_seed_field(
+                world.seed,
+                x,
+                y,
+                (28.0 * res_x).round().max(1.0) as usize,
+                0xA11E_0101,
+            )
         })
         .collect();
     let meander_field: Vec<f32> = (0..n)
         .map(|idx| {
             let (x, y) = world.coords(idx);
-            sample_seed_field(world.seed, x, y, (18.0 * res_x).round().max(1.0) as usize, 0xA11E_0002) * 2.0 - 1.0
+            sample_seed_field(
+                world.seed,
+                x,
+                y,
+                (18.0 * res_x).round().max(1.0) as usize,
+                0xA11E_0002,
+            ) * 2.0
+                - 1.0
         })
         .collect();
     let mut basement = vec![0.0_f32; world.tiles.len()];
@@ -148,8 +173,11 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
         for idx in 0..terrain.len() {
             let uplift_core =
                 smoothstep(0.48, 0.92, axial_uplift[idx] + shoulder_uplift[idx] * 0.24);
-            let orogen_margin =
-                smoothstep(0.16, 0.54, shoulder_uplift[idx] + plateau_support[idx] * 0.55);
+            let orogen_margin = smoothstep(
+                0.16,
+                0.54,
+                shoulder_uplift[idx] + plateau_support[idx] * 0.55,
+            );
             let elevation_damping = 1.0
                 - smoothstep(0.54, 0.86, terrain[idx]) * (0.48 + orogen_margin * 0.18)
                 - smoothstep(0.72, 0.94, terrain[idx]) * (0.22 + (1.0 - uplift_core) * 0.16);
@@ -195,8 +223,11 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
             let uplift_core =
                 smoothstep(0.48, 0.92, axial_uplift[idx] + shoulder_uplift[idx] * 0.24);
             let interior_high = highland * (1.0 - uplift_core);
-            let shoulder_zone =
-                smoothstep(0.12, 0.48, shoulder_uplift[idx] + plateau_support[idx] * 0.4);
+            let shoulder_zone = smoothstep(
+                0.12,
+                0.48,
+                shoulder_uplift[idx] + plateau_support[idx] * 0.4,
+            );
             let plain_zone = smoothstep(0.38, 0.82, craton_stability[idx]) * (1.0 - uplift_core);
             let basin_zone = smoothstep(
                 0.24,
@@ -284,9 +315,7 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
                 + shoulder_zone * 0.0025 * (1.0 - uplift_core))
                 * (0.62 + progress * 0.48);
 
-            next[idx] = (current
-                - incision
-                + diffusion
+            next[idx] = (current - incision + diffusion
                 - ridge_decay
                 - alpine_relax
                 - slope_failure
@@ -322,14 +351,12 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
                                 }
                                 let sidx = world.idx(sx as usize, sy as usize);
                                 let height_above = (terrain[sidx] - current).max(0.0);
-                                let carve =
-                                    lateral_strength * weight * (0.45 + height_above * 3.4);
+                                let carve = lateral_strength * weight * (0.45 + height_above * 3.4);
                                 lateral_erosion[sidx] += carve.min(0.015);
                             }
                         }
                         if floodplain_scale > 0.08 {
-                            for (distance, weight) in [(1_isize, 0.55_f32), (2_isize, 0.32_f32)]
-                            {
+                            for (distance, weight) in [(1_isize, 0.55_f32), (2_isize, 0.32_f32)] {
                                 for side in [side_a, side_b] {
                                     let sx = x as isize + side.0 * distance;
                                     let sy = y as isize + side.1 * distance;
@@ -340,9 +367,7 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
                                     let build = deposition
                                         * floodplain_scale
                                         * weight
-                                        * (0.003
-                                            + basin_zone * 0.0035
-                                            + plain_zone * 0.0025);
+                                        * (0.003 + basin_zone * 0.0035 + plain_zone * 0.0025);
                                     next[sidx] = (next[sidx] + build.min(0.006)).min(1.0);
                                 }
                             }
@@ -370,8 +395,8 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
     const MIN_LAND_FRAC: f32 = 0.25;
     let mut elevs: Vec<f32> = world.tiles.iter().map(|t| t.raw_elevation).collect();
     elevs.sort_by(|a, b| a.total_cmp(b));
-    let threshold_idx = ((elevs.len() as f32 * (1.0 - MIN_LAND_FRAC)) as usize)
-        .min(elevs.len().saturating_sub(1));
+    let threshold_idx =
+        ((elevs.len() as f32 * (1.0 - MIN_LAND_FRAC)) as usize).min(elevs.len().saturating_sub(1));
     world.sea_level = world.sea_level.min(elevs[threshold_idx]);
 }
 
@@ -420,34 +445,28 @@ fn sample_tectonic_elevation(
     let plains = octave_noise(base, xf64 * 7.4 - 9.0, yf64 * 7.4 + 3.0, 4, 0.58, 2.15);
     let craton = octave_noise(base, xf64 * 0.65 + 2.0, yf64 * 0.65 - 4.0, 2, 0.5, 2.0);
     let ridge_detail = ridge_noise(ridge, xf64 * 4.2 + 13.0, yf64 * 4.2 - 6.0, 3);
-    let segment_noise =
-        octave_noise(base, xf64 * 3.4 + 23.0, yf64 * 3.4 - 19.0, 3, 0.56, 2.0);
-    let transfer_noise =
-        octave_noise(base, xf64 * 6.8 - 31.0, yf64 * 6.8 + 7.0, 2, 0.5, 2.0);
+    let segment_noise = octave_noise(base, xf64 * 3.4 + 23.0, yf64 * 3.4 - 19.0, 3, 0.56, 2.0);
+    let transfer_noise = octave_noise(base, xf64 * 6.8 - 31.0, yf64 * 6.8 + 7.0, 2, 0.5, 2.0);
     let basin_noise = octave_noise(base, xf64 * 2.8 - 17.0, yf64 * 2.8 + 29.0, 3, 0.52, 2.0);
-    let plateau_noise =
-        octave_noise(base, xf64 * 1.9 + 37.0, yf64 * 1.9 - 15.0, 3, 0.5, 2.0);
-    let plain_bands =
-        octave_noise(base, xf64 * 1.25 - 41.0, yf64 * 1.25 + 33.0, 3, 0.54, 2.0);
+    let plateau_noise = octave_noise(base, xf64 * 1.9 + 37.0, yf64 * 1.9 - 15.0, 3, 0.5, 2.0);
+    let plain_bands = octave_noise(base, xf64 * 1.25 - 41.0, yf64 * 1.25 + 33.0, 3, 0.54, 2.0);
     let shelf_break = octave_noise(base, xf64 * 0.78 - 13.0, yf64 * 0.78 + 17.0, 2, 0.5, 2.0);
     let margin_variation = octave_noise(base, xf64 * 1.6 + 51.0, yf64 * 1.6 - 27.0, 3, 0.55, 2.0);
 
     // Noise provides the broad-scale organic continent texture; lobe support shifts
     // which noise regions become land without replacing the noise signal entirely.
-    let continental_density = (continental.support * 0.36
-        + continent * 0.40
-        + shelves * 0.10
-        + craton * 0.12
-        - continental.ocean_basin * 0.18
-        - continental.seaway_cut * 0.14
-        + continental.major_secondary_balance * 0.04)
-        .clamp(0.0, 1.0);
-    let continental_margin = (continental.support * 0.42
-        + shelf_break * 0.20
-        + margin_variation * 0.16
-        - continental.ocean_basin * 0.18
-        - continental.seaway_cut * 0.14)
-        .clamp(0.0, 1.0);
+    let seaway_land_cut = continental.seaway_cut * smoothstep(0.18, 0.62, continental.support);
+    let continental_density =
+        (continental.support * 0.36 + continent * 0.40 + shelves * 0.10 + craton * 0.12
+            - continental.ocean_basin * 0.18
+            - seaway_land_cut * 0.14
+            + continental.major_secondary_balance * 0.04)
+            .clamp(0.0, 1.0);
+    let continental_margin =
+        (continental.support * 0.42 + shelf_break * 0.20 + margin_variation * 0.16
+            - continental.ocean_basin * 0.18
+            - seaway_land_cut * 0.14)
+            .clamp(0.0, 1.0);
     let continent_mask = (continental_density * 0.72
         + continental_margin * 0.12
         + continental.interior * 0.10
@@ -456,18 +475,15 @@ fn sample_tectonic_elevation(
 
     let tectonics = sample_uplift_field(plates, xf, yf);
     let land_mask = smoothstep(0.38, 0.72, continent_mask);
-    let segmentation = smoothstep(0.42, 0.78, segment_noise) * 0.75
-        + smoothstep(0.52, 0.86, ridge_detail) * 0.25;
+    let segmentation =
+        smoothstep(0.42, 0.78, segment_noise) * 0.75 + smoothstep(0.52, 0.86, ridge_detail) * 0.25;
     let transfer_gap = 1.0 - smoothstep(0.58, 0.84, transfer_noise) * 0.62;
     let boundary_wide = smoothstep(0.08, 0.72, tectonics);
     let boundary_mid = smoothstep(0.22, 0.82, tectonics);
     let boundary_narrow = smoothstep(0.48, 0.94, tectonics);
-    let axial_uplift = (boundary_narrow
-        * segmentation
-        * transfer_gap
-        * (0.55 + ridge_detail * 0.35)
-        * land_mask)
-        .clamp(0.0, 1.0);
+    let axial_uplift =
+        (boundary_narrow * segmentation * transfer_gap * (0.55 + ridge_detail * 0.35) * land_mask)
+            .clamp(0.0, 1.0);
     let shoulder_uplift = ((boundary_mid - boundary_narrow * 0.55).max(0.0)
         * (0.30 + segment_noise * 0.20)
         * land_mask)
@@ -495,7 +511,7 @@ fn sample_tectonic_elevation(
         * land_mask)
         .clamp(0.0, 1.0);
     let basin_bias = (smoothstep(0.44, 0.82, basin_noise)
-        * (0.78 + continental.seaway_cut * 0.34 + continental.ocean_basin * 0.18)
+        * (0.78 + seaway_land_cut * 0.34 + continental.ocean_basin * 0.18)
         * (0.45 + (1.0 - boundary_narrow) * 0.4)
         * land_mask)
         .clamp(0.0, 1.0);
@@ -507,7 +523,7 @@ fn sample_tectonic_elevation(
         + continental.interior * 0.08
         - basin_bias * 0.10
         - continental.ocean_basin * 0.10
-        - continental.seaway_cut * 0.08)
+        - seaway_land_cut * 0.04)
         .clamp(0.0, 1.0);
 
     OrogenSample {
@@ -522,7 +538,11 @@ fn sample_tectonic_elevation(
     }
 }
 
-fn build_continental_config(seed: u64, world_units_x: f32, world_units_y: f32) -> ContinentalConfig {
+fn build_continental_config(
+    seed: u64,
+    world_units_x: f32,
+    world_units_y: f32,
+) -> ContinentalConfig {
     let world_area = world_units_x * world_units_y;
     let scale = world_area.sqrt();
     // For a 1×1 world: 3–5 land lobes, 2–4 basins, 1–2 seaways. Scale counts with world size.
@@ -532,44 +552,75 @@ fn build_continental_config(seed: u64, world_units_x: f32, world_units_y: f32) -
 
     let mut land_lobes = Vec::with_capacity(land_count);
     for i in 0..land_count {
-        let cx = hash01(seed.wrapping_add(0xC011_1000), i * 7 + 1, 0) * (world_units_x * 1.4) - world_units_x * 0.2;
-        let cy = hash01(seed.wrapping_add(0xC011_2000), i * 11 + 3, 0) * (world_units_y * 1.4) - world_units_y * 0.2;
-        let angle =
-            hash01(seed.wrapping_add(0xC011_3000), i * 13 + 5, 0) * std::f32::consts::TAU;
+        let cx = hash01(seed.wrapping_add(0xC011_1000), i * 7 + 1, 0) * (world_units_x * 1.4)
+            - world_units_x * 0.2;
+        let cy = hash01(seed.wrapping_add(0xC011_2000), i * 11 + 3, 0) * (world_units_y * 1.4)
+            - world_units_y * 0.2;
+        let angle = hash01(seed.wrapping_add(0xC011_3000), i * 13 + 5, 0) * std::f32::consts::TAU;
         let rx = 0.20 + hash01(seed.wrapping_add(0xC011_4000), i * 17 + 7, 0) * 0.30;
         let ry = 0.16 + hash01(seed.wrapping_add(0xC011_5000), i * 19 + 9, 0) * 0.26;
         let strength = 0.60 + hash01(seed.wrapping_add(0xC011_6000), i * 23 + 11, 0) * 0.34;
         let (sin_a, cos_a) = angle.sin_cos();
-        land_lobes.push(PreparedLobe { cx, cy, sin_a, cos_a, rx, ry, strength });
+        land_lobes.push(PreparedLobe {
+            cx,
+            cy,
+            sin_a,
+            cos_a,
+            rx,
+            ry,
+            strength,
+        });
     }
 
     let mut basins = Vec::with_capacity(basin_count);
     for i in 0..basin_count {
-        let cx = hash01(seed.wrapping_add(0xB451_1000), i * 7 + 2, 0) * (world_units_x * 1.4) - world_units_x * 0.2;
-        let cy = hash01(seed.wrapping_add(0xB451_2000), i * 11 + 4, 0) * (world_units_y * 1.4) - world_units_y * 0.2;
-        let angle =
-            hash01(seed.wrapping_add(0xB451_3000), i * 13 + 6, 0) * std::f32::consts::TAU;
+        let cx = hash01(seed.wrapping_add(0xB451_1000), i * 7 + 2, 0) * (world_units_x * 1.4)
+            - world_units_x * 0.2;
+        let cy = hash01(seed.wrapping_add(0xB451_2000), i * 11 + 4, 0) * (world_units_y * 1.4)
+            - world_units_y * 0.2;
+        let angle = hash01(seed.wrapping_add(0xB451_3000), i * 13 + 6, 0) * std::f32::consts::TAU;
         let rx = 0.18 + hash01(seed.wrapping_add(0xB451_4000), i * 17 + 8, 0) * 0.24;
         let ry = 0.14 + hash01(seed.wrapping_add(0xB451_5000), i * 19 + 10, 0) * 0.22;
         let strength = 0.55 + hash01(seed.wrapping_add(0xB451_6000), i * 23 + 12, 0) * 0.35;
         let (sin_a, cos_a) = angle.sin_cos();
-        basins.push(PreparedLobe { cx, cy, sin_a, cos_a, rx, ry, strength });
+        basins.push(PreparedLobe {
+            cx,
+            cy,
+            sin_a,
+            cos_a,
+            rx,
+            ry,
+            strength,
+        });
     }
 
     let mut seaways = Vec::with_capacity(seaway_count);
     for i in 0..seaway_count {
-        let cx = hash01(seed.wrapping_add(0x5EA0_1000), i * 5 + 1, 0) * (world_units_x * 1.4) - world_units_x * 0.2;
-        let cy = hash01(seed.wrapping_add(0x5EA0_2000), i * 9 + 3, 0) * (world_units_y * 1.4) - world_units_y * 0.2;
-        let angle =
-            hash01(seed.wrapping_add(0x5EA0_3000), i * 13 + 5, 0) * std::f32::consts::TAU;
+        let cx = hash01(seed.wrapping_add(0x5EA0_1000), i * 5 + 1, 0) * (world_units_x * 1.4)
+            - world_units_x * 0.2;
+        let cy = hash01(seed.wrapping_add(0x5EA0_2000), i * 9 + 3, 0) * (world_units_y * 1.4)
+            - world_units_y * 0.2;
+        let angle = hash01(seed.wrapping_add(0x5EA0_3000), i * 13 + 5, 0) * std::f32::consts::TAU;
         let width = 0.035 + hash01(seed.wrapping_add(0x5EA0_4000), i * 17 + 7, 0) * 0.09;
         let extent = 0.28 + hash01(seed.wrapping_add(0x5EA0_5000), i * 19 + 9, 0) * 0.34;
         let strength = 0.55 + hash01(seed.wrapping_add(0x5EA0_6000), i * 23 + 11, 0) * 0.30;
         let (sin_a, cos_a) = angle.sin_cos();
-        seaways.push(PreparedCut { cx, cy, sin_a, cos_a, width, extent, strength });
+        seaways.push(PreparedCut {
+            cx,
+            cy,
+            sin_a,
+            cos_a,
+            width,
+            extent,
+            strength,
+        });
     }
 
-    ContinentalConfig { land_lobes, basins, seaways }
+    ContinentalConfig {
+        land_lobes,
+        basins,
+        seaways,
+    }
 }
 
 fn sample_continental_fields(cfg: &ContinentalConfig, xf: f32, yf: f32) -> ContinentalFields {
@@ -605,16 +656,14 @@ fn sample_continental_fields(cfg: &ContinentalConfig, xf: f32, yf: f32) -> Conti
 
     let dominant = strongest.clamp(0.0, 1.0);
     let secondary = second.clamp(0.0, 1.0);
-    let blended = (dominant * 0.60
-        + secondary * 0.24
-        + (land_sum / land_count as f32).min(1.0) * 0.22
-        - basin_max * 0.22
-        - seaway_cut * 0.18)
-        .clamp(0.0, 1.0);
-    let support = (blended + (dominant - secondary).max(0.0) * 0.08).clamp(0.0, 1.0);
-    let interior =
-        ((interior_sum / land_count as f32) * 0.72 + dominant * 0.22 - basin_max * 0.10)
+    let blended =
+        (dominant * 0.60 + secondary * 0.24 + (land_sum / land_count as f32).min(1.0) * 0.22
+            - basin_max * 0.22
+            - seaway_cut * 0.18)
             .clamp(0.0, 1.0);
+    let support = (blended + (dominant - secondary).max(0.0) * 0.08).clamp(0.0, 1.0);
+    let interior = ((interior_sum / land_count as f32) * 0.72 + dominant * 0.22 - basin_max * 0.10)
+        .clamp(0.0, 1.0);
 
     ContinentalFields {
         support,
@@ -670,8 +719,7 @@ fn sample_uplift_field(plates: &[Plate], xf: f32, yf: f32) -> f32 {
     let rel_velocity = (best.4 - second.4, best.5 - second.5);
     let convergence =
         ((rel_velocity.0 * normal.0 + rel_velocity.1 * normal.1) * 0.5 + 0.5).clamp(0.0, 1.0);
-    let shear =
-        ((rel_velocity.0 * -normal.1 + rel_velocity.1 * normal.0).abs()).clamp(0.0, 1.0);
+    let shear = ((rel_velocity.0 * -normal.1 + rel_velocity.1 * normal.0).abs()).clamp(0.0, 1.0);
     let orogeny = smoothstep(0.45, 0.92, convergence * 0.9 + shear * 0.18);
 
     boundary * orogeny
@@ -729,7 +777,8 @@ fn simulate_erosion_flow(
                 0.0
             };
             let clustering = (opportunity - 0.5) * (0.018 + slope.min(0.03));
-            let score = slope + alignment * 0.045 + meander + clustering - if distance > 1.0 { 0.0015 } else { 0.0 };
+            let score = slope + alignment * 0.045 + meander + clustering
+                - if distance > 1.0 { 0.0015 } else { 0.0 };
             if score > best_score {
                 best_score = score;
                 best = Some(nidx);
@@ -859,7 +908,13 @@ fn local_aspect_on_surface(world: &World, terrain: &[f32], x: usize, y: usize) -
     local_aspect_on_values(terrain, world.width, world.height, x, y)
 }
 
-fn routing_field_vector(seed: u64, x: usize, y: usize, cell_size: usize, channel: u64) -> (f32, f32) {
+fn routing_field_vector(
+    seed: u64,
+    x: usize,
+    y: usize,
+    cell_size: usize,
+    channel: u64,
+) -> (f32, f32) {
     let angle = sample_seed_field(seed, x, y, cell_size, channel) * std::f32::consts::TAU;
     (angle.cos(), angle.sin())
 }

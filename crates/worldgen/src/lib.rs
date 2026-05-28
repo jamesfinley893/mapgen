@@ -62,7 +62,10 @@ mod tests {
             biome_for_tile(Surface::Land, 0.9, 0.5, 0.4, 0.5),
             Biome::Alpine
         );
-        assert_eq!(biome_for_tile(Surface::Ocean, 0.1, 0.5, 0.4, 0.5), Biome::Ocean);
+        assert_eq!(
+            biome_for_tile(Surface::Ocean, 0.1, 0.5, 0.4, 0.5),
+            Biome::Ocean
+        );
     }
 
     #[test]
@@ -70,8 +73,24 @@ mod tests {
         let world = generate_world(&test_config()).unwrap();
         let metadata = build_metadata(&world, &test_config());
         assert_eq!(metadata.width, 96);
+        assert_eq!(metadata.world_size, test_config().world_size);
+        assert_eq!(metadata.effective_world_size, 96.0);
         assert!(!metadata.biome_counts.is_empty());
-        assert!(metadata.land_tiles + metadata.ocean_tiles + metadata.lake_tiles >= world.tiles.len());
+        assert!(
+            metadata.land_tiles + metadata.ocean_tiles + metadata.lake_tiles >= world.tiles.len()
+        );
         assert!(metadata.largest_basin_area > 0);
+    }
+
+    #[test]
+    fn metadata_records_explicit_world_size() {
+        let config = WorldConfig {
+            world_size: 64,
+            ..test_config()
+        };
+        let world = generate_world(&config).unwrap();
+        let metadata = build_metadata(&world, &config);
+        assert_eq!(metadata.world_size, 64);
+        assert_eq!(metadata.effective_world_size, 64.0);
     }
 }

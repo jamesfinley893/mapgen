@@ -65,9 +65,8 @@ fn run() -> Result<(), String> {
             out_dir,
         } => {
             let seed = select_seed(seed);
-            let render_scale = scale.unwrap_or_else(|| {
-                (1536_u32 / width.max(height) as u32).max(1)
-            });
+            let render_scale =
+                scale.unwrap_or_else(|| (1536_u32 / width.max(height) as u32).max(1));
             let config = WorldConfig {
                 seed,
                 width,
@@ -81,18 +80,27 @@ fn run() -> Result<(), String> {
             config.validate()?;
 
             let world = generate_world(&config)?;
-            let image = render_world(&world, RenderConfig { scale: render_scale });
+            let image = render_world(
+                &world,
+                RenderConfig {
+                    scale: render_scale,
+                },
+            );
             let metadata = build_metadata(&world, &config);
             let run_dir = build_run_output_dir(&out_dir, seed, OffsetDateTime::now_utc())?;
             let png_path = run_dir.join("map.png");
             let json_path = run_dir.join("metadata.json");
 
-            fs::create_dir_all(&run_dir).map_err(|err| format!("failed to create output directory: {err}"))?;
+            fs::create_dir_all(&run_dir)
+                .map_err(|err| format!("failed to create output directory: {err}"))?;
 
-            image.save(&png_path).map_err(|err| format!("failed to write PNG: {err}"))?;
+            image
+                .save(&png_path)
+                .map_err(|err| format!("failed to write PNG: {err}"))?;
             let json = serde_json::to_string_pretty(&metadata)
                 .map_err(|err| format!("failed to serialize metadata: {err}"))?;
-            fs::write(&json_path, json).map_err(|err| format!("failed to write metadata: {err}"))?;
+            fs::write(&json_path, json)
+                .map_err(|err| format!("failed to write metadata: {err}"))?;
 
             println!("seed {}", seed);
             println!("wrote {}", run_dir.display());
@@ -107,7 +115,11 @@ fn select_seed(seed: Option<u64>) -> u64 {
     seed.unwrap_or_else(|| random::<u64>())
 }
 
-fn build_run_output_dir(base: &std::path::Path, seed: u64, now: OffsetDateTime) -> Result<PathBuf, String> {
+fn build_run_output_dir(
+    base: &std::path::Path,
+    seed: u64,
+    now: OffsetDateTime,
+) -> Result<PathBuf, String> {
     Ok(base.join(build_run_dir_name(seed, now)?))
 }
 

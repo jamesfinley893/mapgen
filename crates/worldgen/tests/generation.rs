@@ -71,7 +71,12 @@ fn ocean_tiles_are_boundary_connected() {
 #[test]
 fn worlds_have_at_least_one_river() {
     let world = generate_world(&config()).unwrap();
-    assert!(world.tiles.iter().any(|tile| tile.surface == Surface::River));
+    assert!(
+        world
+            .tiles
+            .iter()
+            .any(|tile| tile.surface == Surface::River)
+    );
 }
 
 #[test]
@@ -173,9 +178,16 @@ fn seed_42_does_not_collapse_into_alpine_blanket() {
         .iter()
         .filter(|tile| tile.surface != Surface::Ocean)
         .count();
-    let alpine_tiles = world.tiles.iter().filter(|tile| tile.biome == Biome::Alpine).count();
+    let alpine_tiles = world
+        .tiles
+        .iter()
+        .filter(|tile| tile.biome == Biome::Alpine)
+        .count();
     let alpine_fraction = alpine_tiles as f32 / land_tiles.max(1) as f32;
-    assert!(alpine_fraction < 0.42, "alpine fraction too high: {alpine_fraction}");
+    assert!(
+        alpine_fraction < 0.42,
+        "alpine fraction too high: {alpine_fraction}"
+    );
 }
 
 #[test]
@@ -211,8 +223,15 @@ fn fixed_seeds_still_produce_meaningful_high_ranges() {
         ..WorldConfig::default()
     })
     .unwrap();
-    let alpine_tiles = world.tiles.iter().filter(|tile| tile.biome == Biome::Alpine).count();
-    assert!(alpine_tiles > 1200, "too little alpine terrain survived: {alpine_tiles}");
+    let alpine_tiles = world
+        .tiles
+        .iter()
+        .filter(|tile| tile.biome == Biome::Alpine)
+        .count();
+    assert!(
+        alpine_tiles > 1200,
+        "too little alpine terrain survived: {alpine_tiles}"
+    );
 }
 
 #[test]
@@ -232,7 +251,9 @@ fn lowlands_are_not_overwhelmingly_woodland_and_tundra() {
             if matches!(tile.surface, Surface::Ocean | Surface::Lake) {
                 continue;
             }
-            if tile.raw_elevation > world.sea_level + 0.18 || matches!(tile.biome, Biome::Alpine | Biome::Foothills) {
+            if tile.raw_elevation > world.sea_level + 0.18
+                || matches!(tile.biome, Biome::Alpine | Biome::Foothills)
+            {
                 continue;
             }
             lowland += 1;
@@ -241,7 +262,10 @@ fn lowlands_are_not_overwhelmingly_woodland_and_tundra() {
             }
         }
         let fraction = dominant as f32 / lowland.max(1) as f32;
-        assert!(fraction < 0.78, "lowland biome mix too narrow for seed {seed}: {fraction}");
+        assert!(
+            fraction < 0.78,
+            "lowland biome mix too narrow for seed {seed}: {fraction}"
+        );
     }
 }
 
@@ -255,8 +279,15 @@ fn fixed_seeds_produce_foothill_transitions() {
         ..WorldConfig::default()
     })
     .unwrap();
-    let foothill_tiles = world.tiles.iter().filter(|tile| tile.biome == Biome::Foothills).count();
-    assert!(foothill_tiles > 220, "too few foothill tiles: {foothill_tiles}");
+    let foothill_tiles = world
+        .tiles
+        .iter()
+        .filter(|tile| tile.biome == Biome::Foothills)
+        .count();
+    assert!(
+        foothill_tiles > 220,
+        "too few foothill tiles: {foothill_tiles}"
+    );
 }
 
 #[test]
@@ -303,7 +334,10 @@ fn trunk_rivers_are_less_mountain_confined_than_headwaters() {
     let trunk_threshold = ((ws * ws * 0.00075).max(12.0)) * 18.0;
     let headwater = mountain_banked_fraction(&world, stream_threshold, trunk_threshold);
     let trunk = mountain_banked_fraction(&world, trunk_threshold, f32::INFINITY);
-    assert!(trunk < 0.42, "trunk rivers still too mountain-confined: {trunk}");
+    assert!(
+        trunk < 0.42,
+        "trunk rivers still too mountain-confined: {trunk}"
+    );
     assert!(
         trunk <= headwater + 0.03,
         "trunk rivers became materially more confined than headwaters: trunk={trunk}, headwater={headwater}"
@@ -323,10 +357,7 @@ fn trunk_rivers_avoid_extreme_straight_runs() {
     let ws = world.effective_world_size();
     let trunk_threshold = ((ws * ws * 0.00075).max(12.0)) * 18.0;
     let run = longest_same_direction_run_for_threshold(&world, trunk_threshold);
-    assert!(
-        run <= 40,
-        "trunk river run too straight: {run}"
-    );
+    assert!(run <= 40, "trunk river run too straight: {run}");
 }
 
 #[test]
@@ -449,7 +480,10 @@ fn fixed_seed_set_includes_multiple_major_landmasses() {
             break;
         }
     }
-    assert!(found, "fixed seed set did not produce multiple major landmasses");
+    assert!(
+        found,
+        "fixed seed set did not produce multiple major landmasses"
+    );
 }
 
 #[test]
@@ -464,7 +498,9 @@ fn lakes_avoid_filamentary_shapes() {
     .unwrap();
     let mut counts = std::collections::HashMap::<u32, (usize, usize)>::new();
     for (idx, tile) in world.tiles.iter().enumerate() {
-        let Some(lake_id) = tile.lake_id else { continue };
+        let Some(lake_id) = tile.lake_id else {
+            continue;
+        };
         let (x, y) = world.coords(idx);
         let edge_neighbors = world
             .neighbors8(x, y)
@@ -481,7 +517,10 @@ fn lakes_avoid_filamentary_shapes() {
             continue;
         }
         let fraction = exposed as f32 / area as f32;
-        assert!(fraction < 0.28, "lake too filamentary: area={area} fraction={fraction}");
+        assert!(
+            fraction < 0.28,
+            "lake too filamentary: area={area} fraction={fraction}"
+        );
     }
 }
 
@@ -506,7 +545,10 @@ fn longest_same_direction_run(world: &worldgen::World) -> usize {
             };
             let (x, y) = world.coords(current);
             let (nx, ny) = world.coords(next);
-            let dir = ((nx as isize - x as isize).signum(), (ny as isize - y as isize).signum());
+            let dir = (
+                (nx as isize - x as isize).signum(),
+                (ny as isize - y as isize).signum(),
+            );
             if Some(dir) == current_dir {
                 streak += 1;
             } else {
@@ -542,7 +584,10 @@ fn longest_same_direction_run_for_threshold(world: &worldgen::World, min_area: f
             };
             let (x, y) = world.coords(current);
             let (nx, ny) = world.coords(next);
-            let dir = ((nx as isize - x as isize).signum(), (ny as isize - y as isize).signum());
+            let dir = (
+                (nx as isize - x as isize).signum(),
+                (ny as isize - y as isize).signum(),
+            );
             if Some(dir) == current_dir {
                 streak += 1;
             } else {
@@ -693,7 +738,9 @@ fn major_landmass_count(world: &worldgen::World, min_area: usize) -> usize {
             let (x, y) = world.coords(current);
             for (nx, ny) in world.neighbors8(x, y) {
                 let nidx = world.idx(nx, ny);
-                if visited[nidx] || matches!(world.tiles[nidx].surface, Surface::Ocean | Surface::Lake) {
+                if visited[nidx]
+                    || matches!(world.tiles[nidx].surface, Surface::Ocean | Surface::Lake)
+                {
                     continue;
                 }
                 visited[nidx] = true;

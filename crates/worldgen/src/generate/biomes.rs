@@ -118,7 +118,8 @@ fn local_relief(world: &World, idx: usize) -> f32 {
 
 fn trunk_river_proximity(world: &World, idx: usize) -> f32 {
     let (x, y) = world.coords(idx);
-    let trunk_threshold = (((world.width * world.height) as f32 * 0.00075).max(12.0)) * 18.0;
+    let ws = world.effective_world_size();
+    let trunk_threshold = ((ws * ws * 0.00075).max(12.0)) * 18.0;
     let mut influence = 0.0_f32;
     let mut total = 0.0_f32;
 

@@ -3,11 +3,11 @@ use std::collections::{BinaryHeap, HashMap, VecDeque};
 
 use crate::{Surface, World};
 
+use super::HYDRO_EPSILON;
 use super::util::{
     direction_vector, hash01, local_aspect, local_aspect_on_values, neighbor_distance, normalize,
     sample_seed_field, smoothstep,
 };
-use super::HYDRO_EPSILON;
 
 pub(super) struct HydrologyState {
     pub(super) hydro_elevation: Vec<f32>,
@@ -276,14 +276,8 @@ fn identify_lakes(
             continue;
         }
 
-        let refined_region = refine_lake_region(
-            world,
-            hydro,
-            fill_depth,
-            &region,
-            outlet_level,
-            max_depth,
-        );
+        let refined_region =
+            refine_lake_region(world, hydro, fill_depth, &region, outlet_level, max_depth);
         if refined_region.len() < 4 {
             continue;
         }
@@ -381,7 +375,11 @@ fn build_downstream(
     order.sort_by(|a, b| {
         conditioning.hydro_elevation[*b]
             .total_cmp(&conditioning.hydro_elevation[*a])
-            .then_with(|| world.tiles[*b].raw_elevation.total_cmp(&world.tiles[*a].raw_elevation))
+            .then_with(|| {
+                world.tiles[*b]
+                    .raw_elevation
+                    .total_cmp(&world.tiles[*a].raw_elevation)
+            })
             .then_with(|| conditioning.rank[*b].cmp(&conditioning.rank[*a]))
     });
 
@@ -518,7 +516,11 @@ fn routing_candidates(
         });
     }
 
-    candidates.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.next.cmp(&b.next)));
+    candidates.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.next.cmp(&b.next))
+    });
     candidates
 }
 
@@ -589,7 +591,10 @@ fn perturb_mountain_exits(
         let Some(current) = downstream[idx] else {
             continue;
         };
-        let Some(best) = candidates.iter().find(|candidate| candidate.next == current) else {
+        let Some(best) = candidates
+            .iter()
+            .find(|candidate| candidate.next == current)
+        else {
             continue;
         };
         let best_mountain_front = best.mountain_front;
@@ -719,9 +724,8 @@ fn mountain_front_factor(world: &World, idx: usize) -> f32 {
         let nidx = world.idx(nx, ny);
         let drop = (current - world.tiles[nidx].raw_elevation).max(0.0);
         let relief_gap = (relief - local_relief(world, nidx, 2)).max(0.0);
-        downstream_opening = downstream_opening.max(
-            smoothstep(0.02, 0.12, drop) * smoothstep(0.0, 0.05, relief_gap),
-        );
+        downstream_opening = downstream_opening
+            .max(smoothstep(0.02, 0.12, drop) * smoothstep(0.0, 0.05, relief_gap));
     }
     (highland * relief_factor * downstream_opening).clamp(0.0, 1.0)
 }
@@ -734,7 +738,11 @@ fn lowland_opening_factor(world: &World, idx: usize) -> f32 {
     (lowland * relief_soft).clamp(0.0, 1.0)
 }
 
-fn break_downstream_cycles(downstream: &mut [Option<usize>], parent: &[Option<usize>], ocean: &[bool]) {
+fn break_downstream_cycles(
+    downstream: &mut [Option<usize>],
+    parent: &[Option<usize>],
+    ocean: &[bool],
+) {
     for _ in 0..4 {
         let mut changed = false;
         for start in 0..downstream.len() {
@@ -856,7 +864,14 @@ fn classify_surfaces(
         } else if contributing_area[idx]
             >= thresholds.stream
                 * (0.82
-                    + (1.0 - sample_seed_field(world.seed, idx % world.width, idx / world.width, 22, 0xD1F1_0404))
+                    + (1.0
+                        - sample_seed_field(
+                            world.seed,
+                            idx % world.width,
+                            idx / world.width,
+                            22,
+                            0xD1F1_0404,
+                        ))
                         * 0.42)
         {
             surfaces[idx] = Surface::River;
@@ -933,7 +948,11 @@ pub(super) fn apply_channel_carving(world: &mut World, hydrology: &HydrologyStat
     }
 }
 
-pub(super) fn apply_hydrology_to_world(world: &mut World, ocean: &[bool], hydrology: &HydrologyState) {
+pub(super) fn apply_hydrology_to_world(
+    world: &mut World,
+    ocean: &[bool],
+    hydrology: &HydrologyState,
+) {
     for idx in 0..world.tiles.len() {
         world.tiles[idx].hydro_elevation = hydrology.hydro_elevation[idx];
         world.tiles[idx].contributing_area = hydrology.contributing_area[idx];

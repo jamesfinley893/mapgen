@@ -17,7 +17,13 @@ pub(super) const EROSION_STEPS: usize = 18;
 pub fn generate_world(config: &WorldConfig) -> Result<World, String> {
     config.validate()?;
 
-    let mut world = World::new(config.seed, config.width, config.height, config.sea_level, config.world_size);
+    let mut world = World::new(
+        config.seed,
+        config.width,
+        config.height,
+        config.sea_level,
+        config.world_size,
+    );
 
     let base = OpenSimplex::new(config.seed as u32);
     let ridge = OpenSimplex::new(config.seed.wrapping_add(1) as u32);
@@ -34,7 +40,13 @@ pub fn generate_world(config: &WorldConfig) -> Result<World, String> {
     hydrology::apply_hydrology_to_world(&mut world, &ocean, &hydrology);
 
     let distance_to_ocean = climate::fill_ocean_distance(&world, &ocean);
-    climate::populate_climate(&mut world, config, &ocean, &distance_to_ocean, &climate_noise);
+    climate::populate_climate(
+        &mut world,
+        config,
+        &ocean,
+        &distance_to_ocean,
+        &climate_noise,
+    );
     biomes::assign_biomes(&mut world);
 
     Ok(world)
