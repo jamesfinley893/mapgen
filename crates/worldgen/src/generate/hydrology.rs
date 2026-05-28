@@ -240,10 +240,11 @@ fn identify_lakes(
     let mut visited = vec![false; world.tiles.len()];
     let mut next_lake_id = 0_u32;
     let ws = world.effective_world_size();
-    let area_threshold = (ws * ws * 0.00075).ceil() as usize;
-    let area_threshold = area_threshold.max(6);
-    let volume_threshold = (ws * ws * 0.00011).max(0.06);
-    let depth_threshold = 0.018;
+    // Higher thresholds cull small shallow depressions that produce fragmented lake patches.
+    let area_threshold = (ws * ws * 0.0022).ceil() as usize;
+    let area_threshold = area_threshold.max(12);
+    let volume_threshold = (ws * ws * 0.00034).max(0.18);
+    let depth_threshold = 0.025;
 
     for idx in 0..world.tiles.len() {
         if visited[idx] || ocean[idx] || fill_depth[idx] <= depth_threshold {
@@ -278,7 +279,7 @@ fn identify_lakes(
         if region.len() < area_threshold && volume < volume_threshold {
             continue;
         }
-        if avg_depth < 0.024 && max_depth < 0.05 {
+        if avg_depth < 0.028 && max_depth < 0.058 {
             continue;
         }
 

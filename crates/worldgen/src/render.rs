@@ -227,8 +227,8 @@ fn tile_land_color(
         if matches!(biome, Biome::Alpine) {
             let alpine_t = ((height_above_sea - 0.36) / 0.08).clamp(0.0, 1.0);
             color = lerp_rgba(
-                Rgba([115, 100, 78, 255]),
-                Rgba([148, 148, 142, 255]),
+                Rgba([132, 124, 108, 255]),
+                Rgba([152, 150, 144, 255]),
                 alpine_t,
             );
         } else {
@@ -406,7 +406,7 @@ fn biome_color(biome: Biome) -> Rgba<u8> {
         Biome::TemperateGrassland => Rgba([158, 184, 90, 255]),
         Biome::TemperateForest => Rgba([80, 138, 76, 255]),
         Biome::Woodland => Rgba([106, 150, 78, 255]),
-        Biome::Foothills => Rgba([148, 132, 96, 255]),
+        Biome::Foothills => Rgba([160, 148, 110, 255]),
         Biome::Steppe => Rgba([176, 168, 96, 255]),
         Biome::Desert => Rgba([218, 196, 126, 255]),
         Biome::Savanna => Rgba([186, 180, 76, 255]),
@@ -644,8 +644,8 @@ fn draw_lake(image: &mut RgbaImage, world: &World, idx: usize, scale: u32) {
         .unwrap_or(0.0);
     let deep_t = smoothstep(0.0, 0.065, depth);
     let c = lerp_rgba(Rgba([76, 164, 218, 255]), Rgba([46, 122, 186, 255]), deep_t);
-    for py in 1..scale.saturating_sub(1) {
-        for px in 1..scale.saturating_sub(1) {
+    for py in 0..scale {
+        for px in 0..scale {
             image.put_pixel(ox + px, oy + py, c);
         }
     }
