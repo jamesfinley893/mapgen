@@ -931,7 +931,10 @@ fn normalize_terrain(terrain: &mut [f32], low_q: f32, high_q: f32) {
     for value in terrain.iter_mut() {
         let mapped = ((*value - lo) / (hi - lo)).clamp(0.0, 1.0);
         let compressed = smoothstep(0.0, 1.0, mapped).powf(1.04);
-        let top_tail = smoothstep(0.72, 1.0, compressed);
-        *value = (compressed - top_tail * 0.09).clamp(0.0, 1.0);
+        // Start compression later and use a smaller cap, so peaks reach ~0.95
+        // instead of 0.91. This gives the Alpine biome real elevation range for
+        // hillshade relief and color variation (was 0.01-wide band at 0.91).
+        let top_tail = smoothstep(0.80, 1.0, compressed);
+        *value = (compressed - top_tail * 0.05).clamp(0.0, 1.0);
     }
 }

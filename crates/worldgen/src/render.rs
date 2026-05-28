@@ -1,6 +1,8 @@
 use image::{Rgba, RgbaImage};
 
-use crate::{Biome, Surface, World};
+use crate::{
+    Biome, MountainFeature, Surface, World, mountain_feature_for_tile, permanent_snow_cover,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RenderConfig {
@@ -58,11 +60,15 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
             );
         }
 
-        if matches!(tile.biome, Biome::Alpine) {
-            draw_peak(&mut image, x as u32, y as u32, scale);
-        } else if matches!(tile.biome, Biome::Foothills) {
-            draw_hills(&mut image, x as u32, y as u32, scale);
-        } else if matches!(tile.biome, Biome::Desert | Biome::PolarDesert) {
+        match mountain_feature_for_tile(world, idx) {
+            MountainFeature::Summit => draw_peak(&mut image, x as u32, y as u32, scale),
+            MountainFeature::Ridge => draw_ridge(&mut image, world, idx, scale),
+            MountainFeature::AlpineSlope => {}
+            MountainFeature::Foothill => draw_hills(&mut image, x as u32, y as u32, scale),
+            MountainFeature::None => {}
+        }
+
+        if matches!(tile.biome, Biome::Desert | Biome::PolarDesert) {
             draw_dunes(&mut image, x as u32, y as u32, scale);
         } else if matches!(
             tile.biome,
@@ -103,21 +109,28 @@ fn land_base_colors(world: &World) -> Vec<Rgba<u8>> {
             let (x, y) = world.coords(idx);
             let mut color = biome_color_climatic(tile.biome, tile.temperature, tile.moisture);
             if !matches!(tile.biome, Biome::Ocean | Biome::Lake) {
-                // Alpine elevation gradient: rocky-brown at lower slopes → cool gray at summit.
-                // This runs before the snow overlay so the rock shows through the transition zone.
+                let height_above_sea = (tile.raw_elevation - world.sea_level).max(0.0);
                 if matches!(tile.biome, Biome::Alpine) {
-                    let height_above_sea = (tile.raw_elevation - world.sea_level).max(0.0);
-                    let alpine_t = ((height_above_sea - 0.08) / 0.26).clamp(0.0, 1.0);
+                    // Gradient anchored to the actual Alpine zone (h ≈ 0.36–0.44 above sea),
+                    // so lower-Alpine reads as warm brown and upper peaks as rocky gray.
+                    let alpine_t = ((height_above_sea - 0.36) / 0.08).clamp(0.0, 1.0);
                     color = lerp_rgba(
-                        Rgba([136, 118, 98, 255]),
-                        Rgba([152, 150, 146, 255]),
+                        Rgba([115, 100, 78, 255]),
+                        Rgba([148, 148, 142, 255]),
                         alpine_t,
                     );
+                } else {
+                    // Hypsometric tint: upland ochre → highland stone ramp blended onto biome
+                    // color so absolute elevation is legible independent of local slope.
+                    let tint_strength = smoothstep(0.06, 0.32, height_above_sea) * 0.38;
+                    if tint_strength > 0.0 {
+                        color = lerp_rgba(color, elevation_tint(height_above_sea), tint_strength);
+                    }
                 }
                 let variation = hash01(world.seed, x, y);
                 // Medium-scale coherent noise breaks up large uniform biome areas.
                 let regional = sample_noise(world.seed.wrapping_add(0xCAFE_BABE), x, y, 14);
-                let elev_shade = ((tile.raw_elevation - world.sea_level) * 20.0) as i16;
+                let elev_shade = (height_above_sea * 35.0) as i16;
                 let micro = (variation * 12.0) as i16 - 6;
                 let macro_v = ((regional - 0.5) * 10.0) as i16;
                 color = offset(color, elev_shade + micro + macro_v);
@@ -189,7 +202,7 @@ fn apply_snow_overlay(world: &World, colors: &[Rgba<u8>]) -> Vec<Rgba<u8>> {
         .iter()
         .enumerate()
         .map(|(idx, &color)| {
-            let snow = snow_overlay_strength(world, idx);
+            let snow = permanent_snow_cover(world, idx);
             if snow > 0.0 {
                 lerp_rgba(color, Rgba([240, 244, 248, 255]), snow)
             } else {
@@ -199,36 +212,17 @@ fn apply_snow_overlay(world: &World, colors: &[Rgba<u8>]) -> Vec<Rgba<u8>> {
         .collect()
 }
 
-fn snow_overlay_strength(world: &World, idx: usize) -> f32 {
-    let tile = &world.tiles[idx];
-    let height_above_sea = (tile.raw_elevation - world.sea_level).max(0.0);
-
-    let (snow_line, melt_band, max_cover) = match tile.biome {
-        Biome::Alpine => {
-            let snow_line =
-                (world.sea_level + 0.26 + tile.temperature * 0.20).min(world.sea_level + 0.46);
-            (snow_line, 0.10, 0.75)
-        }
-        Biome::Foothills => {
-            if tile.temperature > 0.28 || height_above_sea < 0.34 {
-                return 0.0;
-            }
-            let snow_line =
-                (world.sea_level + 0.34 + tile.temperature * 0.14).min(world.sea_level + 0.54);
-            (snow_line, 0.12, 0.34)
-        }
-        Biome::Tundra | Biome::PolarDesert => {
-            if tile.temperature > 0.16 || height_above_sea < 0.28 {
-                return 0.0;
-            }
-            let snow_line =
-                (world.sea_level + 0.32 + tile.temperature * 0.16).min(world.sea_level + 0.52);
-            (snow_line, 0.14, 0.42)
-        }
-        _ => return 0.0,
-    };
-
-    ((tile.raw_elevation - snow_line) / melt_band).clamp(0.0, max_cover)
+fn elevation_tint(height_above_sea: f32) -> Rgba<u8> {
+    // Three-stop ramp: upland olive → highland ochre → sub-alpine stone
+    if height_above_sea < 0.20 {
+        let s = (height_above_sea - 0.06).max(0.0) / 0.14;
+        lerp_rgba(Rgba([144, 138, 90, 255]), Rgba([148, 122, 82, 255]), s)
+    } else if height_above_sea < 0.34 {
+        let s = (height_above_sea - 0.20) / 0.14;
+        lerp_rgba(Rgba([148, 122, 82, 255]), Rgba([132, 116, 98, 255]), s)
+    } else {
+        Rgba([132, 116, 98, 255])
+    }
 }
 
 fn biome_color_climatic(biome: Biome, temperature: f32, moisture: f32) -> Rgba<u8> {
@@ -369,6 +363,71 @@ fn draw_peak(image: &mut RgbaImage, x: u32, y: u32, scale: u32) {
             };
             put_pixel_checked(image, ox as i32 + px as i32, oy as i32 + py as i32, color);
         }
+    }
+}
+
+fn draw_ridge(image: &mut RgbaImage, world: &World, idx: usize, scale: u32) {
+    if scale < 2 {
+        return;
+    }
+
+    let (x, y) = world.coords(idx);
+    let (axis_x, axis_y) = ridge_axis(world, x, y);
+    let center = tile_center_px(x, y, scale);
+    let reach = (scale as f32 * 0.42).round() as i32;
+    let start = (
+        center.0 - (axis_x * reach as f32).round() as i32,
+        center.1 - (axis_y * reach as f32).round() as i32,
+    );
+    let end = (
+        center.0 + (axis_x * reach as f32).round() as i32,
+        center.1 + (axis_y * reach as f32).round() as i32,
+    );
+
+    draw_thick_line(image, start, end, 0, Rgba([80, 78, 72, 255]));
+    if scale >= 5 {
+        let normal = (-axis_y, axis_x);
+        let lit_start = (
+            start.0 + (normal.0 * 1.0).round() as i32,
+            start.1 + (normal.1 * 1.0).round() as i32,
+        );
+        let lit_end = (
+            end.0 + (normal.0 * 1.0).round() as i32,
+            end.1 + (normal.1 * 1.0).round() as i32,
+        );
+        draw_thick_line(image, lit_start, lit_end, 0, Rgba([154, 156, 148, 255]));
+    }
+}
+
+fn ridge_axis(world: &World, x: usize, y: usize) -> (f32, f32) {
+    let pairs = [
+        ((1_isize, 0_isize), (-1_isize, 0_isize), (1.0_f32, 0.0_f32)),
+        ((0, 1), (0, -1), (0.0, 1.0)),
+        ((1, 1), (-1, -1), (0.707, 0.707)),
+        ((1, -1), (-1, 1), (0.707, -0.707)),
+    ];
+
+    let mut best = (1.0_f32, 0.0_f32);
+    let mut best_score = f32::NEG_INFINITY;
+    for &(a, b, axis) in &pairs {
+        let score =
+            sample_elevation(world, x, y, a.0, a.1) + sample_elevation(world, x, y, b.0, b.1);
+        if score > best_score {
+            best_score = score;
+            best = axis;
+        }
+    }
+
+    best
+}
+
+fn sample_elevation(world: &World, x: usize, y: usize, dx: isize, dy: isize) -> f32 {
+    let nx = x as isize + dx;
+    let ny = y as isize + dy;
+    if world.in_bounds(nx, ny) {
+        world.tiles[world.idx(nx as usize, ny as usize)].raw_elevation
+    } else {
+        world.tiles[world.idx(x, y)].raw_elevation
     }
 }
 
@@ -671,8 +730,7 @@ fn draw_tile_hillshaded(
                 + h10 * fx * (1.0 - fy)
                 + h01 * (1.0 - fx) * fy
                 + h11 * fx * fy;
-            // Expanded shadow range for more dramatic relief (was 0.46–1.0).
-            let color = scale_rgb(base_color, 0.26 + shade * 0.74);
+            let color = scale_rgb(base_color, 0.28 + shade * 0.72);
             // Aspect tinting: lit faces warm (+R, -B), shadowed faces cool (-R, +B).
             let tint = ((shade - 0.5) * 16.0) as i16;
             let color = Rgba([
@@ -708,7 +766,7 @@ fn compute_hillshade(world: &World, x: usize, y: usize) -> f32 {
     // Adaptive z_scale: mountains get dramatic relief, plains stay gentle.
     let elev = get_elev(xi, yi);
     let height_above_sea = (elev - world.sea_level).max(0.0);
-    let z_scale = 4.0 + height_above_sea * 22.0;
+    let z_scale = 4.0 + height_above_sea * 18.0;
     let nx = -dz_dx * z_scale;
     let ny = 1.0_f32;
     let nz = -dz_dy * z_scale;
@@ -772,55 +830,4 @@ fn hash01(seed: u64, x: usize, y: usize) -> f32 {
     z = z.wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^= z >> 31;
     (z as f64 / u64::MAX as f64) as f32
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{Tile, World};
-
-    fn one_tile_world(biome: Biome, elevation: f32, temperature: f32) -> World {
-        let mut world = World::new(1, 1, 1, 0.50, 0);
-        world.tiles[0] = Tile {
-            raw_elevation: elevation,
-            hydro_elevation: elevation,
-            temperature,
-            surface: Surface::Land,
-            biome,
-            ..Tile::default()
-        };
-        world
-    }
-
-    #[test]
-    fn snow_overlay_does_not_whiten_vegetated_mountain_edges() {
-        let forest = one_tile_world(Biome::TemperateForest, 0.92, 0.06);
-        let grassland = one_tile_world(Biome::TemperateGrassland, 0.92, 0.06);
-        let steppe = one_tile_world(Biome::Steppe, 0.92, 0.06);
-
-        assert_eq!(snow_overlay_strength(&forest, 0), 0.0);
-        assert_eq!(snow_overlay_strength(&grassland, 0), 0.0);
-        assert_eq!(snow_overlay_strength(&steppe, 0), 0.0);
-    }
-
-    #[test]
-    fn snow_overlay_allows_limited_cold_high_foothill_snow() {
-        let lower_foothill = one_tile_world(Biome::Foothills, 0.82, 0.04);
-        let high_foothill = one_tile_world(Biome::Foothills, 0.92, 0.04);
-        let warm_foothill = one_tile_world(Biome::Foothills, 0.96, 0.34);
-
-        assert_eq!(snow_overlay_strength(&lower_foothill, 0), 0.0);
-        assert!(snow_overlay_strength(&high_foothill, 0) > 0.0);
-        assert!(snow_overlay_strength(&high_foothill, 0) <= 0.34);
-        assert_eq!(snow_overlay_strength(&warm_foothill, 0), 0.0);
-    }
-
-    #[test]
-    fn snow_overlay_keeps_alpine_as_primary_permanent_snow_biome() {
-        let alpine = one_tile_world(Biome::Alpine, 0.92, 0.04);
-        let foothill = one_tile_world(Biome::Foothills, 0.92, 0.04);
-
-        assert!(snow_overlay_strength(&alpine, 0) > snow_overlay_strength(&foothill, 0));
-        assert!(snow_overlay_strength(&alpine, 0) <= 0.75);
-    }
 }

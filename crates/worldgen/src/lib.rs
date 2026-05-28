@@ -1,10 +1,12 @@
 mod config;
+mod features;
 mod generate;
 mod metadata;
 mod render;
 mod world;
 
 pub use config::WorldConfig;
+pub use features::{MountainFeature, mountain_feature_for_tile, permanent_snow_cover};
 pub use generate::{biome_for_tile, generate_world};
 pub use metadata::{WorldMetadata, build_metadata};
 pub use render::{RenderConfig, render_world};
