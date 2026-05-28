@@ -21,9 +21,12 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
         })
         .collect();
 
-    // Pre-compute land base colors then soften biome-boundary edges.
+    // Pre-compute land base colors, soften biome-boundary edges, then apply snow.
+    // Snow must come after softening so partially-snowed tiles don't bleed white
+    // into neighboring biomes through the blend pass.
     let land_colors = land_base_colors(world);
     let land_colors = soften_biome_edges(world, &land_colors);
+    let land_colors = apply_snow_overlay(world, &land_colors);
 
     for (idx, tile) in world.tiles.iter().enumerate() {
         let (x, y) = world.coords(idx);
@@ -104,15 +107,6 @@ fn land_base_colors(world: &World) -> Vec<Rgba<u8>> {
                 let micro = (variation * 12.0) as i16 - 6;
                 let macro_v = ((regional - 0.5) * 10.0) as i16;
                 color = offset(color, elev_shade + micro + macro_v);
-                // Permanent snow line: high enough that only true glaciers/snowfields appear.
-                // Polar lowlands are cold-looking via biome color; no seasonal snow overlay.
-                let snow_line = (world.sea_level + 0.26 + tile.temperature * 0.20)
-                    .min(world.sea_level + 0.46);
-                // Cap at 0.75 so rocky texture and hillshading show through even on glaciers.
-                let snow = ((tile.raw_elevation - snow_line) / 0.10).clamp(0.0, 0.75);
-                if snow > 0.0 {
-                    color = lerp_rgba(color, Rgba([240, 244, 248, 255]), snow);
-                }
                 // Riparian zone: dry biomes adjacent to rivers or lakes get a slight
                 // green push representing water-side vegetation.
                 if matches!(
@@ -174,6 +168,27 @@ fn soften_biome_edges(world: &World, colors: &[Rgba<u8>]) -> Vec<Rgba<u8>> {
         out[idx] = Rgba([(r / w) as u8, (g / w) as u8, (b / w) as u8, 255]);
     }
     out
+}
+
+fn apply_snow_overlay(world: &World, colors: &[Rgba<u8>]) -> Vec<Rgba<u8>> {
+    colors
+        .iter()
+        .enumerate()
+        .map(|(idx, &color)| {
+            let tile = &world.tiles[idx];
+            if matches!(tile.biome, Biome::Ocean | Biome::Lake) {
+                return color;
+            }
+            let snow_line = (world.sea_level + 0.26 + tile.temperature * 0.20)
+                .min(world.sea_level + 0.46);
+            let snow = ((tile.raw_elevation - snow_line) / 0.10).clamp(0.0, 0.75);
+            if snow > 0.0 {
+                lerp_rgba(color, Rgba([240, 244, 248, 255]), snow)
+            } else {
+                color
+            }
+        })
+        .collect()
 }
 
 fn biome_color_climatic(biome: Biome, temperature: f32, moisture: f32) -> Rgba<u8> {
