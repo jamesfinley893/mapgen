@@ -39,12 +39,22 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
             let shelf_color = Rgba([58, 132, 182, 255]);
             let ocean_color = Rgba([38, 84, 148, 255]);
             let abyss_color = Rgba([18, 46, 102, 255]);
-            let base = lerp_rgba(lerp_rgba(ocean_color, shelf_color, shelf_t), abyss_color, deep_t);
+            let base = lerp_rgba(
+                lerp_rgba(ocean_color, shelf_color, shelf_t),
+                abyss_color,
+                deep_t,
+            );
             let tex = ((variation - 0.5) * 6.0) as i16;
             draw_tile(&mut image, x as u32, y as u32, scale, offset(base, tex));
         } else {
             draw_tile_hillshaded(
-                &mut image, &hillshade, world, x as u32, y as u32, scale, land_colors[idx],
+                &mut image,
+                &hillshade,
+                world,
+                x as u32,
+                y as u32,
+                scale,
+                land_colors[idx],
             );
         }
 
@@ -98,7 +108,11 @@ fn land_base_colors(world: &World) -> Vec<Rgba<u8>> {
                 if matches!(tile.biome, Biome::Alpine) {
                     let height_above_sea = (tile.raw_elevation - world.sea_level).max(0.0);
                     let alpine_t = ((height_above_sea - 0.08) / 0.26).clamp(0.0, 1.0);
-                    color = lerp_rgba(Rgba([136, 118, 98, 255]), Rgba([152, 150, 146, 255]), alpine_t);
+                    color = lerp_rgba(
+                        Rgba([136, 118, 98, 255]),
+                        Rgba([152, 150, 146, 255]),
+                        alpine_t,
+                    );
                 }
                 let variation = hash01(world.seed, x, y);
                 // Medium-scale coherent noise breaks up large uniform biome areas.
@@ -175,13 +189,7 @@ fn apply_snow_overlay(world: &World, colors: &[Rgba<u8>]) -> Vec<Rgba<u8>> {
         .iter()
         .enumerate()
         .map(|(idx, &color)| {
-            let tile = &world.tiles[idx];
-            if matches!(tile.biome, Biome::Ocean | Biome::Lake) {
-                return color;
-            }
-            let snow_line = (world.sea_level + 0.26 + tile.temperature * 0.20)
-                .min(world.sea_level + 0.46);
-            let snow = ((tile.raw_elevation - snow_line) / 0.10).clamp(0.0, 0.75);
+            let snow = snow_overlay_strength(world, idx);
             if snow > 0.0 {
                 lerp_rgba(color, Rgba([240, 244, 248, 255]), snow)
             } else {
@@ -189,6 +197,38 @@ fn apply_snow_overlay(world: &World, colors: &[Rgba<u8>]) -> Vec<Rgba<u8>> {
             }
         })
         .collect()
+}
+
+fn snow_overlay_strength(world: &World, idx: usize) -> f32 {
+    let tile = &world.tiles[idx];
+    let height_above_sea = (tile.raw_elevation - world.sea_level).max(0.0);
+
+    let (snow_line, melt_band, max_cover) = match tile.biome {
+        Biome::Alpine => {
+            let snow_line =
+                (world.sea_level + 0.26 + tile.temperature * 0.20).min(world.sea_level + 0.46);
+            (snow_line, 0.10, 0.75)
+        }
+        Biome::Foothills => {
+            if tile.temperature > 0.28 || height_above_sea < 0.34 {
+                return 0.0;
+            }
+            let snow_line =
+                (world.sea_level + 0.34 + tile.temperature * 0.14).min(world.sea_level + 0.54);
+            (snow_line, 0.12, 0.34)
+        }
+        Biome::Tundra | Biome::PolarDesert => {
+            if tile.temperature > 0.16 || height_above_sea < 0.28 {
+                return 0.0;
+            }
+            let snow_line =
+                (world.sea_level + 0.32 + tile.temperature * 0.16).min(world.sea_level + 0.52);
+            (snow_line, 0.14, 0.42)
+        }
+        _ => return 0.0,
+    };
+
+    ((tile.raw_elevation - snow_line) / melt_band).clamp(0.0, max_cover)
 }
 
 fn biome_color_climatic(biome: Biome, temperature: f32, moisture: f32) -> Rgba<u8> {
@@ -398,14 +438,25 @@ fn draw_coastline(image: &mut RgbaImage, world: &World, idx: usize, scale: u32) 
         if !world.in_bounds(nx, ny) {
             continue;
         }
-        if !matches!(world.tiles[world.idx(nx as usize, ny as usize)].surface, Surface::Ocean) {
+        if !matches!(
+            world.tiles[world.idx(nx as usize, ny as usize)].surface,
+            Surface::Ocean
+        ) {
             continue;
         }
         match (dx, dy) {
-            (0, -1) => (0..scale).for_each(|px| put_pixel_checked(image, (ox + px) as i32, oy as i32, c)),
-            (0, 1) => (0..scale).for_each(|px| put_pixel_checked(image, (ox + px) as i32, (oy + scale - 1) as i32, c)),
-            (-1, 0) => (0..scale).for_each(|py| put_pixel_checked(image, ox as i32, (oy + py) as i32, c)),
-            (1, 0) => (0..scale).for_each(|py| put_pixel_checked(image, (ox + scale - 1) as i32, (oy + py) as i32, c)),
+            (0, -1) => {
+                (0..scale).for_each(|px| put_pixel_checked(image, (ox + px) as i32, oy as i32, c))
+            }
+            (0, 1) => (0..scale).for_each(|px| {
+                put_pixel_checked(image, (ox + px) as i32, (oy + scale - 1) as i32, c)
+            }),
+            (-1, 0) => {
+                (0..scale).for_each(|py| put_pixel_checked(image, ox as i32, (oy + py) as i32, c))
+            }
+            (1, 0) => (0..scale).for_each(|py| {
+                put_pixel_checked(image, (ox + scale - 1) as i32, (oy + py) as i32, c)
+            }),
             _ => {}
         }
     }
@@ -416,7 +467,10 @@ fn draw_lake(image: &mut RgbaImage, world: &World, idx: usize, scale: u32) {
     let ox = (x as u32) * scale;
     let oy = (y as u32) * scale;
     let tile = &world.tiles[idx];
-    let depth = tile.water_level.map(|wl| (wl - tile.raw_elevation).max(0.0)).unwrap_or(0.0);
+    let depth = tile
+        .water_level
+        .map(|wl| (wl - tile.raw_elevation).max(0.0))
+        .unwrap_or(0.0);
     let deep_t = smoothstep(0.0, 0.065, depth);
     let c = lerp_rgba(Rgba([76, 164, 218, 255]), Rgba([46, 122, 186, 255]), deep_t);
     for py in 1..scale.saturating_sub(1) {
@@ -718,4 +772,55 @@ fn hash01(seed: u64, x: usize, y: usize) -> f32 {
     z = z.wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^= z >> 31;
     (z as f64 / u64::MAX as f64) as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Tile, World};
+
+    fn one_tile_world(biome: Biome, elevation: f32, temperature: f32) -> World {
+        let mut world = World::new(1, 1, 1, 0.50, 0);
+        world.tiles[0] = Tile {
+            raw_elevation: elevation,
+            hydro_elevation: elevation,
+            temperature,
+            surface: Surface::Land,
+            biome,
+            ..Tile::default()
+        };
+        world
+    }
+
+    #[test]
+    fn snow_overlay_does_not_whiten_vegetated_mountain_edges() {
+        let forest = one_tile_world(Biome::TemperateForest, 0.92, 0.06);
+        let grassland = one_tile_world(Biome::TemperateGrassland, 0.92, 0.06);
+        let steppe = one_tile_world(Biome::Steppe, 0.92, 0.06);
+
+        assert_eq!(snow_overlay_strength(&forest, 0), 0.0);
+        assert_eq!(snow_overlay_strength(&grassland, 0), 0.0);
+        assert_eq!(snow_overlay_strength(&steppe, 0), 0.0);
+    }
+
+    #[test]
+    fn snow_overlay_allows_limited_cold_high_foothill_snow() {
+        let lower_foothill = one_tile_world(Biome::Foothills, 0.82, 0.04);
+        let high_foothill = one_tile_world(Biome::Foothills, 0.92, 0.04);
+        let warm_foothill = one_tile_world(Biome::Foothills, 0.96, 0.34);
+
+        assert_eq!(snow_overlay_strength(&lower_foothill, 0), 0.0);
+        assert!(snow_overlay_strength(&high_foothill, 0) > 0.0);
+        assert!(snow_overlay_strength(&high_foothill, 0) <= 0.34);
+        assert_eq!(snow_overlay_strength(&warm_foothill, 0), 0.0);
+    }
+
+    #[test]
+    fn snow_overlay_keeps_alpine_as_primary_permanent_snow_biome() {
+        let alpine = one_tile_world(Biome::Alpine, 0.92, 0.04);
+        let foothill = one_tile_world(Biome::Foothills, 0.92, 0.04);
+
+        assert!(snow_overlay_strength(&alpine, 0) > snow_overlay_strength(&foothill, 0));
+        assert!(snow_overlay_strength(&alpine, 0) <= 0.75);
+    }
 }
