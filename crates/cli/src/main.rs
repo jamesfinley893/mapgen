@@ -6,7 +6,17 @@ use rand::random;
 use time::OffsetDateTime;
 use time::format_description::FormatItem;
 use time::macros::format_description;
+use serde::{Deserialize, Serialize};
 use worldgen::{RenderConfig, World, WorldConfig, build_metadata, generate_world, render_world};
+
+const TILES_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize)]
+struct TileExport {
+    schema_version: u32,
+    #[serde(flatten)]
+    world: World,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "mapgen")]
@@ -82,8 +92,15 @@ fn run() -> Result<(), String> {
                 .to_path_buf();
             let json = fs::read_to_string(&tiles_path)
                 .map_err(|err| format!("failed to read {}: {err}", tiles_path.display()))?;
-            let world: World = serde_json::from_str(&json)
+            let export: TileExport = serde_json::from_str(&json)
                 .map_err(|err| format!("failed to parse tiles.json: {err}"))?;
+            if export.schema_version != TILES_SCHEMA_VERSION {
+                eprintln!(
+                    "warning: tiles.json schema version {} (current: {}); some fields may be missing or ignored",
+                    export.schema_version, TILES_SCHEMA_VERSION
+                );
+            }
+            let world = export.world;
             let render_scale =
                 (1536_u32 / world.width.max(world.height) as u32).clamp(1, 32);
             let image = render_world(&world, RenderConfig { scale: render_scale });
@@ -168,7 +185,8 @@ fn run() -> Result<(), String> {
                 .map_err(|err| format!("failed to write metadata: {err}"))?;
             if export_tiles {
                 let tiles_path = run_dir.join("tiles.json");
-                let tiles_json = serde_json::to_string(&world)
+                let export = TileExport { schema_version: TILES_SCHEMA_VERSION, world };
+                let tiles_json = serde_json::to_string(&export)
                     .map_err(|err| format!("failed to serialize tiles: {err}"))?;
                 fs::write(&tiles_path, tiles_json)
                     .map_err(|err| format!("failed to write tiles: {err}"))?;

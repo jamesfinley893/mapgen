@@ -30,6 +30,7 @@ pub enum Biome {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Tile {
     pub raw_elevation: f32,
     pub hydro_elevation: f32,

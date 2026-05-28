@@ -57,8 +57,10 @@ Deserializes `tiles.json` and re-renders to `rerendered.png` in the same directo
 Produced by `generate --export-tiles`. Top-level shape:
 
 ```json
-{ "seed": 42, "width": 384, "height": 384, "sea_level": 0.52, "world_size": 0, "tiles": [...] }
+{ "schema_version": 1, "seed": 42, "width": 384, "height": 384, "sea_level": 0.52, "world_size": 0, "tiles": [...] }
 ```
+
+`schema_version` is checked by `mapgen render`; a mismatch prints a warning but does not abort. Files without the field (written before versioning was added) are treated as version 0. New fields added to `Tile` deserialize to their `Default` value when absent, so old files remain loadable across generator updates.
 
 `tiles` is a flat row-major array (`index = y * width + x`). Each tile:
 
