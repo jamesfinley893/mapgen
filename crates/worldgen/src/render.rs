@@ -90,6 +90,13 @@ fn land_base_colors(world: &World) -> Vec<Rgba<u8>> {
             let (x, y) = world.coords(idx);
             let mut color = biome_color_climatic(tile.biome, tile.temperature, tile.moisture);
             if !matches!(tile.biome, Biome::Ocean | Biome::Lake) {
+                // Alpine elevation gradient: rocky-brown at lower slopes → cool gray at summit.
+                // This runs before the snow overlay so the rock shows through the transition zone.
+                if matches!(tile.biome, Biome::Alpine) {
+                    let height_above_sea = (tile.raw_elevation - world.sea_level).max(0.0);
+                    let alpine_t = ((height_above_sea - 0.08) / 0.26).clamp(0.0, 1.0);
+                    color = lerp_rgba(Rgba([136, 118, 98, 255]), Rgba([152, 150, 146, 255]), alpine_t);
+                }
                 let variation = hash01(world.seed, x, y);
                 // Medium-scale coherent noise breaks up large uniform biome areas.
                 let regional = sample_noise(world.seed.wrapping_add(0xCAFE_BABE), x, y, 14);
@@ -101,7 +108,8 @@ fn land_base_colors(world: &World) -> Vec<Rgba<u8>> {
                 // Polar lowlands are cold-looking via biome color; no seasonal snow overlay.
                 let snow_line = (world.sea_level + 0.26 + tile.temperature * 0.20)
                     .min(world.sea_level + 0.46);
-                let snow = ((tile.raw_elevation - snow_line) / 0.10).clamp(0.0, 1.0);
+                // Cap at 0.75 so rocky texture and hillshading show through even on glaciers.
+                let snow = ((tile.raw_elevation - snow_line) / 0.10).clamp(0.0, 0.75);
                 if snow > 0.0 {
                     color = lerp_rgba(color, Rgba([240, 244, 248, 255]), snow);
                 }
@@ -243,7 +251,7 @@ fn biome_color(biome: Biome) -> Rgba<u8> {
         Biome::TemperateGrassland => Rgba([158, 184, 90, 255]),
         Biome::TemperateForest => Rgba([80, 138, 76, 255]),
         Biome::Woodland => Rgba([106, 150, 78, 255]),
-        Biome::Foothills => Rgba([130, 144, 108, 255]),
+        Biome::Foothills => Rgba([148, 132, 96, 255]),
         Biome::Steppe => Rgba([176, 168, 96, 255]),
         Biome::Desert => Rgba([218, 196, 126, 255]),
         Biome::Savanna => Rgba([186, 180, 76, 255]),
@@ -587,7 +595,16 @@ fn draw_tile_hillshaded(
                 + h10 * fx * (1.0 - fy)
                 + h01 * (1.0 - fx) * fy
                 + h11 * fx * fy;
-            let color = scale_rgb(base_color, 0.46 + shade * 0.54);
+            // Expanded shadow range for more dramatic relief (was 0.46–1.0).
+            let color = scale_rgb(base_color, 0.26 + shade * 0.74);
+            // Aspect tinting: lit faces warm (+R, -B), shadowed faces cool (-R, +B).
+            let tint = ((shade - 0.5) * 16.0) as i16;
+            let color = Rgba([
+                (color[0] as i16 + tint).clamp(0, 255) as u8,
+                color[1],
+                (color[2] as i16 - tint).clamp(0, 255) as u8,
+                255,
+            ]);
             image.put_pixel(ox + px, oy + py, color);
         }
     }
@@ -606,7 +623,7 @@ fn compute_hillshade(world: &World, x: usize, y: usize) -> f32 {
     // Adaptive z_scale: mountains get dramatic relief, plains stay gentle.
     let elev = get_elev(xi, yi);
     let height_above_sea = (elev - world.sea_level).max(0.0);
-    let z_scale = 3.5 + height_above_sea * 12.0;
+    let z_scale = 4.0 + height_above_sea * 22.0;
     let nx = -dz_dx * z_scale;
     let ny = 1.0_f32;
     let nz = -dz_dy * z_scale;
