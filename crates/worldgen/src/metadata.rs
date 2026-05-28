@@ -10,6 +10,9 @@ pub struct WorldMetadata {
     pub sea_level: f32,
     pub temperature_bias: f32,
     pub moisture_bias: f32,
+    pub rainfall_scale: f32,
+    pub runoff_scale: f32,
+    pub channel_density: f32,
     pub render_scale: u32,
     pub world_size: u32,
     pub effective_world_size: f32,
@@ -21,7 +24,16 @@ pub struct WorldMetadata {
     pub total_lake_area: usize,
     pub largest_basin_area: usize,
     pub max_river_discharge: f32,
+    pub mean_runoff: f32,
+    pub mean_river_discharge: f32,
+    pub max_stream_power: f32,
     pub river_band_counts: [usize; 3],
+    pub river_source_count: usize,
+    pub river_confluence_count: usize,
+    pub river_mouth_count: usize,
+    pub median_source_segment_length: usize,
+    pub p90_source_segment_length: usize,
+    pub dominant_river_direction_fraction: f32,
     pub longest_trunk_length: usize,
     pub trunk_straight_run_ratio: f32,
     pub tributary_spacing_variance: f32,
@@ -43,6 +55,9 @@ pub fn build_metadata(world: &World, config: &WorldConfig) -> WorldMetadata {
     let mut lake_tiles = 0;
     let mut highest_elevation = f32::MIN;
     let mut max_river_discharge = 0.0_f32;
+    let mut total_runoff = 0.0_f32;
+    let mut total_river_discharge = 0.0_f32;
+    let mut max_stream_power = 0.0_f32;
     let mut river_band_counts = [0_usize; 3];
     let mut alpine_tiles = 0_usize;
     let mut foothill_tiles = 0_usize;
@@ -53,15 +68,18 @@ pub fn build_metadata(world: &World, config: &WorldConfig) -> WorldMetadata {
 
     for tile in &world.tiles {
         highest_elevation = highest_elevation.max(tile.raw_elevation);
+        total_runoff += tile.runoff;
+        max_stream_power = max_stream_power.max(tile.stream_power);
         match tile.surface {
             Surface::Ocean => ocean_tiles += 1,
             Surface::River => {
                 river_tiles += 1;
                 land_tiles += 1;
-                max_river_discharge = max_river_discharge.max(tile.contributing_area);
-                let band = if tile.contributing_area >= thresholds.1 {
+                total_river_discharge += tile.discharge;
+                max_river_discharge = max_river_discharge.max(tile.discharge);
+                let band = if tile.discharge >= thresholds.1 {
                     2
-                } else if tile.contributing_area >= thresholds.0 {
+                } else if tile.discharge >= thresholds.0 {
                     1
                 } else {
                     0
@@ -97,6 +115,7 @@ pub fn build_metadata(world: &World, config: &WorldConfig) -> WorldMetadata {
     let trunk_straight_run_ratio = trunk_straight_run_ratio(world, thresholds.1);
     let tributary_spacing_variance = tributary_spacing_variance(world, thresholds.1, thresholds.0);
     let mountain_exit_irregularity_score = mountain_exit_irregularity_score(world);
+    let river_audit = river_audit(world);
 
     WorldMetadata {
         seed: world.seed,
@@ -105,6 +124,9 @@ pub fn build_metadata(world: &World, config: &WorldConfig) -> WorldMetadata {
         sea_level: config.sea_level,
         temperature_bias: config.temperature_bias,
         moisture_bias: config.moisture_bias,
+        rainfall_scale: config.rainfall_scale,
+        runoff_scale: config.runoff_scale,
+        channel_density: config.channel_density,
         render_scale: config.render_scale,
         world_size: config.world_size,
         effective_world_size: world.effective_world_size(),
@@ -116,7 +138,16 @@ pub fn build_metadata(world: &World, config: &WorldConfig) -> WorldMetadata {
         total_lake_area: lake_tiles,
         largest_basin_area: basin_counts.into_values().max().unwrap_or(0),
         max_river_discharge,
+        mean_runoff: total_runoff / world.tiles.len().max(1) as f32,
+        mean_river_discharge: total_river_discharge / river_tiles.max(1) as f32,
+        max_stream_power,
         river_band_counts,
+        river_source_count: river_audit.sources,
+        river_confluence_count: river_audit.confluences,
+        river_mouth_count: river_audit.mouths,
+        median_source_segment_length: river_audit.segment_median,
+        p90_source_segment_length: river_audit.segment_p90,
+        dominant_river_direction_fraction: river_audit.dominant_direction_fraction,
         longest_trunk_length: longest_trunk_length(world, thresholds.1),
         trunk_straight_run_ratio,
         tributary_spacing_variance,
@@ -133,15 +164,25 @@ pub fn build_metadata(world: &World, config: &WorldConfig) -> WorldMetadata {
 }
 
 fn river_thresholds(world: &World) -> (f32, f32) {
-    let ws = world.effective_world_size();
-    let stream = (ws * ws * 0.00075).max(12.0);
-    (stream * 6.5, stream * 18.0)
+    let mut discharge: Vec<_> = world
+        .tiles
+        .iter()
+        .filter_map(|tile| (tile.surface == Surface::River).then_some(tile.discharge))
+        .collect();
+    discharge.sort_by(|a, b| a.total_cmp(b));
+    if discharge.is_empty() {
+        return (f32::INFINITY, f32::INFINITY);
+    }
+    (
+        discharge[discharge.len() * 58 / 100],
+        discharge[discharge.len() * 84 / 100],
+    )
 }
 
 fn longest_trunk_length(world: &World, trunk_threshold: f32) -> usize {
     let mut best = 0;
     for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.surface != Surface::River || tile.contributing_area < trunk_threshold {
+        if tile.surface != Surface::River || tile.discharge < trunk_threshold {
             continue;
         }
         let mut current = idx;
@@ -173,7 +214,7 @@ fn trunk_confinement_stats(world: &World, trunk_threshold: f32) -> (f32, f32) {
     let mut total = 0.0_f32;
 
     for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.surface != Surface::River || tile.contributing_area < trunk_threshold {
+        if tile.surface != Surface::River || tile.discharge < trunk_threshold {
             continue;
         }
         let Some(next) = tile.downstream else {
@@ -202,14 +243,14 @@ fn trunk_straight_run_ratio(world: &World, trunk_threshold: f32) -> f32 {
     let mut straight = 0_usize;
 
     for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.surface != Surface::River || tile.contributing_area < trunk_threshold {
+        if tile.surface != Surface::River || tile.discharge < trunk_threshold {
             continue;
         }
         let Some(next) = tile.downstream else {
             continue;
         };
         if world.tiles[next].surface != Surface::River
-            || world.tiles[next].contributing_area < trunk_threshold
+            || world.tiles[next].discharge < trunk_threshold
         {
             continue;
         }
@@ -242,15 +283,14 @@ fn tributary_spacing_variance(world: &World, trunk_threshold: f32, stream_thresh
 
     let mut intervals = Vec::new();
     for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.surface != Surface::River || tile.contributing_area < trunk_threshold {
+        if tile.surface != Surface::River || tile.discharge < trunk_threshold {
             continue;
         }
         let upstream_trunk = upstream[idx]
             .iter()
             .filter(|&&source| {
                 let source_tile = &world.tiles[source];
-                source_tile.surface == Surface::River
-                    && source_tile.contributing_area >= trunk_threshold
+                source_tile.surface == Surface::River && source_tile.discharge >= trunk_threshold
             })
             .count();
         if upstream_trunk != 0 {
@@ -261,7 +301,7 @@ fn tributary_spacing_variance(world: &World, trunk_threshold: f32, stream_thresh
         let mut guard = 0;
         while guard < world.tiles.len() {
             let tile = &world.tiles[current];
-            if tile.surface != Surface::River || tile.contributing_area < trunk_threshold {
+            if tile.surface != Surface::River || tile.discharge < trunk_threshold {
                 break;
             }
             let major_inputs = upstream[current]
@@ -269,7 +309,7 @@ fn tributary_spacing_variance(world: &World, trunk_threshold: f32, stream_thresh
                 .filter(|&&source| {
                     let source_tile = &world.tiles[source];
                     source_tile.surface == Surface::River
-                        && source_tile.contributing_area >= stream_threshold
+                        && source_tile.discharge >= stream_threshold
                 })
                 .count();
             if major_inputs >= 2 {
@@ -353,6 +393,94 @@ fn mountain_exit_irregularity_score(world: &World) -> f32 {
     } else {
         total_score / exits as f32
     }
+}
+
+struct RiverAudit {
+    sources: usize,
+    confluences: usize,
+    mouths: usize,
+    segment_median: usize,
+    segment_p90: usize,
+    dominant_direction_fraction: f32,
+}
+
+fn river_audit(world: &World) -> RiverAudit {
+    let mut upstream = vec![0_usize; world.tiles.len()];
+    for tile in &world.tiles {
+        if tile.surface != Surface::River {
+            continue;
+        }
+        if let Some(next) = tile.downstream {
+            if world.tiles[next].surface == Surface::River {
+                upstream[next] += 1;
+            }
+        }
+    }
+
+    let mut sources = 0;
+    let mut confluences = 0;
+    let mut mouths = 0;
+    let mut segment_lengths = Vec::new();
+    let mut direction_counts = std::collections::HashMap::<(isize, isize), usize>::new();
+    let mut steps = 0_usize;
+
+    for (idx, tile) in world.tiles.iter().enumerate() {
+        if tile.surface != Surface::River {
+            continue;
+        }
+        if upstream[idx] == 0 {
+            sources += 1;
+            segment_lengths.push(source_segment_length(world, &upstream, idx));
+        } else if upstream[idx] > 1 {
+            confluences += 1;
+        }
+
+        match tile.downstream {
+            Some(next) if world.tiles[next].surface == Surface::River => {
+                *direction_counts
+                    .entry(direction(world, idx, next))
+                    .or_default() += 1;
+                steps += 1;
+            }
+            _ => mouths += 1,
+        }
+    }
+
+    segment_lengths.sort_unstable();
+    let dominant = direction_counts.into_values().max().unwrap_or(0);
+    RiverAudit {
+        sources,
+        confluences,
+        mouths,
+        segment_median: percentile(&segment_lengths, 0.50),
+        segment_p90: percentile(&segment_lengths, 0.90),
+        dominant_direction_fraction: dominant as f32 / steps.max(1) as f32,
+    }
+}
+
+fn source_segment_length(world: &World, upstream: &[usize], start: usize) -> usize {
+    let mut len = 0;
+    let mut current = start;
+    let mut guard = 0;
+    while guard < world.tiles.len() {
+        len += 1;
+        let Some(next) = world.tiles[current].downstream else {
+            break;
+        };
+        if world.tiles[next].surface != Surface::River || upstream[next] > 1 {
+            break;
+        }
+        current = next;
+        guard += 1;
+    }
+    len
+}
+
+fn percentile(values: &[usize], p: f32) -> usize {
+    if values.is_empty() {
+        return 0;
+    }
+    values[((values.len() - 1) as f32 * p).round() as usize]
 }
 
 fn local_trunk_confinement(world: &World, idx: usize, next: usize) -> f32 {

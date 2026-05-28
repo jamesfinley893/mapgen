@@ -118,8 +118,6 @@ fn local_relief(world: &World, idx: usize) -> f32 {
 
 fn trunk_river_proximity(world: &World, idx: usize) -> f32 {
     let (x, y) = world.coords(idx);
-    let ws = world.effective_world_size();
-    let trunk_threshold = ((ws * ws * 0.00075).max(12.0)) * 18.0;
     let mut influence = 0.0_f32;
     let mut total = 0.0_f32;
 
@@ -138,7 +136,7 @@ fn trunk_river_proximity(world: &World, idx: usize) -> f32 {
             let weight = (1.0 / (1.0 + dist)).clamp(0.14, 0.75);
             total += weight;
             let neighbor = &world.tiles[nidx];
-            if neighbor.surface == Surface::River && neighbor.contributing_area >= trunk_threshold {
+            if neighbor.surface == Surface::River && neighbor.channel_order >= 3 {
                 influence += weight;
             }
         }

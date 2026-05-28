@@ -34,6 +34,12 @@ enum Commands {
         temperature_bias: f32,
         #[arg(long, default_value_t = 0.0)]
         moisture_bias: f32,
+        #[arg(long, default_value_t = 1.0)]
+        rainfall_scale: f32,
+        #[arg(long, default_value_t = 1.0)]
+        runoff_scale: f32,
+        #[arg(long, default_value_t = 1.0)]
+        channel_density: f32,
         /// Tiles per world unit. 0 or omit = match min(width, height) for a single world unit.
         /// Set to a fixed value (e.g. 384) to make larger maps cover more geographic area.
         #[arg(long, default_value_t = 0)]
@@ -61,6 +67,9 @@ fn run() -> Result<(), String> {
             sea_level,
             temperature_bias,
             moisture_bias,
+            rainfall_scale,
+            runoff_scale,
+            channel_density,
             world_size,
             out_dir,
         } => {
@@ -74,6 +83,9 @@ fn run() -> Result<(), String> {
                 sea_level,
                 temperature_bias,
                 moisture_bias,
+                rainfall_scale,
+                runoff_scale,
+                channel_density,
                 render_scale,
                 world_size,
             };

@@ -32,11 +32,28 @@ pub fn generate_world(config: &WorldConfig) -> Result<World, String> {
     terrain::populate_raw_elevation(&mut world, &base, &ridge);
 
     let mut ocean = hydrology::classify_ocean(&world);
-    let hydrology = hydrology::simulate_hydrology(&world, &ocean);
+    let distance_to_ocean = climate::fill_ocean_distance(&world, &ocean);
+    climate::populate_base_climate(
+        &mut world,
+        config,
+        &ocean,
+        &distance_to_ocean,
+        &climate_noise,
+    );
+
+    let hydrology = hydrology::simulate_hydrology(&world, config, &ocean);
     hydrology::apply_channel_carving(&mut world, &hydrology);
 
     ocean = hydrology::classify_ocean(&world);
-    let hydrology = hydrology::simulate_hydrology(&world, &ocean);
+    let distance_to_ocean = climate::fill_ocean_distance(&world, &ocean);
+    climate::populate_base_climate(
+        &mut world,
+        config,
+        &ocean,
+        &distance_to_ocean,
+        &climate_noise,
+    );
+    let hydrology = hydrology::simulate_hydrology(&world, config, &ocean);
     hydrology::apply_hydrology_to_world(&mut world, &ocean, &hydrology);
 
     let distance_to_ocean = climate::fill_ocean_distance(&world, &ocean);

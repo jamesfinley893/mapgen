@@ -164,6 +164,60 @@ fn metadata_reports_multiple_river_bands() {
 }
 
 #[test]
+fn rainfall_scale_increases_runoff_and_discharge() {
+    let dry_config = WorldConfig {
+        seed: 42,
+        width: 128,
+        height: 128,
+        render_scale: 2,
+        rainfall_scale: 0.65,
+        ..WorldConfig::default()
+    };
+    let wet_config = WorldConfig {
+        rainfall_scale: 1.45,
+        ..dry_config.clone()
+    };
+    let dry = build_metadata(&generate_world(&dry_config).unwrap(), &dry_config);
+    let wet = build_metadata(&generate_world(&wet_config).unwrap(), &wet_config);
+    assert!(
+        wet.mean_runoff > dry.mean_runoff,
+        "runoff did not increase: dry={} wet={}",
+        dry.mean_runoff,
+        wet.mean_runoff
+    );
+    assert!(
+        wet.max_river_discharge > dry.max_river_discharge,
+        "max discharge did not increase: dry={} wet={}",
+        dry.max_river_discharge,
+        wet.max_river_discharge
+    );
+}
+
+#[test]
+fn channel_density_controls_visible_river_count() {
+    let sparse_config = WorldConfig {
+        seed: 97,
+        width: 128,
+        height: 128,
+        render_scale: 2,
+        channel_density: 0.65,
+        ..WorldConfig::default()
+    };
+    let dense_config = WorldConfig {
+        channel_density: 1.55,
+        ..sparse_config.clone()
+    };
+    let sparse = build_metadata(&generate_world(&sparse_config).unwrap(), &sparse_config);
+    let dense = build_metadata(&generate_world(&dense_config).unwrap(), &dense_config);
+    assert!(
+        dense.river_tiles > sparse.river_tiles,
+        "river count did not increase: sparse={} dense={}",
+        sparse.river_tiles,
+        dense.river_tiles
+    );
+}
+
+#[test]
 fn seed_42_does_not_collapse_into_alpine_blanket() {
     let world = generate_world(&WorldConfig {
         seed: 42,

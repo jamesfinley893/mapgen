@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 
-use crate::{Surface, World};
+use crate::{Surface, World, WorldConfig};
 
 use super::HYDRO_EPSILON;
 use super::util::{
@@ -13,6 +13,10 @@ pub(super) struct HydrologyState {
     pub(super) hydro_elevation: Vec<f32>,
     pub(super) downstream: Vec<Option<usize>>,
     pub(super) contributing_area: Vec<f32>,
+    pub(super) runoff: Vec<f32>,
+    pub(super) discharge: Vec<f32>,
+    pub(super) stream_power: Vec<f32>,
+    pub(super) channel_order: Vec<u8>,
     pub(super) surfaces: Vec<Surface>,
     pub(super) lake_id: Vec<Option<u32>>,
     pub(super) water_level: Vec<Option<f32>>,
@@ -118,7 +122,11 @@ fn seed_ocean_boundary(
     }
 }
 
-pub(super) fn simulate_hydrology(world: &World, ocean: &[bool]) -> HydrologyState {
+pub(super) fn simulate_hydrology(
+    world: &World,
+    config: &WorldConfig,
+    ocean: &[bool],
+) -> HydrologyState {
     let conditioning = condition_terrain(world, ocean);
     let provisional = identify_lakes(
         world,
@@ -130,6 +138,9 @@ pub(super) fn simulate_hydrology(world: &World, ocean: &[bool]) -> HydrologyStat
     let mut downstream = build_downstream(world, ocean, &conditioning, &provisional.lake_id);
     break_downstream_cycles(&mut downstream, &conditioning.parent, ocean);
     let contributing_area = accumulate_contributing_area(&conditioning, &downstream, ocean);
+    let runoff = compute_runoff(world, config, ocean, &conditioning, &downstream);
+    let discharge = accumulate_discharge(&conditioning, &downstream, ocean, &runoff);
+    let stream_power = compute_stream_power(world, &conditioning, &downstream, &discharge);
     let basin_id = assign_basin_ids(
         world,
         ocean,
@@ -137,12 +148,26 @@ pub(super) fn simulate_hydrology(world: &World, ocean: &[bool]) -> HydrologyStat
         &provisional.lake_id,
         provisional.lake_count,
     );
-    let surfaces = classify_surfaces(world, ocean, &contributing_area, &provisional.lake_id);
+    let mut surfaces = classify_surfaces(
+        world,
+        config,
+        ocean,
+        &contributing_area,
+        &discharge,
+        &stream_power,
+        &provisional.lake_id,
+    );
+    suppress_short_weak_channels(world, &mut surfaces, &downstream, &stream_power);
+    let channel_order = assign_channel_order(world, &surfaces, &downstream, &discharge);
 
     HydrologyState {
         hydro_elevation: conditioning.hydro_elevation,
         downstream,
         contributing_area,
+        runoff,
+        discharge,
+        stream_power,
+        channel_order,
         surfaces,
         lake_id: provisional.lake_id,
         water_level: provisional.water_level,
@@ -800,6 +825,97 @@ fn accumulate_contributing_area(
     contributing_area
 }
 
+fn compute_runoff(
+    world: &World,
+    config: &WorldConfig,
+    ocean: &[bool],
+    conditioning: &ConditioningState,
+    downstream: &[Option<usize>],
+) -> Vec<f32> {
+    let mut runoff = vec![0.0_f32; world.tiles.len()];
+    for idx in 0..world.tiles.len() {
+        if ocean[idx] {
+            continue;
+        }
+        let tile = &world.tiles[idx];
+        let height_above_sea = (tile.raw_elevation - world.sea_level).max(0.0);
+        let slope = downstream[idx]
+            .map(|next| {
+                let (x, y) = world.coords(idx);
+                let (nx, ny) = world.coords(next);
+                (conditioning.hydro_elevation[idx] - conditioning.hydro_elevation[next]).max(0.0)
+                    / neighbor_distance(x, y, nx, ny)
+            })
+            .unwrap_or(0.0);
+        let relief = local_relief(world, idx, 2);
+        let precipitation = tile.precipitation.clamp(0.0, 1.0);
+        let aridity = 1.0 - precipitation;
+        let lowland_storage = (1.0 - smoothstep(0.0, 0.18, height_above_sea)) * 0.28;
+        let slope_runoff = smoothstep(0.004, 0.055, slope) * 0.30;
+        let relief_runoff = smoothstep(0.012, 0.08, relief) * 0.20;
+        let cold_rock = smoothstep(
+            world.sea_level + 0.24,
+            world.sea_level + 0.52,
+            tile.raw_elevation,
+        ) * (1.0 - tile.temperature)
+            * 0.18;
+        let infiltration = (0.18 + lowland_storage + aridity * 0.35).clamp(0.0, 0.72);
+        let runoff_coeff = (0.18 + precipitation * 0.46 + slope_runoff + relief_runoff + cold_rock
+            - infiltration * 0.38)
+            .clamp(0.04, 1.25);
+        runoff[idx] = (precipitation.powf(1.35) * runoff_coeff * config.runoff_scale).max(0.0);
+    }
+    runoff
+}
+
+fn accumulate_discharge(
+    conditioning: &ConditioningState,
+    downstream: &[Option<usize>],
+    ocean: &[bool],
+    runoff: &[f32],
+) -> Vec<f32> {
+    let mut discharge = vec![0.0; downstream.len()];
+    let mut order: Vec<_> = (0..downstream.len()).collect();
+    order.sort_by(|a, b| {
+        conditioning.hydro_elevation[*b]
+            .total_cmp(&conditioning.hydro_elevation[*a])
+            .then_with(|| conditioning.rank[*b].cmp(&conditioning.rank[*a]))
+    });
+
+    for idx in order {
+        if ocean[idx] {
+            continue;
+        }
+        discharge[idx] += runoff[idx];
+        if let Some(next) = downstream[idx] {
+            discharge[next] += discharge[idx];
+        }
+    }
+    discharge
+}
+
+fn compute_stream_power(
+    world: &World,
+    conditioning: &ConditioningState,
+    downstream: &[Option<usize>],
+    discharge: &[f32],
+) -> Vec<f32> {
+    let mut power = vec![0.0_f32; world.tiles.len()];
+    for idx in 0..world.tiles.len() {
+        let Some(next) = downstream[idx] else {
+            continue;
+        };
+        let (x, y) = world.coords(idx);
+        let (nx, ny) = world.coords(next);
+        let slope = (conditioning.hydro_elevation[idx] - conditioning.hydro_elevation[next])
+            .max(0.0)
+            / neighbor_distance(x, y, nx, ny);
+        let effective_slope = (slope + 0.0035).powf(0.70);
+        power[idx] = discharge[idx].max(0.0).powf(0.88) * effective_slope;
+    }
+    power
+}
+
 fn assign_basin_ids(
     world: &World,
     ocean: &[bool],
@@ -849,32 +965,46 @@ fn assign_basin_ids(
 
 fn classify_surfaces(
     world: &World,
+    config: &WorldConfig,
     ocean: &[bool],
     contributing_area: &[f32],
+    discharge: &[f32],
+    stream_power: &[f32],
     lake_id: &[Option<u32>],
 ) -> Vec<Surface> {
     let mut surfaces = vec![Surface::Land; world.tiles.len()];
     let thresholds = river_thresholds(world);
+    let density = config.channel_density.clamp(0.25, 4.0);
 
     for idx in 0..world.tiles.len() {
         if ocean[idx] {
             surfaces[idx] = Surface::Ocean;
         } else if lake_id[idx].is_some() {
             surfaces[idx] = Surface::Lake;
-        } else if contributing_area[idx]
-            >= thresholds.stream
-                * (0.82
-                    + (1.0
-                        - sample_seed_field(
-                            world.seed,
-                            idx % world.width,
-                            idx / world.width,
-                            22,
-                            0xD1F1_0404,
-                        ))
-                        * 0.42)
-        {
-            surfaces[idx] = Surface::River;
+        } else {
+            let (x, y) = world.coords(idx);
+            let local_noise = sample_seed_field(world.seed, x, y, 22, 0xD1F1_0404);
+            let height_above_sea = (world.tiles[idx].raw_elevation - world.sea_level).max(0.0);
+            let highland = smoothstep(
+                world.sea_level + 0.12,
+                world.sea_level + 0.42,
+                world.tiles[idx].raw_elevation,
+            );
+            let dry = 1.0 - world.tiles[idx].precipitation.clamp(0.0, 1.0);
+            let erodibility =
+                (0.92 + dry * 0.58 - highland * 0.18 + (1.0 - local_noise) * 0.22).clamp(0.52, 1.8);
+            let discharge_threshold = thresholds.stream
+                * (0.08 + dry * 0.08 + (1.0 - local_noise) * 0.06)
+                / density.sqrt();
+            let power_threshold =
+                thresholds.stream.powf(0.82) * 0.0028 * erodibility / density.powf(0.72);
+            let lowland_relief_bonus = if height_above_sea < 0.12 { 0.86 } else { 1.0 };
+            if discharge[idx] >= discharge_threshold
+                && stream_power[idx] >= power_threshold * lowland_relief_bonus
+                && contributing_area[idx] >= (thresholds.stream * 0.07).max(4.0)
+            {
+                surfaces[idx] = Surface::River;
+            }
         }
     }
 
@@ -894,6 +1024,120 @@ fn classify_surfaces(
     surfaces
 }
 
+fn suppress_short_weak_channels(
+    world: &World,
+    surfaces: &mut [Surface],
+    downstream: &[Option<usize>],
+    stream_power: &[f32],
+) {
+    let mut upstream = vec![0_usize; world.tiles.len()];
+    for (idx, surface) in surfaces.iter().enumerate() {
+        if *surface != Surface::River {
+            continue;
+        }
+        if let Some(next) = downstream[idx] {
+            if surfaces[next] == Surface::River {
+                upstream[next] += 1;
+            }
+        }
+    }
+
+    let powers: Vec<_> = stream_power
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, power)| (surfaces[idx] == Surface::River).then_some(*power))
+        .collect();
+    if powers.is_empty() {
+        return;
+    }
+    let mean_power = powers.iter().sum::<f32>() / powers.len() as f32;
+    let mut remove = Vec::new();
+    for idx in 0..world.tiles.len() {
+        if surfaces[idx] != Surface::River || upstream[idx] > 0 {
+            continue;
+        }
+        let len = path_len_to_junction_or_sink(world, surfaces, downstream, &upstream, idx);
+        if len <= 1 && stream_power[idx] < mean_power * 0.55 {
+            remove.push(idx);
+        }
+    }
+    for idx in remove {
+        surfaces[idx] = Surface::Land;
+    }
+}
+
+fn assign_channel_order(
+    world: &World,
+    surfaces: &[Surface],
+    downstream: &[Option<usize>],
+    discharge: &[f32],
+) -> Vec<u8> {
+    let mut order = vec![0_u8; world.tiles.len()];
+    let mut river_discharge: Vec<_> = discharge
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, value)| (surfaces[idx] == Surface::River).then_some(*value))
+        .collect();
+    river_discharge.sort_by(f32::total_cmp);
+    if river_discharge.is_empty() {
+        return order;
+    }
+    let q55 = river_discharge[river_discharge.len() * 55 / 100];
+    let q82 = river_discharge[river_discharge.len() * 82 / 100];
+    let q94 = river_discharge[river_discharge.len() * 94 / 100];
+
+    for idx in 0..world.tiles.len() {
+        if surfaces[idx] != Surface::River {
+            continue;
+        }
+        order[idx] = if discharge[idx] >= q94 {
+            4
+        } else if discharge[idx] >= q82 {
+            3
+        } else if discharge[idx] >= q55 {
+            2
+        } else {
+            1
+        };
+    }
+
+    for idx in 0..world.tiles.len() {
+        if surfaces[idx] != Surface::River {
+            continue;
+        }
+        if let Some(next) = downstream[idx] {
+            if surfaces[next] == Surface::River && order[next] < order[idx] {
+                order[next] = order[idx];
+            }
+        }
+    }
+    order
+}
+
+fn path_len_to_junction_or_sink(
+    world: &World,
+    surfaces: &[Surface],
+    downstream: &[Option<usize>],
+    upstream: &[usize],
+    start: usize,
+) -> usize {
+    let mut len = 0;
+    let mut current = start;
+    let mut guard = 0;
+    while guard < world.tiles.len() {
+        len += 1;
+        let Some(next) = downstream[current] else {
+            break;
+        };
+        if surfaces[next] != Surface::River || upstream[next] > 1 {
+            break;
+        }
+        current = next;
+        guard += 1;
+    }
+    len
+}
+
 pub(super) fn apply_channel_carving(world: &mut World, hydrology: &HydrologyState) {
     let thresholds = river_thresholds(world);
 
@@ -901,7 +1145,7 @@ pub(super) fn apply_channel_carving(world: &mut World, hydrology: &HydrologyStat
         if hydrology.surfaces[idx] != Surface::River {
             continue;
         }
-        let discharge = hydrology.contributing_area[idx];
+        let discharge = hydrology.discharge[idx];
         let ratio = (discharge / thresholds.stream).max(1.0);
         let band_multiplier = if discharge >= thresholds.trunk {
             1.75
@@ -956,6 +1200,10 @@ pub(super) fn apply_hydrology_to_world(
     for idx in 0..world.tiles.len() {
         world.tiles[idx].hydro_elevation = hydrology.hydro_elevation[idx];
         world.tiles[idx].contributing_area = hydrology.contributing_area[idx];
+        world.tiles[idx].runoff = hydrology.runoff[idx];
+        world.tiles[idx].discharge = hydrology.discharge[idx];
+        world.tiles[idx].stream_power = hydrology.stream_power[idx];
+        world.tiles[idx].channel_order = hydrology.channel_order[idx];
         world.tiles[idx].downstream = hydrology.downstream[idx];
         world.tiles[idx].surface = hydrology.surfaces[idx];
         world.tiles[idx].basin_id = hydrology.basin_id[idx];

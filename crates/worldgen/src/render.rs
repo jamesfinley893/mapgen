@@ -29,9 +29,9 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
         if matches!(tile.biome, Biome::Ocean) {
             let depth = ((world.sea_level - tile.raw_elevation).max(0.0) * 50.0) as i16;
             color = offset(color, -depth);
-            let near_coast = world.neighbors8(x, y).any(|(nx, ny)| {
-                !matches!(world.tiles[world.idx(nx, ny)].biome, Biome::Ocean)
-            });
+            let near_coast = world
+                .neighbors8(x, y)
+                .any(|(nx, ny)| !matches!(world.tiles[world.idx(nx, ny)].biome, Biome::Ocean));
             if near_coast {
                 color = offset(color, 34);
             }
@@ -40,13 +40,15 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
             let elev_shade = ((tile.raw_elevation - world.sea_level) * 22.0) as i16;
             color = offset(color, elev_shade + ((variation * 8.0) as i16 - 4));
             // Snow: fades in above a temperature-dependent snow line
-            let snow_line = (world.sea_level + 0.28 + tile.temperature * 0.18)
-                .min(world.sea_level + 0.46);
+            let snow_line =
+                (world.sea_level + 0.28 + tile.temperature * 0.18).min(world.sea_level + 0.46);
             let snow = ((tile.raw_elevation - snow_line) / 0.10).clamp(0.0, 1.0);
             if snow > 0.0 {
                 color = lerp_rgba(color, Rgba([240, 244, 246, 255]), snow);
             }
-            draw_tile_hillshaded(&mut image, &hillshade, world, x as u32, y as u32, scale, color);
+            draw_tile_hillshaded(
+                &mut image, &hillshade, world, x as u32, y as u32, scale, color,
+            );
         }
 
         if matches!(tile.biome, Biome::Alpine) {
@@ -80,7 +82,7 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
     let thresholds = river_thresholds(world);
     for (idx, tile) in world.tiles.iter().enumerate() {
         if tile.surface == Surface::River {
-            let flow = tile.contributing_area.max(1.0);
+            let flow = tile.discharge.max(1.0);
             draw_river(&mut image, world, idx, scale, flow, thresholds);
         }
     }
@@ -125,9 +127,9 @@ fn draw_peak(image: &mut RgbaImage, x: u32, y: u32, scale: u32) {
     }
     let ox = x * scale;
     let oy = y * scale;
-    let snow   = Rgba([240, 244, 246, 255]);
-    let lit    = Rgba([195, 200, 197, 255]);
-    let shadow = Rgba([88,  91,  89,  255]);
+    let snow = Rgba([240, 244, 246, 255]);
+    let lit = Rgba([195, 200, 197, 255]);
+    let shadow = Rgba([88, 91, 89, 255]);
     let s = scale as f32;
     let apex_x = s * 0.50;
     let apex_y = s * 0.08;
@@ -272,11 +274,21 @@ struct RiverThresholds {
 }
 
 fn river_thresholds(world: &World) -> RiverThresholds {
-    let ws = world.effective_world_size();
-    let stream = (ws * ws * 0.00075).max(12.0);
+    let mut discharge: Vec<_> = world
+        .tiles
+        .iter()
+        .filter_map(|tile| (tile.surface == Surface::River).then_some(tile.discharge))
+        .collect();
+    discharge.sort_by(|a, b| a.total_cmp(b));
+    if discharge.is_empty() {
+        return RiverThresholds {
+            secondary: f32::INFINITY,
+            trunk: f32::INFINITY,
+        };
+    }
     RiverThresholds {
-        secondary: stream * 6.5,
-        trunk: stream * 18.0,
+        secondary: discharge[discharge.len() * 58 / 100],
+        trunk: discharge[discharge.len() * 84 / 100],
     }
 }
 
@@ -302,7 +314,7 @@ fn river_radius_px(
     let lowland = height_above_sea < 0.16;
     let steep = matches!(tile.biome, Biome::Alpine | Biome::Foothills) || height_above_sea > 0.32;
 
-    if flow >= thresholds.trunk {
+    if tile.channel_order >= 3 || flow >= thresholds.trunk {
         let excess = flow / thresholds.trunk;
         match scale {
             0 | 1 => i32::from(!steep && (lowland || excess >= 1.45)),
@@ -315,7 +327,7 @@ fn river_radius_px(
                 ((width.round() as i32) / 2).clamp(1, (scale as i32).max(1))
             }
         }
-    } else if flow >= thresholds.secondary {
+    } else if tile.channel_order >= 2 || flow >= thresholds.secondary {
         i32::from(scale >= 3 && !steep)
     } else {
         0
@@ -405,9 +417,10 @@ fn draw_tile_hillshaded(
         for px in 0..scale {
             let fx = (px as f32 + 0.5) / s;
             let fy = (py as f32 + 0.5) / s;
-            let shade =
-                h00 * (1.0 - fx) * (1.0 - fy) + h10 * fx * (1.0 - fy)
-                    + h01 * (1.0 - fx) * fy + h11 * fx * fy;
+            let shade = h00 * (1.0 - fx) * (1.0 - fy)
+                + h10 * fx * (1.0 - fy)
+                + h01 * (1.0 - fx) * fy
+                + h11 * fx * fy;
             let color = scale_rgb(base_color, 0.38 + shade * 0.62);
             image.put_pixel(ox + px, oy + py, color);
         }

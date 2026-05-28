@@ -6,6 +6,26 @@ use crate::{Surface, World, WorldConfig};
 
 use super::util::{latitude_factor, octave_noise, smoothstep};
 
+pub(super) fn populate_base_climate(
+    world: &mut World,
+    config: &WorldConfig,
+    ocean: &[bool],
+    distance_to_ocean: &[u16],
+    climate: &OpenSimplex,
+) {
+    let nearby_water = vec![0.0_f32; world.tiles.len()];
+    let regional_continentality = compute_regional_continentality(world, ocean);
+    populate_climate_from_fields(
+        world,
+        config,
+        ocean,
+        distance_to_ocean,
+        climate,
+        &nearby_water,
+        &regional_continentality,
+    );
+}
+
 pub(super) fn populate_climate(
     world: &mut World,
     config: &WorldConfig,
@@ -15,7 +35,26 @@ pub(super) fn populate_climate(
 ) {
     let nearby_water = compute_nearby_water(world);
     let regional_continentality = compute_regional_continentality(world, ocean);
+    populate_climate_from_fields(
+        world,
+        config,
+        ocean,
+        distance_to_ocean,
+        climate,
+        &nearby_water,
+        &regional_continentality,
+    );
+}
 
+fn populate_climate_from_fields(
+    world: &mut World,
+    config: &WorldConfig,
+    ocean: &[bool],
+    distance_to_ocean: &[u16],
+    climate: &OpenSimplex,
+    nearby_water: &[f32],
+    regional_continentality: &[f32],
+) {
     for y in 0..world.height {
         for x in 0..world.width {
             let idx = world.idx(x, y);
@@ -50,14 +89,16 @@ pub(super) fn populate_climate(
                 ocean,
                 distance_to_ocean,
                 climate,
-                &nearby_water,
-                &regional_continentality,
+                nearby_water,
+                regional_continentality,
                 x,
                 y,
-            ) + config.moisture_bias)
+            ) * config.rainfall_scale
+                + config.moisture_bias)
                 .clamp(0.0, 1.0);
             world.tiles[idx].temperature = temperature;
             world.tiles[idx].moisture = moisture;
+            world.tiles[idx].precipitation = moisture;
         }
     }
 }
