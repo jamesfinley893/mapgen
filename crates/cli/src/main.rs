@@ -3,16 +3,17 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use rand::random;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::FormatItem;
 use time::macros::format_description;
-use serde::{Deserialize, Serialize};
 use worldgen::{RenderConfig, World, WorldConfig, build_metadata, generate_world, render_world};
 
 const TILES_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize)]
 struct TileExport {
+    #[serde(default)]
     schema_version: u32,
     #[serde(flatten)]
     world: World,
@@ -101,9 +102,14 @@ fn run() -> Result<(), String> {
                 );
             }
             let world = export.world;
-            let render_scale =
-                (1536_u32 / world.width.max(world.height) as u32).clamp(1, 32);
-            let image = render_world(&world, RenderConfig { scale: render_scale });
+            validate_render_world(&world)?;
+            let render_scale = (1536_u32 / world.width.max(world.height) as u32).clamp(1, 32);
+            let image = render_world(
+                &world,
+                RenderConfig {
+                    scale: render_scale,
+                },
+            );
             let out_path = run_dir.join("rerendered.png");
             image
                 .save(&out_path)
@@ -185,7 +191,10 @@ fn run() -> Result<(), String> {
                 .map_err(|err| format!("failed to write metadata: {err}"))?;
             if export_tiles {
                 let tiles_path = run_dir.join("tiles.json");
-                let export = TileExport { schema_version: TILES_SCHEMA_VERSION, world };
+                let export = TileExport {
+                    schema_version: TILES_SCHEMA_VERSION,
+                    world,
+                };
                 let tiles_json = serde_json::to_string(&export)
                     .map_err(|err| format!("failed to serialize tiles: {err}"))?;
                 fs::write(&tiles_path, tiles_json)
@@ -212,6 +221,38 @@ fn validate_dimensions(width: usize, height: usize) -> Result<(), String> {
     }
     if width > 4096 || height > 4096 {
         return Err("width and height must be at most 4096".into());
+    }
+    Ok(())
+}
+
+fn validate_render_world(world: &World) -> Result<(), String> {
+    if world.width == 0 || world.height == 0 {
+        return Err("tiles.json width and height must be greater than 0".into());
+    }
+    if world.width > 4096 || world.height > 4096 {
+        return Err("tiles.json width and height must be at most 4096".into());
+    }
+    let expected = world
+        .width
+        .checked_mul(world.height)
+        .ok_or("tiles.json dimensions overflow tile count")?;
+    if world.tiles.len() != expected {
+        return Err(format!(
+            "tiles.json tile count mismatch: expected {} for {}x{}, found {}",
+            expected,
+            world.width,
+            world.height,
+            world.tiles.len()
+        ));
+    }
+    for (idx, tile) in world.tiles.iter().enumerate() {
+        if let Some(next) = tile.downstream {
+            if next >= expected {
+                return Err(format!(
+                    "tiles.json tile {idx} has out-of-range downstream index {next}"
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -271,5 +312,34 @@ mod tests {
         assert!(validate_dimensions(4097, 128).is_err());
         assert!(validate_dimensions(128, 31).is_err());
         assert!(validate_dimensions(128, 128).is_ok());
+    }
+
+    #[test]
+    fn legacy_tile_export_without_schema_version_deserializes_as_version_zero() {
+        let world = World::new(7, 2, 2, 0.52, 0);
+        let json = serde_json::to_string(&world).unwrap();
+        let export: TileExport = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(export.schema_version, 0);
+        assert_eq!(export.world.seed, 7);
+        assert_eq!(export.world.tiles.len(), 4);
+    }
+
+    #[test]
+    fn validate_render_world_rejects_tile_count_mismatch() {
+        let mut world = World::new(7, 2, 2, 0.52, 0);
+        world.tiles.pop();
+
+        let err = validate_render_world(&world).unwrap_err();
+        assert!(err.contains("tile count mismatch"));
+    }
+
+    #[test]
+    fn validate_render_world_rejects_out_of_range_downstream_index() {
+        let mut world = World::new(7, 2, 2, 0.52, 0);
+        world.tiles[0].downstream = Some(4);
+
+        let err = validate_render_world(&world).unwrap_err();
+        assert!(err.contains("out-of-range downstream"));
     }
 }
