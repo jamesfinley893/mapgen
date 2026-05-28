@@ -246,12 +246,12 @@ fn validate_render_world(world: &World) -> Result<(), String> {
         ));
     }
     for (idx, tile) in world.tiles.iter().enumerate() {
-        if let Some(next) = tile.downstream {
-            if next >= expected {
-                return Err(format!(
-                    "tiles.json tile {idx} has out-of-range downstream index {next}"
-                ));
-            }
+        if let Some(next) = tile.downstream
+            && next >= expected
+        {
+            return Err(format!(
+                "tiles.json tile {idx} has out-of-range downstream index {next}"
+            ));
         }
     }
     Ok(())

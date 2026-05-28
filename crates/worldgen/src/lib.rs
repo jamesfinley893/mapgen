@@ -4,6 +4,7 @@ mod features;
 mod generate;
 mod metadata;
 mod render;
+mod river;
 mod world;
 
 pub use audit::{RiverAudit, audit_rivers};

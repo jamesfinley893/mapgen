@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::audit::{river_direction, river_discharge_percentiles};
+use crate::river::{river_direction, river_discharge_percentiles};
 use crate::{Biome, Surface, World, WorldConfig, audit_rivers};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
