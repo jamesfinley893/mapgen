@@ -5,7 +5,7 @@ use crate::{Surface, World, WorldConfig};
 
 use super::HYDRO_EPSILON;
 use super::util::{
-    direction_vector, hash01, local_aspect, local_aspect_on_values, neighbor_distance, normalize,
+    direction_vector, local_aspect, local_aspect_on_values, neighbor_distance, normalize,
     sample_seed_field, smoothstep,
 };
 
@@ -467,6 +467,14 @@ fn routing_candidates(
     let tributary_opportunity = sample_seed_field(world.seed, x, y, 22, 0xD1F1_0202);
     let mountain_front = mountain_front_factor(world, idx);
     let lowland_opening = lowland_opening_factor(world, idx);
+    // Per-tile (not per-pair) smooth bias for consistent lateral preference along a path.
+    // Two scales: medium-range arcs (cell 14) plus fine variation (cell 6) to preserve
+    // tributary spacing while reducing per-step erratic zigs.
+    let meander_bias = {
+        let coarse = sample_seed_field(world.seed, x, y, 14, 0xD1F1_0505);
+        let fine = sample_seed_field(world.seed, x, y, 6, 0xD1F1_0506);
+        (coarse * 0.55 + fine * 0.45) * 2.0 - 1.0
+    };
     let mut candidates = Vec::with_capacity(8);
 
     for (nx, ny) in world.neighbors8(x, y) {
@@ -499,9 +507,8 @@ fn routing_candidates(
         } else {
             0.0
         };
-        let meander_bonus = if slope < 0.03 {
-            let signed_bias = hash01(world.seed.wrapping_add(211), idx, next) * 2.0 - 1.0;
-            aspect_cross * signed_bias * (0.16 * (1.0 - (slope / 0.03).clamp(0.0, 1.0)))
+        let meander_bonus = if slope < 0.034 {
+            aspect_cross * meander_bias * (0.18 * (1.0 - (slope / 0.034).clamp(0.0, 1.0)))
         } else {
             0.0
         };
@@ -585,11 +592,11 @@ fn reduce_directional_bias(
             let segment = same_direction_segment(world, downstream, idx);
             let slope = local_downstream_slope(world, conditioning, downstream, idx);
             let limit = if slope < 0.012 {
-                4
+                3
             } else if slope < 0.03 {
-                5
+                4
             } else {
-                6
+                5
             };
             if segment.len() < limit {
                 continue;

@@ -107,8 +107,6 @@ fn land_base_colors(world: &World, scale: u32) -> Vec<Rgba<u8>> {
     // Minimum channel_order for riparian influence — matches river_radius_px draw thresholds
     // so the green corridor only appears where a river line is actually rendered.
     let min_river_order: u8 = if scale <= 1 {
-        3
-    } else if scale <= 2 {
         2
     } else {
         1
@@ -724,7 +722,7 @@ fn river_radius_px(
         match scale {
             // Trunk rivers always visible; guarantee at least 1px even at minimum scale.
             0 | 1 => 1,
-            2 => 1,
+            2 => i32::from(!steep) + 1,
             3 | 4 => i32::from(!steep && (lowland || excess >= 1.8)) + 1,
             _ => {
                 let width = scale as f32
@@ -735,8 +733,7 @@ fn river_radius_px(
         }
     } else if tile.channel_order >= 2 || flow >= thresholds.secondary {
         match scale {
-            // At scale ≤1 secondary rivers would flood the image; skip them.
-            0 | 1 => -1,
+            0 | 1 => 0,
             2 | 3 => i32::from(!steep),
             _ => i32::from(!steep) + i32::from(!steep && lowland),
         }
