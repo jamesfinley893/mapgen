@@ -633,10 +633,19 @@ fn draw_tile_hillshaded(
 }
 
 fn compute_hillshade(world: &World, x: usize, y: usize) -> f32 {
+    let center_biome = world.tiles[world.idx(x, y)].biome;
+    let center_elev = world.tiles[world.idx(x, y)].raw_elevation;
+    // Don't let a neighbor from a different biome drive the gradient — a forest
+    // tile at the base of a mountain would otherwise inherit the mountain's steep
+    // slope and render as a bright halo.
     let get_elev = |xi: isize, yi: isize| -> f32 {
         let cx = xi.clamp(0, world.width as isize - 1) as usize;
         let cy = yi.clamp(0, world.height as isize - 1) as usize;
-        world.tiles[world.idx(cx, cy)].raw_elevation
+        if world.tiles[world.idx(cx, cy)].biome != center_biome {
+            center_elev
+        } else {
+            world.tiles[world.idx(cx, cy)].raw_elevation
+        }
     };
     let xi = x as isize;
     let yi = y as isize;
