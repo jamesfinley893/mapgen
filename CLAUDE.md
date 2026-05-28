@@ -27,9 +27,9 @@ cargo test
 |------|---------|-------|
 | `--seed` | random | u64 |
 | `--width` / `--height` | 384 | tiles; max 4096 |
-| `--scale` | auto | pixels/tile; auto targets ~1536px on the long axis |
+| `--scale` | 1 | world multiplier; `--scale 2` → 768×768 tiles, same pixels/tile as default |
 | `--sea-level` | 0.52 | 0.2–0.8 |
-| `--world-size` | 0 | tiles per world unit; 0 = match min(width,height) |
+| `--world-size` | 0 | tiles per world unit; 0 = match min(width,height); auto-fixed by --scale |
 | `--out-dir` | `output/` | directory for PNG + metadata JSON |
 | `--temperature-bias` | 0.0 | shifts global temperature; useful for polar/tropical worlds |
 | `--moisture-bias` | 0.0 | shifts global precipitation |
@@ -37,7 +37,7 @@ cargo test
 | `--runoff-scale` | 1.0 | 0.25–4.0; multiplies per-tile runoff coefficient |
 | `--channel-density` | 1.0 | 0.25–4.0; lowers/raises discharge threshold for river classification |
 
-`--world-size` is the key lever for geographic expanse. With `--width 1024 --height 1024 --world-size 384` the map covers ~2.67× more geographic area than the 384×384 default instead of just upscaling the same world.
+`--scale` is the main lever for larger worlds. `--scale 2` generates 768×768 tiles with the same ~4 px/tile density as the 384×384 default — a genuinely bigger world, not a zoomed-in view. It automatically sets `world_size=384` so each tile covers the same geographic area at any scale. For asymmetric maps use `--width`/`--height` directly and set `--world-size 384` manually.
 
 ## worldgen library — public API
 

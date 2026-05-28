@@ -25,7 +25,9 @@ enum Commands {
         width: usize,
         #[arg(long, default_value_t = 384)]
         height: usize,
-        /// Render scale (pixels per tile). Defaults to targeting ~1536px on the long axis.
+        /// World scale multiplier. Expands tile dimensions N× while keeping pixels/tile
+        /// constant at the 384-base default (~4 px/tile). --scale 2 generates a 768×768
+        /// world, not just a zoomed-in 384×384.
         #[arg(long)]
         scale: Option<u32>,
         #[arg(long, default_value_t = 0.52)]
@@ -74,8 +76,24 @@ fn run() -> Result<(), String> {
             out_dir,
         } => {
             let seed = select_seed(seed);
-            let render_scale =
-                scale.unwrap_or_else(|| (1536_u32 / width.max(height) as u32).max(1));
+            // pixels/tile is always derived from the base (unscaled) dimensions so that
+            // --scale never changes visual density, only world size.
+            let render_scale = (1536_u32 / width.max(height) as u32).clamp(1, 32);
+            let (width, height, world_size) = match scale {
+                Some(s) if s > 1 => {
+                    let w = (width * s as usize).min(4096);
+                    let h = (height * s as usize).min(4096);
+                    // If world_size was not set explicitly, fix it to the base tile count
+                    // so each tile covers the same geographic area at any scale factor.
+                    let ws = if world_size == 0 {
+                        width.min(height) as u32
+                    } else {
+                        world_size
+                    };
+                    (w, h, ws)
+                }
+                _ => (width, height, world_size),
+            };
             let config = WorldConfig {
                 seed,
                 width,
