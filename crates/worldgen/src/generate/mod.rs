@@ -9,6 +9,7 @@ use noise::OpenSimplex;
 use crate::{World, WorldConfig};
 
 pub use biomes::biome_for_tile;
+pub(crate) use util::{hash01, smoothstep};
 
 pub(super) const HYDRO_EPSILON: f32 = 0.0001;
 pub(super) const DIAGONAL_COST: f32 = std::f32::consts::SQRT_2;

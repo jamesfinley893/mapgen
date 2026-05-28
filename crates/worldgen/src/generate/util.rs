@@ -4,12 +4,12 @@ use crate::World;
 
 use super::DIAGONAL_COST;
 
-pub(super) fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+pub(crate) fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
-pub(super) fn hash01(seed: u64, x: usize, y: usize) -> f32 {
+pub(crate) fn hash01(seed: u64, x: usize, y: usize) -> f32 {
     let mut z = seed
         .wrapping_add((x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
         .wrapping_add((y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F));

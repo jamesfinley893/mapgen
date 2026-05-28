@@ -89,9 +89,10 @@ pub(crate) fn river_discharge_percentiles(
     if discharge.is_empty() {
         return (f32::INFINITY, f32::INFINITY);
     }
+    let last = discharge.len() - 1;
     (
-        discharge[discharge.len() * lower_percentile / 100],
-        discharge[discharge.len() * upper_percentile / 100],
+        discharge[(discharge.len() * lower_percentile / 100).min(last)],
+        discharge[(discharge.len() * upper_percentile / 100).min(last)],
     )
 }
 

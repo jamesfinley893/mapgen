@@ -1,6 +1,7 @@
 use image::{Rgba, RgbaImage};
 
 use crate::audit::river_discharge_percentiles;
+use crate::generate::{hash01, smoothstep};
 use crate::{
     Biome, MountainFeature, Surface, World, mountain_feature_for_tile, permanent_snow_cover,
 };
@@ -192,17 +193,13 @@ fn land_base_colors(world: &World, scale: u32) -> Vec<Rgba<u8>> {
             }
 
             let dry_moisture = (tile.moisture - contribution).max(0.0);
-            let dry_biome = crate::biome_for_tile(
-                Surface::Land,
-                tile.raw_elevation,
-                world.sea_level,
-                tile.temperature,
-                dry_moisture,
-            );
+            // tile.biome is already correct: assign_biomes uses surrounding_land_moisture
+            // for river tiles, so it reflects the actual terrain context, not the
+            // inflated river moisture. Only the colour-modulation moisture needs adjusting.
             colors[idx] = tile_land_color(
                 world,
                 idx,
-                dry_biome,
+                tile.biome,
                 dry_moisture,
                 min_river_order,
                 noise_cell,
@@ -294,7 +291,7 @@ fn soften_biome_edges(world: &World, colors: &[Rgba<u8>]) -> Vec<Rgba<u8>> {
         for (nx, ny) in world.neighbors8(x, y) {
             let nidx = world.idx(nx, ny);
             let nb = world.tiles[nidx].biome;
-            if nb == my_biome || matches!(nb, Biome::Ocean | Biome::Lake | Biome::Alpine) {
+            if nb == my_biome || matches!(nb, Biome::Ocean | Biome::Lake) {
                 continue;
             }
             r += colors[nidx][0] as f32;
@@ -922,19 +919,3 @@ fn sample_noise(seed: u64, x: usize, y: usize, cell: usize) -> f32 {
     ix0 + (ix1 - ix0) * sy
 }
 
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-fn hash01(seed: u64, x: usize, y: usize) -> f32 {
-    let mut z = seed
-        .wrapping_add((x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
-        .wrapping_add((y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F));
-    z ^= z >> 30;
-    z = z.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z ^= z >> 27;
-    z = z.wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^= z >> 31;
-    (z as f64 / u64::MAX as f64) as f32
-}

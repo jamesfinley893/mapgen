@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 use crate::{Surface, World, WorldConfig};
 
@@ -159,7 +159,7 @@ pub(super) fn simulate_hydrology(
         &provisional.lake_id,
     );
     suppress_short_weak_channels(world, &mut surfaces, &downstream, &stream_power);
-    let channel_order = assign_channel_order(world, &surfaces, &downstream, &discharge);
+    let channel_order = assign_channel_order(world, &surfaces, &discharge);
 
     HydrologyState {
         hydro_elevation: conditioning.hydro_elevation,
@@ -292,15 +292,12 @@ fn identify_lakes(
             continue;
         }
 
-        let mut in_region = vec![false; world.tiles.len()];
-        for &cell in &region {
-            in_region[cell] = true;
-        }
+        let in_region: HashSet<usize> = region.iter().copied().collect();
         let mut outlet = None;
         let mut outlet_level = f32::MAX;
         for &cell in &region {
             if let Some(next) = parent[cell]
-                && !in_region[next]
+                && !in_region.contains(&next)
                 && hydro[cell] < outlet_level
             {
                 outlet_level = hydro[cell];
@@ -795,19 +792,23 @@ fn break_downstream_cycles(
             if ocean[start] {
                 continue;
             }
-            let mut path = Vec::new();
+            let mut path: Vec<usize> = Vec::new();
+            let mut path_set: HashSet<usize> = HashSet::new();
             let mut current = start;
             loop {
                 if ocean[current] {
                     break;
                 }
-                if let Some(pos) = path.iter().position(|&idx| idx == current) {
-                    for &cycle_idx in &path[pos..] {
-                        downstream[cycle_idx] = parent[cycle_idx];
+                if path_set.contains(&current) {
+                    if let Some(pos) = path.iter().position(|&idx| idx == current) {
+                        for &cycle_idx in &path[pos..] {
+                            downstream[cycle_idx] = parent[cycle_idx];
+                        }
+                        changed = true;
                     }
-                    changed = true;
                     break;
                 }
+                path_set.insert(current);
                 path.push(current);
                 match downstream[current] {
                     Some(next) => current = next,
@@ -946,36 +947,50 @@ fn assign_basin_ids(
     let mut mouth_to_basin = HashMap::<usize, u32>::new();
     let mut next_basin = 0_u32;
 
-    for idx in 0..world.tiles.len() {
-        if ocean[idx] {
+    for start in 0..world.tiles.len() {
+        if ocean[start] || basin_id[start].is_some() {
             continue;
         }
-        let mut current = idx;
-        let mut guard = 0;
-        while guard < world.tiles.len() {
-            if ocean[current] {
+
+        // Walk downstream, collecting path tiles. When we hit a cached result or a
+        // terminal (lake, ocean mouth, or sink), backfill the whole path at once.
+        // Each tile is backfilled at most once, so the total cost is O(n) amortised.
+        let mut path: Vec<usize> = Vec::new();
+        let mut current = start;
+        let mut resolved: Option<u32> = None;
+
+        loop {
+            if path.len() >= world.tiles.len() || ocean[current] {
                 break;
             }
+            if let Some(b) = basin_id[current] {
+                resolved = Some(b);
+                break;
+            }
+            path.push(current);
             if let Some(lake) = lake_id[current] {
-                basin_id[idx] = Some(lake);
+                resolved = Some(lake);
                 break;
             }
             match downstream[current] {
-                Some(next) => {
-                    if ocean[next] {
-                        let basin = *mouth_to_basin.entry(current).or_insert_with(|| {
-                            let id = basin_offset + next_basin;
-                            next_basin += 1;
-                            id
-                        });
-                        basin_id[idx] = Some(basin);
-                        break;
-                    }
-                    current = next;
+                Some(next) if ocean[next] => {
+                    let basin = *mouth_to_basin.entry(current).or_insert_with(|| {
+                        let id = basin_offset + next_basin;
+                        next_basin += 1;
+                        id
+                    });
+                    resolved = Some(basin);
+                    break;
                 }
+                Some(next) => current = next,
                 None => break,
             }
-            guard += 1;
+        }
+
+        if let Some(b) = resolved {
+            for &p in &path {
+                basin_id[p] = Some(b);
+            }
         }
     }
 
@@ -1088,7 +1103,6 @@ fn suppress_short_weak_channels(
 fn assign_channel_order(
     world: &World,
     surfaces: &[Surface],
-    downstream: &[Option<usize>],
     discharge: &[f32],
 ) -> Vec<u8> {
     let mut order = vec![0_u8; world.tiles.len()];
@@ -1101,9 +1115,10 @@ fn assign_channel_order(
     if river_discharge.is_empty() {
         return order;
     }
-    let q55 = river_discharge[river_discharge.len() * 55 / 100];
-    let q82 = river_discharge[river_discharge.len() * 82 / 100];
-    let q94 = river_discharge[river_discharge.len() * 94 / 100];
+    let last = river_discharge.len() - 1;
+    let q55 = river_discharge[(river_discharge.len() * 55 / 100).min(last)];
+    let q82 = river_discharge[(river_discharge.len() * 82 / 100).min(last)];
+    let q94 = river_discharge[(river_discharge.len() * 94 / 100).min(last)];
 
     for idx in 0..world.tiles.len() {
         if surfaces[idx] != Surface::River {
@@ -1120,17 +1135,6 @@ fn assign_channel_order(
         };
     }
 
-    for idx in 0..world.tiles.len() {
-        if surfaces[idx] != Surface::River {
-            continue;
-        }
-        if let Some(next) = downstream[idx]
-            && surfaces[next] == Surface::River
-            && order[next] < order[idx]
-        {
-            order[next] = order[idx];
-        }
-    }
     order
 }
 
