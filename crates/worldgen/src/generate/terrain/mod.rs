@@ -172,6 +172,35 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
         .collect::<Vec<_>>();
     let uplift_per_step = 0.145 / EROSION_STEPS as f32;
 
+    // Pre-carve proto-valleys before the erosion loop. On a convex mountain
+    // surface drainage diverges, so the stream-power positive-feedback loop
+    // (lower elevation → more flow → deeper incision) never starts — most
+    // tiles accumulate only CA=5–50, making the stream-power term negligible.
+    // One flow-accumulation pass here creates slight concavities along the
+    // major drainage paths; the 18 erosion steps amplify them into real valleys.
+    {
+        let seed_flow = simulate_erosion_flow(
+            world,
+            &terrain,
+            &routing_noise_field,
+            &flow_opportunity,
+            &trib_opportunity,
+            &meander_field,
+        );
+        for idx in 0..terrain.len() {
+            if seed_flow.is_ocean[idx] {
+                continue;
+            }
+            let ca = seed_flow.contributing_area[idx];
+            if ca < 50.0 {
+                continue;
+            }
+            let highland = smoothstep(0.52, 0.76, terrain[idx]);
+            let ca_scale = smoothstep(50.0, 1200.0, ca);
+            terrain[idx] = (terrain[idx] - ca_scale * highland * 0.055).max(0.0);
+        }
+    }
+
     for step in 0..EROSION_STEPS {
         let progress = (step + 1) as f32 / EROSION_STEPS as f32;
         for idx in 0..terrain.len() {
@@ -241,18 +270,27 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
             let lat = latitude_factor(y, world.height);
             let snowline = (0.84 - lat * 0.22 - plateau_support[idx] * 0.04).clamp(0.58, 0.88);
             let glacial_band = smoothstep(snowline, (snowline + 0.12).min(0.98), current);
+            let ca = flow.contributing_area[idx].max(1.0);
+            let slope = flow.local_slope[idx];
+            // Stream power law concentrates incision along high-CA paths. Old ln(CA)*slope
+            // gave trunk rivers (lower slope) less erosion than steep headwaters — the
+            // correct physics inverts this: large upstream catchments drive valley deepening.
+            // The log-area base term preserves baseline erosion in low-discharge zones.
+            let stream_power_val = ca.powf(0.55) * slope.max(0.0008).powf(0.70);
             let incision = if flow.is_ocean[idx] {
                 0.0
             } else {
-                let discharge = flow.contributing_area[idx].max(1.0).ln();
-                let slope = flow.local_slope[idx];
+                let discharge = ca.ln();
                 let relief_factor = 0.58
                     + relief * 2.7
                     + interior_high * 1.18
                     + alpine * (0.62 + uplift_core * 0.72);
                 let tectonic_factor = 0.28 + axial_uplift[idx] * 1.54 + shoulder_uplift[idx] * 0.42;
                 let alluvial_brake = 1.0 - flow.floodplain_scale[idx] * 0.55;
-                discharge * slope * 0.012 * relief_factor * tectonic_factor * alluvial_brake
+                (discharge * slope * 0.005 + stream_power_val * 0.0018)
+                    * relief_factor
+                    * tectonic_factor
+                    * alluvial_brake
             };
             let confinement = flow.confinement[idx];
             let valley_scale = flow.valley_scale[idx];
@@ -265,10 +303,13 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
             } else {
                 (sediment_flux / transport_capacity).clamp(0.0, 2.5)
             };
+            // Interfluve crests (low contributing area, high elevation) should stay sharp;
+            // diffusion alone rounds them into broad domes, erasing watershed divides.
+            let ridge_crest = (1.0 - smoothstep(1.0, 15.0, ca)) * highland;
             let diffusion = (avg_neighbor - current)
-                * (0.019
+                * (0.019 * (1.0 - ridge_crest * 0.65)
                     + max_neighbor_drop * 0.034
-                    + interior_high * 0.046
+                    + interior_high * 0.046 * (1.0 - ridge_crest * 0.55)
                     + shoulder_zone * 0.022
                     + plain_zone * 0.03
                     + basin_zone * 0.028
@@ -298,7 +339,7 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
                 * (0.5 + axial_uplift[idx] * 0.62 + shoulder_uplift[idx] * 0.18);
             let valley_floor_lowering = valley_scale
                 * (1.0 - confinement)
-                * (0.0015 + plain_zone * 0.003 + basin_zone * 0.0025)
+                * (0.0015 + plain_zone * 0.003 + basin_zone * 0.0025 + highland * 0.0030)
                 * (0.55 + smoothstep(0.0, 0.09, flow.local_slope[idx]));
             let alluvial_fill = deposition
                 * floodplain_scale
@@ -343,10 +384,19 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
                     let side_b = (step_y, -step_x);
                     let lateral_strength = (valley_scale
                         * (1.0 - confinement)
-                        * (0.0024 + basin_zone * 0.003 + plain_zone * 0.002))
+                        * (0.0024 + basin_zone * 0.003 + plain_zone * 0.002)
+                        + highland * stream_power_val * 0.0035) // valley-wall undercutting in mountain terrain
                         + (floodplain_scale * (0.0045 + basin_zone * 0.0045 + plain_zone * 0.0035));
                     let lateral_strength = lateral_strength * (0.65 + (1.0 - uplift_core) * 0.35);
-                    for (distance, weight) in [(1_isize, 1.0_f32), (2_isize, 0.45_f32)] {
+                    // Trunk rivers in highland zones carve broad U/V valleys; extend the
+                    // lateral erosion radius so the valley floor spans multiple tiles.
+                    let trunk_valley = smoothstep(100.0, 2000.0, ca) * highland;
+                    let lat_distances: &[(isize, f32)] = if trunk_valley > 0.35 {
+                        &[(1, 1.0), (2, 0.45), (3, 0.18), (4, 0.07)]
+                    } else {
+                        &[(1, 1.0), (2, 0.45)]
+                    };
+                    for &(distance, weight) in lat_distances {
                         for side in [side_a, side_b] {
                             let sx = x as isize + side.0 * distance;
                             let sy = y as isize + side.1 * distance;
@@ -356,7 +406,7 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
                             let sidx = world.idx(sx as usize, sy as usize);
                             let height_above = (terrain[sidx] - current).max(0.0);
                             let carve = lateral_strength * weight * (0.45 + height_above * 3.4);
-                            lateral_erosion[sidx] += carve.min(0.015);
+                            lateral_erosion[sidx] += carve.min(0.018);
                         }
                     }
                     if floodplain_scale > 0.08 {
