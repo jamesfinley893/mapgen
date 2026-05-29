@@ -3,7 +3,7 @@ use colors::{apply_snow_overlay, land_base_colors, soften_biome_edges};
 use image::{Rgba, RgbaImage};
 use shading::{compute_hillshade, draw_tile, draw_tile_hillshaded, lerp_rgba, offset};
 use symbols::{draw_dunes, draw_forest, draw_hills, draw_peak, draw_ridge};
-use water::{draw_coastline, draw_lake, draw_river};
+use water::{draw_coastline, draw_lake, draw_river, draw_river_banks, draw_river_tile};
 
 mod colors;
 mod shading;
@@ -56,6 +56,8 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
             );
             let tex = ((variation - 0.5) * 6.0) as i16;
             draw_tile(&mut image, x as u32, y as u32, scale, offset(base, tex));
+        } else if tile.surface == Surface::River {
+            draw_river_tile(&mut image, world, idx, scale, &land_colors);
         } else {
             draw_tile_hillshaded(
                 &mut image,
@@ -68,28 +70,31 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
             );
         }
 
-        match mountain_feature_for_tile(world, idx) {
-            MountainFeature::Summit => draw_peak(&mut image, x as u32, y as u32, scale),
-            MountainFeature::Ridge => draw_ridge(&mut image, world, idx, scale),
-            MountainFeature::AlpineSlope => {}
-            MountainFeature::Foothill => draw_hills(&mut image, x as u32, y as u32, scale),
-            MountainFeature::None => {}
-        }
+        // Terrain symbols and coastline are land features — skip on river tiles.
+        if tile.surface != Surface::River {
+            match mountain_feature_for_tile(world, idx) {
+                MountainFeature::Summit => draw_peak(&mut image, x as u32, y as u32, scale),
+                MountainFeature::Ridge => draw_ridge(&mut image, world, idx, scale),
+                MountainFeature::AlpineSlope => {}
+                MountainFeature::Foothill => draw_hills(&mut image, x as u32, y as u32, scale),
+                MountainFeature::None => {}
+            }
 
-        if matches!(tile.biome, Biome::Desert | Biome::PolarDesert) {
-            draw_dunes(&mut image, x as u32, y as u32, scale);
-        } else if matches!(
-            tile.biome,
-            Biome::TemperateForest
-                | Biome::BorealForest
-                | Biome::Rainforest
-                | Biome::TropicalForest
-        ) {
-            draw_forest(&mut image, x as u32, y as u32, scale);
-        }
+            if matches!(tile.biome, Biome::Desert | Biome::PolarDesert) {
+                draw_dunes(&mut image, x as u32, y as u32, scale);
+            } else if matches!(
+                tile.biome,
+                Biome::TemperateForest
+                    | Biome::BorealForest
+                    | Biome::Rainforest
+                    | Biome::TropicalForest
+            ) {
+                draw_forest(&mut image, x as u32, y as u32, scale);
+            }
 
-        if tile.biome == Biome::Coast {
-            draw_coastline(&mut image, world, idx, scale);
+            if tile.biome == Biome::Coast {
+                draw_coastline(&mut image, world, idx, scale);
+            }
         }
     }
 
@@ -100,8 +105,21 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
     }
 
     for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.surface == Surface::River {
-            draw_river(&mut image, world, idx, scale);
+        if !matches!(
+            tile.surface,
+            Surface::River | Surface::Lake | Surface::Ocean
+        ) {
+            draw_river_banks(&mut image, world, idx, scale);
+        }
+    }
+
+    // At scale=1 the flat water tile colour is the complete river rendering.
+    // At scale>=2 same-colour connector strokes keep diagonal/downstream paths continuous.
+    if scale >= 2 {
+        for (idx, tile) in world.tiles.iter().enumerate() {
+            if tile.surface == Surface::River {
+                draw_river(&mut image, world, idx, scale);
+            }
         }
     }
 
