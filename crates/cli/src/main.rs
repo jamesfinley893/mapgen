@@ -9,7 +9,7 @@ use time::format_description::FormatItem;
 use time::macros::format_description;
 use worldgen::{RenderConfig, World, WorldConfig, build_metadata, generate_world, render_world};
 
-const TILES_SCHEMA_VERSION: u32 = 1;
+const TILES_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct TileExport {
@@ -253,6 +253,14 @@ fn validate_render_world(world: &World) -> Result<(), String> {
                 "tiles.json tile {idx} has out-of-range downstream index {next}"
             ));
         }
+        if !tile.river_width.is_finite()
+            || !tile.river_sinuosity.is_finite()
+            || !tile.river_lateral_offset.is_finite()
+        {
+            return Err(format!(
+                "tiles.json tile {idx} has non-finite river geometry"
+            ));
+        }
     }
     Ok(())
 }
@@ -326,6 +334,11 @@ mod tests {
     }
 
     #[test]
+    fn current_tile_export_schema_is_version_two() {
+        assert_eq!(TILES_SCHEMA_VERSION, 2);
+    }
+
+    #[test]
     fn validate_render_world_rejects_tile_count_mismatch() {
         let mut world = World::new(7, 2, 2, 0.52, 0);
         world.tiles.pop();
@@ -341,5 +354,14 @@ mod tests {
 
         let err = validate_render_world(&world).unwrap_err();
         assert!(err.contains("out-of-range downstream"));
+    }
+
+    #[test]
+    fn validate_render_world_rejects_non_finite_river_geometry() {
+        let mut world = World::new(7, 2, 2, 0.52, 0);
+        world.tiles[0].river_width = f32::NAN;
+
+        let err = validate_render_world(&world).unwrap_err();
+        assert!(err.contains("non-finite river geometry"));
     }
 }

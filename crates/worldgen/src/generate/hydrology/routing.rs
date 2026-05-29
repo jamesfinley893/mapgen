@@ -56,8 +56,7 @@ pub(super) fn build_downstream(
             .map(|candidate| candidate.next);
     }
 
-    reduce_directional_bias(world, ocean, conditioning, lake_id, &mut downstream);
-    perturb_mountain_exits(world, ocean, conditioning, lake_id, &mut downstream);
+    refine_lowland_bends(world, ocean, conditioning, lake_id, &mut downstream);
 
     downstream
 }
@@ -102,9 +101,7 @@ fn routing_candidates(
         candidates.push(RoutingCandidate {
             next: geometry.next,
             score,
-            slope,
             direction: geometry.direction,
-            mountain_front: scoring.mountain_front,
         });
     }
 
@@ -190,10 +187,14 @@ fn score_routing_candidate(
     let dir = geometry.unit_direction;
     let alignment = dir.0 * scoring.preferred.0 + dir.1 * scoring.preferred.1;
     let aspect_cross = dir.0 * -scoring.preferred.1 + dir.1 * scoring.preferred.0;
-    let persistence_bonus = scoring
-        .persistence
-        .map(|prev| (dir.0 * prev.0 + dir.1 * prev.1).max(-0.5))
-        .unwrap_or(0.0);
+    let persistence_bonus = scoring.persistence.map_or(0.0, |prev| {
+        let dot = dir.0 * prev.0 + dir.1 * prev.1;
+        if scoring.lowland_opening > 0.35 {
+            -dot.max(0.0) * 0.10
+        } else {
+            dot.max(-0.5) * 0.06
+        }
+    });
     let flat_bonus = if geometry.hydro_drop <= HYDRO_EPSILON {
         geometry.raw_slope.max(0.0) * 2.1 + alignment * 0.15
     } else {
@@ -232,10 +233,10 @@ fn score_routing_candidate(
         0.0
     };
 
-    slope * 9.4
+    slope * 8.3
         + geometry.raw_slope.max(0.0) * 2.8
-        + alignment * 1.05
-        + persistence_bonus * 0.12
+        + alignment * 0.92
+        + persistence_bonus
         + flat_bonus
         + meander_bonus
         + spacing_bonus
@@ -243,7 +244,13 @@ fn score_routing_candidate(
         + parent_bonus
         - anisotropy_penalty
 }
-fn reduce_directional_bias(
+
+fn rotate_vector(v: (f32, f32), angle: f32) -> (f32, f32) {
+    let (s, c) = angle.sin_cos();
+    (v.0 * c - v.1 * s, v.0 * s + v.1 * c)
+}
+
+fn refine_lowland_bends(
     world: &World,
     ocean: &[bool],
     conditioning: &ConditioningState,
@@ -257,78 +264,50 @@ fn reduce_directional_bias(
             .then_with(|| conditioning.rank[*b].cmp(&conditioning.rank[*a]))
     });
 
-    for _ in 0..3 {
+    for _ in 0..2 {
         for idx in order.iter().copied() {
             if ocean[idx] || downstream[idx].is_none() || !is_run_start(world, downstream, idx) {
                 continue;
             }
-            let segment = same_direction_segment(world, downstream, idx);
             let slope = local_downstream_slope(world, conditioning, downstream, idx);
-            let limit = if slope < 0.012 {
+            let segment = same_direction_segment(world, downstream, idx);
+            let limit = if slope < 0.014 {
                 3
-            } else if slope < 0.03 {
+            } else if slope < 0.032 {
                 4
             } else {
-                5
+                6
             };
             if segment.len() < limit {
                 continue;
             }
+
             let target = segment[segment.len() / 2];
+            let Some(current) = downstream[target] else {
+                continue;
+            };
+            let current_dir = direction_for(world, target, current);
             let target_slope = local_downstream_slope(world, conditioning, downstream, target);
-            let current = downstream[target].unwrap_or(usize::MAX);
             let candidates = routing_candidates(world, target, conditioning, lake_id);
             let current_score = candidates
                 .iter()
                 .find(|candidate| candidate.next == current)
                 .map(|candidate| candidate.score)
                 .unwrap_or(f32::MIN);
+            let tolerance = if target_slope < 0.02 {
+                0.42
+            } else if target_slope < 0.05 {
+                0.28
+            } else {
+                0.14
+            };
             if let Some(alternative) = candidates.into_iter().find(|candidate| {
                 candidate.next != current
-                    && candidate.direction != direction_for(world, target, current)
-                    && candidate.score
-                        >= current_score - (0.24 + (0.03 - target_slope.min(0.03)) * 4.5)
+                    && candidate.direction != current_dir
+                    && candidate.score >= current_score - tolerance
             }) {
                 downstream[target] = Some(alternative.next);
             }
-        }
-    }
-}
-
-fn perturb_mountain_exits(
-    world: &World,
-    ocean: &[bool],
-    conditioning: &ConditioningState,
-    lake_id: &[Option<u32>],
-    downstream: &mut [Option<usize>],
-) {
-    for idx in 0..world.tiles.len() {
-        if ocean[idx] || downstream[idx].is_none() {
-            continue;
-        }
-        let candidates = routing_candidates(world, idx, conditioning, lake_id);
-        let Some(current) = downstream[idx] else {
-            continue;
-        };
-        let Some(best) = candidates
-            .iter()
-            .find(|candidate| candidate.next == current)
-        else {
-            continue;
-        };
-        let best_mountain_front = best.mountain_front;
-        let best_slope = best.slope;
-        let best_score = best.score;
-        if best_mountain_front < 0.34 || best_slope > 0.06 {
-            continue;
-        }
-        let current_dir = direction_for(world, idx, current);
-        if let Some(alternative) = candidates.into_iter().find(|candidate| {
-            candidate.next != current
-                && candidate.direction != current_dir
-                && candidate.score >= best_score - (0.24 + best_mountain_front * 0.08)
-        }) {
-            downstream[idx] = Some(alternative.next);
         }
     }
 }
@@ -396,11 +375,6 @@ fn local_downstream_slope(
     let (nx, ny) = world.coords(next);
     (conditioning.hydro_elevation[idx] - conditioning.hydro_elevation[next]).max(0.0)
         / neighbor_distance(x, y, nx, ny)
-}
-
-fn rotate_vector(v: (f32, f32), angle: f32) -> (f32, f32) {
-    let (s, c) = angle.sin_cos();
-    (v.0 * c - v.1 * s, v.0 * s + v.1 * c)
 }
 
 pub(super) fn local_relief(world: &World, idx: usize, radius: isize) -> f32 {

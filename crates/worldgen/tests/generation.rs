@@ -164,6 +164,23 @@ fn metadata_reports_multiple_river_bands() {
 }
 
 #[test]
+fn visible_rivers_have_render_geometry() {
+    let world = generate_world(&config()).unwrap();
+    let mut checked = 0_usize;
+    for tile in &world.tiles {
+        if tile.surface != Surface::River {
+            continue;
+        }
+        checked += 1;
+        assert!(tile.river_width.is_finite());
+        assert!(tile.river_width > 0.0);
+        assert!((0.0..=1.0).contains(&tile.river_sinuosity));
+        assert!((-1.0..=1.0).contains(&tile.river_lateral_offset));
+    }
+    assert!(checked > 0);
+}
+
+#[test]
 fn rainfall_scale_increases_runoff_and_discharge() {
     let dry_config = WorldConfig {
         seed: 42,

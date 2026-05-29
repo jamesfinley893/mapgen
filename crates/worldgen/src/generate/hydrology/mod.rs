@@ -10,6 +10,7 @@ mod surfaces;
 use crate::{Surface, World, WorldConfig};
 
 use super::util::neighbor_distance;
+use super::util::{sample_seed_field, smoothstep};
 
 pub(super) use ocean::classify_ocean;
 
@@ -30,6 +31,9 @@ pub(super) struct HydrologyState {
     pub(super) discharge: Vec<f32>,
     pub(super) stream_power: Vec<f32>,
     pub(super) channel_order: Vec<u8>,
+    pub(super) river_width: Vec<f32>,
+    pub(super) river_sinuosity: Vec<f32>,
+    pub(super) river_lateral_offset: Vec<f32>,
     pub(super) surfaces: Vec<Surface>,
     pub(super) lake_id: Vec<Option<u32>>,
     pub(super) water_level: Vec<Option<f32>>,
@@ -65,9 +69,7 @@ struct LakeData {
 struct RoutingCandidate {
     next: usize,
     score: f32,
-    slope: f32,
     direction: (isize, isize),
-    mountain_front: f32,
 }
 
 impl PartialEq for QueueCell {
@@ -124,6 +126,7 @@ pub(super) fn simulate_hydrology(
         world,
         config,
         ocean,
+        &downstream,
         &contributing_area,
         &discharge,
         &stream_power,
@@ -131,6 +134,14 @@ pub(super) fn simulate_hydrology(
     );
     suppress_short_weak_channels(world, &mut surfaces, &downstream, &stream_power);
     let channel_order = assign_channel_order(world, &surfaces, &discharge);
+    let (river_width, river_sinuosity, river_lateral_offset) = compute_river_shape(
+        world,
+        &conditioning.hydro_elevation,
+        &surfaces,
+        &downstream,
+        &discharge,
+        &channel_order,
+    );
 
     HydrologyState {
         hydro_elevation: conditioning.hydro_elevation,
@@ -140,6 +151,9 @@ pub(super) fn simulate_hydrology(
         discharge,
         stream_power,
         channel_order,
+        river_width,
+        river_sinuosity,
+        river_lateral_offset,
         surfaces,
         lake_id: provisional.lake_id,
         water_level: provisional.water_level,
@@ -213,6 +227,9 @@ pub(super) fn apply_hydrology_to_world(
         world.tiles[idx].discharge = hydrology.discharge[idx];
         world.tiles[idx].stream_power = hydrology.stream_power[idx];
         world.tiles[idx].channel_order = hydrology.channel_order[idx];
+        world.tiles[idx].river_width = hydrology.river_width[idx];
+        world.tiles[idx].river_sinuosity = hydrology.river_sinuosity[idx];
+        world.tiles[idx].river_lateral_offset = hydrology.river_lateral_offset[idx];
         world.tiles[idx].downstream = hydrology.downstream[idx];
         world.tiles[idx].surface = hydrology.surfaces[idx];
         world.tiles[idx].basin_id = hydrology.basin_id[idx];
@@ -222,6 +239,47 @@ pub(super) fn apply_hydrology_to_world(
             world.tiles[idx].water_level = Some(world.sea_level);
         }
     }
+}
+
+fn compute_river_shape(
+    world: &World,
+    hydro_elevation: &[f32],
+    surfaces: &[Surface],
+    downstream: &[Option<usize>],
+    discharge: &[f32],
+    channel_order: &[u8],
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let mut width = vec![0.0_f32; world.tiles.len()];
+    let mut sinuosity = vec![0.0_f32; world.tiles.len()];
+    let mut lateral_offset = vec![0.0_f32; world.tiles.len()];
+    let thresholds = channel_thresholds(world);
+
+    for idx in 0..world.tiles.len() {
+        if surfaces[idx] != Surface::River {
+            continue;
+        }
+        let (x, y) = world.coords(idx);
+        let q = (discharge[idx] / thresholds.stream.max(1.0)).max(0.0);
+        let order_factor = channel_order[idx] as f32 / 4.0;
+        width[idx] = (0.32 + q.ln_1p() * 0.44 + order_factor * 0.42).clamp(0.35, 3.2);
+
+        let slope = downstream[idx]
+            .map(|next| {
+                let (nx, ny) = world.coords(next);
+                (hydro_elevation[idx] - hydro_elevation[next]).max(0.0)
+                    / neighbor_distance(x, y, nx, ny)
+            })
+            .unwrap_or(0.0);
+        let height_above_sea = (world.tiles[idx].raw_elevation - world.sea_level).max(0.0);
+        let lowland = 1.0 - smoothstep(0.08, 0.32, height_above_sea);
+        let gentle = 1.0 - smoothstep(0.008, 0.055, slope);
+        let seeded = sample_seed_field(world.seed, x, y, 18, 0xA11_u64) * 2.0 - 1.0;
+        let bend = sample_seed_field(world.seed, x, y, 9, 0xA12_u64) * 2.0 - 1.0;
+        sinuosity[idx] = (lowland * gentle * (0.35 + order_factor * 0.45)).clamp(0.0, 1.0);
+        lateral_offset[idx] = ((seeded * 0.65 + bend * 0.35) * sinuosity[idx]).clamp(-1.0, 1.0);
+    }
+
+    (width, sinuosity, lateral_offset)
 }
 
 pub(super) fn channel_thresholds(world: &World) -> ChannelThresholds {

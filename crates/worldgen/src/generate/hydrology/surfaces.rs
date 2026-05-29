@@ -1,12 +1,13 @@
 use crate::{Surface, World, WorldConfig};
 
 use super::channel_thresholds;
-use crate::generate::util::{sample_seed_field, smoothstep};
+use crate::generate::util::sample_seed_field;
 
 pub(super) fn classify_surfaces(
     world: &World,
     config: &WorldConfig,
     ocean: &[bool],
+    downstream: &[Option<usize>],
     contributing_area: &[f32],
     discharge: &[f32],
     stream_power: &[f32],
@@ -21,31 +22,37 @@ pub(super) fn classify_surfaces(
             surfaces[idx] = Surface::Ocean;
         } else if lake_id[idx].is_some() {
             surfaces[idx] = Surface::Lake;
-        } else {
-            let (x, y) = world.coords(idx);
-            let local_noise = sample_seed_field(world.seed, x, y, 22, 0xD1F1_0404);
-            let height_above_sea = (world.tiles[idx].raw_elevation - world.sea_level).max(0.0);
-            let highland = smoothstep(
-                world.sea_level + 0.12,
-                world.sea_level + 0.42,
-                world.tiles[idx].raw_elevation,
-            );
-            let dry = 1.0 - world.tiles[idx].precipitation.clamp(0.0, 1.0);
-            let erodibility =
-                (0.92 + dry * 0.58 - highland * 0.18 + (1.0 - local_noise) * 0.22).clamp(0.52, 1.8);
-            let discharge_threshold = thresholds.stream
-                * (0.08 + dry * 0.08 + (1.0 - local_noise) * 0.06)
-                / density.sqrt();
-            let power_threshold =
-                thresholds.stream.powf(0.82) * 0.0028 * erodibility / density.powf(0.72);
-            let lowland_relief_bonus = if height_above_sea < 0.12 { 0.86 } else { 1.0 };
-            if discharge[idx] >= discharge_threshold
-                && stream_power[idx] >= power_threshold * lowland_relief_bonus
-                && contributing_area[idx] >= (thresholds.stream * 0.07).max(4.0)
-            {
-                surfaces[idx] = Surface::River;
-            }
         }
+    }
+
+    let mut order: Vec<_> = (0..world.tiles.len()).collect();
+    order.sort_by(|a, b| discharge[*b].total_cmp(&discharge[*a]));
+
+    for idx in order {
+        if surfaces[idx] != Surface::Land {
+            continue;
+        }
+        if !is_channel_source(
+            world,
+            idx,
+            thresholds.stream,
+            density,
+            contributing_area,
+            discharge,
+            stream_power,
+        ) {
+            continue;
+        }
+        trace_visible_channel(
+            world,
+            idx,
+            &mut surfaces,
+            downstream,
+            thresholds.stream,
+            density,
+            discharge,
+            stream_power,
+        );
     }
 
     for idx in 0..world.tiles.len() {
@@ -62,6 +69,69 @@ pub(super) fn classify_surfaces(
     }
 
     surfaces
+}
+
+fn is_channel_source(
+    world: &World,
+    idx: usize,
+    stream_threshold: f32,
+    density: f32,
+    contributing_area: &[f32],
+    discharge: &[f32],
+    stream_power: &[f32],
+) -> bool {
+    let (x, y) = world.coords(idx);
+    let local_noise = sample_seed_field(world.seed, x, y, 24, 0xD1F1_0404);
+    let dry = 1.0 - world.tiles[idx].precipitation.clamp(0.0, 1.0);
+    let source_q =
+        stream_threshold * (0.075 + dry * 0.055 + (1.0 - local_noise) * 0.045) / density.powf(0.62);
+    let source_power = stream_threshold.powf(0.82) * 0.00155 / density.powf(0.55);
+
+    discharge[idx] >= source_q
+        && stream_power[idx] >= source_power
+        && contributing_area[idx] >= (stream_threshold * 0.055).max(4.0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trace_visible_channel(
+    world: &World,
+    start: usize,
+    surfaces: &mut [Surface],
+    downstream: &[Option<usize>],
+    stream_threshold: f32,
+    density: f32,
+    discharge: &[f32],
+    stream_power: &[f32],
+) {
+    let continuation_q = stream_threshold * 0.055 / density.powf(0.35);
+    let continuation_power = stream_threshold.powf(0.82) * 0.0011 / density.powf(0.45);
+    let mut current = start;
+    let mut guard = 0;
+
+    while guard < world.tiles.len() {
+        match surfaces[current] {
+            Surface::Ocean | Surface::Lake => break,
+            Surface::River => {}
+            Surface::Land | Surface::Coast => {
+                if current != start
+                    && discharge[current] < continuation_q
+                    && stream_power[current] < continuation_power
+                {
+                    break;
+                }
+                surfaces[current] = Surface::River;
+            }
+        }
+
+        let Some(next) = downstream[current] else {
+            break;
+        };
+        if matches!(surfaces[next], Surface::Ocean | Surface::Lake) {
+            break;
+        }
+        current = next;
+        guard += 1;
+    }
 }
 
 pub(super) fn suppress_short_weak_channels(
