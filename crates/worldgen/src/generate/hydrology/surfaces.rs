@@ -1,16 +1,16 @@
+use std::collections::VecDeque;
+
 use crate::{Surface, World, WorldConfig};
 
 use super::channel_thresholds;
-use crate::generate::util::sample_seed_field;
+use crate::generate::util::{sample_seed_field, smoothstep};
 
 pub(super) fn classify_surfaces(
     world: &World,
     config: &WorldConfig,
     ocean: &[bool],
     downstream: &[Option<usize>],
-    contributing_area: &[f32],
     discharge: &[f32],
-    stream_power: &[f32],
     lake_id: &[Option<u32>],
 ) -> Vec<Surface> {
     let mut surfaces = vec![Surface::Land; world.tiles.len()];
@@ -25,35 +25,25 @@ pub(super) fn classify_surfaces(
         }
     }
 
-    let mut order: Vec<_> = (0..world.tiles.len()).collect();
-    order.sort_by(|a, b| discharge[*b].total_cmp(&discharge[*a]));
-
-    for idx in order {
+    // Mark every tile whose accumulated discharge exceeds the local threshold as a river.
+    // This is the correct implementation of flow-accumulation-based channel networks:
+    // discharge is monotonically non-decreasing downstream, so qualifying tiles always
+    // form connected paths from headwater to sink — no tracing required.
+    // Tributaries emerge automatically because they share discharge accumulation with the
+    // trunk; no independent source-trace means no spurious parallel rivers either.
+    for idx in 0..world.tiles.len() {
         if surfaces[idx] != Surface::Land {
             continue;
         }
-        if !is_channel_source(
-            world,
-            idx,
-            thresholds.stream,
-            density,
-            contributing_area,
-            discharge,
-            stream_power,
-        ) {
-            continue;
+        if is_river_tile(world, idx, thresholds.stream, density, discharge) {
+            surfaces[idx] = Surface::River;
         }
-        trace_visible_channel(
-            world,
-            idx,
-            &mut surfaces,
-            downstream,
-            thresholds.stream,
-            density,
-            discharge,
-            stream_power,
-        );
     }
+
+    // Where many independent catchments reach the ocean within a short coastal stretch,
+    // keep only the highest-discharge outlet in each cluster. Upstream fragments made
+    // stranded by this suppression are cleaned up by remove_stranded_rivers.
+    suppress_parallel_mouths(world, &mut surfaces, downstream, discharge, 30, thresholds.secondary);
 
     for idx in 0..world.tiles.len() {
         if surfaces[idx] != Surface::Land {
@@ -71,66 +61,92 @@ pub(super) fn classify_surfaces(
     surfaces
 }
 
-fn is_channel_source(
+fn is_river_tile(
     world: &World,
     idx: usize,
     stream_threshold: f32,
     density: f32,
-    contributing_area: &[f32],
     discharge: &[f32],
-    stream_power: &[f32],
 ) -> bool {
     let (x, y) = world.coords(idx);
-    let local_noise = sample_seed_field(world.seed, x, y, 24, 0xD1F1_0404);
-    let dry = 1.0 - world.tiles[idx].precipitation.clamp(0.0, 1.0);
-    let source_q =
-        stream_threshold * (0.075 + dry * 0.055 + (1.0 - local_noise) * 0.045) / density.powf(0.62);
-    let source_power = stream_threshold.powf(0.82) * 0.00155 / density.powf(0.55);
+    // Two-scale noise: coarse sets regional drainage density, fine adds local texture.
+    let coarse = sample_seed_field(world.seed, x, y, 64, 0xD1F1_0404);
+    let fine = sample_seed_field(world.seed, x, y, 16, 0xD1F1_0405);
+    let local_noise = coarse * 0.62 + fine * 0.38;
 
-    discharge[idx] >= source_q
-        && stream_power[idx] >= source_power
-        && contributing_area[idx] >= (stream_threshold * 0.055).max(4.0)
+    let wet = world.tiles[idx].precipitation.clamp(0.0, 1.0);
+    // Dry areas need substantially more discharge to sustain surface channels.
+    // Climate is already encoded in discharge (via runoff coefficients), but an explicit
+    // threshold shift ensures that very dry regions don't show ephemeral channels.
+    let climate_factor = 0.75 + (1.0 - wet) * 0.75; // wet=0.75 to dry=1.50
+    // Regional noise creates density variation: favorable zones have dense headwaters,
+    // unfavorable inter-basin areas have none.
+    let noise_factor = 0.80 + (1.0 - local_noise) * 0.40; // 0.80 to 1.20
+
+    let threshold = stream_threshold * 0.55 * climate_factor * noise_factor / density.powf(0.62);
+    discharge[idx] >= threshold
 }
 
-#[allow(clippy::too_many_arguments)]
-fn trace_visible_channel(
+fn suppress_parallel_mouths(
     world: &World,
-    start: usize,
     surfaces: &mut [Surface],
     downstream: &[Option<usize>],
-    stream_threshold: f32,
-    density: f32,
     discharge: &[f32],
-    stream_power: &[f32],
+    radius: usize,
+    secondary_threshold: f32,
 ) {
-    let continuation_q = stream_threshold * 0.055 / density.powf(0.35);
-    let continuation_power = stream_threshold.powf(0.82) * 0.0011 / density.powf(0.45);
-    let mut current = start;
-    let mut guard = 0;
+    // Collect all tiles where a river exits to ocean.
+    // Lake inflows are left unsuppressed — lakes naturally accept multiple tributaries.
+    let mut outlets: Vec<usize> = (0..world.tiles.len())
+        .filter(|&idx| {
+            surfaces[idx] == Surface::River
+                && downstream[idx]
+                    .map(|next| surfaces[next] == Surface::Ocean)
+                    .unwrap_or(false)
+        })
+        .collect();
 
-    while guard < world.tiles.len() {
-        match surfaces[current] {
-            Surface::Ocean | Surface::Lake => break,
-            Surface::River => {}
-            Surface::Land | Surface::Coast => {
-                if current != start
-                    && discharge[current] < continuation_q
-                    && stream_power[current] < continuation_power
-                {
-                    break;
-                }
-                surfaces[current] = Surface::River;
+    // Process in descending discharge order: dominant outlets claim their exclusion zone first.
+    outlets.sort_by(|a, b| discharge[*b].total_cmp(&discharge[*a]));
+
+    let r = radius as isize;
+    let r_sq = r * r;
+    let mut suppressed = vec![false; world.tiles.len()];
+
+    for &dominant in &outlets {
+        if suppressed[dominant] {
+            continue;
+        }
+        let (dx, dy) = world.coords(dominant);
+        for &candidate in &outlets {
+            if candidate == dominant || suppressed[candidate] {
+                continue;
+            }
+            let (cx, cy) = world.coords(candidate);
+            let ddx = dx as isize - cx as isize;
+            let ddy = dy as isize - cy as isize;
+            if ddx * ddx + ddy * ddy > r_sq {
+                continue;
+            }
+            // Two-tier suppression:
+            // Small rivers (below secondary threshold): the highest-discharge outlet
+            // in each coastal zone wins outright. Equal or near-equal discharge rivers
+            // (common when many catchments have similar size) are all suppressed by the
+            // zone's dominant. This prevents the comb of parallel gully outlets.
+            // Large rivers (above secondary threshold): only suppress if dominant has
+            // 2.5× more discharge, preserving genuine multi-river coastlines.
+            if discharge[candidate] < secondary_threshold
+                || discharge[dominant] >= discharge[candidate] * 2.5
+            {
+                suppressed[candidate] = true;
             }
         }
+    }
 
-        let Some(next) = downstream[current] else {
-            break;
-        };
-        if matches!(surfaces[next], Surface::Ocean | Surface::Lake) {
-            break;
+    for idx in 0..world.tiles.len() {
+        if suppressed[idx] {
+            surfaces[idx] = Surface::Land;
         }
-        current = next;
-        guard += 1;
     }
 }
 
@@ -167,7 +183,11 @@ pub(super) fn suppress_short_weak_channels(
             continue;
         }
         let len = path_len_to_junction_or_sink(world, surfaces, downstream, &upstream, idx);
-        if len <= 1 && stream_power[idx] < mean_power * 0.55 {
+        let height_above_sea = (world.tiles[idx].raw_elevation - world.sea_level).max(0.0);
+        // Relax suppression threshold for mountain headwaters: steep first-order streams
+        // have high stream power relative to discharge and should survive pruning.
+        let suppress_t = mean_power * (0.55 - smoothstep(0.08, 0.24, height_above_sea) * 0.35);
+        if len <= 2 && stream_power[idx] < suppress_t {
             remove.push(idx);
         }
     }
@@ -236,4 +256,62 @@ fn path_len_to_junction_or_sink(
         guard += 1;
     }
     len
+}
+
+// Remove river tiles that have no downstream path reaching ocean or a lake.
+//
+// This is a safety pass after the main surface classification. It handles edge
+// cases where the accumulation order or routing produces an isolated fragment —
+// tiles classified as River whose downstream chain terminates at a land sink.
+// The BFS runs backward from all connected sinks (ocean, lake) through the
+// river graph; any River tile not reached is converted back to Land.
+pub(super) fn remove_stranded_rivers(
+    world: &World,
+    surfaces: &mut [Surface],
+    downstream: &[Option<usize>],
+) {
+    let n = world.tiles.len();
+
+    // Reverse graph: for each tile, which River tiles drain into it?
+    let mut upstream_of: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (idx, &next_opt) in downstream.iter().enumerate() {
+        if surfaces[idx] != Surface::River {
+            continue;
+        }
+        if let Some(next) = next_opt {
+            upstream_of[next].push(idx);
+        }
+    }
+
+    // BFS backward from all connected sinks.
+    let mut connected = vec![false; n];
+    let mut queue = VecDeque::new();
+
+    for idx in 0..n {
+        if matches!(surfaces[idx], Surface::Ocean | Surface::Lake) {
+            connected[idx] = true;
+            for &up in &upstream_of[idx] {
+                if !connected[up] {
+                    connected[up] = true;
+                    queue.push_back(up);
+                }
+            }
+        }
+    }
+
+    while let Some(idx) = queue.pop_front() {
+        for &up in &upstream_of[idx] {
+            if !connected[up] {
+                connected[up] = true;
+                queue.push_back(up);
+            }
+        }
+    }
+
+    // Demote every River tile that never reaches a valid terminus.
+    for idx in 0..n {
+        if surfaces[idx] == Surface::River && !connected[idx] {
+            surfaces[idx] = Surface::Land;
+        }
+    }
 }

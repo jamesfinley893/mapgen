@@ -21,7 +21,9 @@ use flow::{
 };
 use lakes::identify_lakes;
 use routing::{break_downstream_cycles, build_downstream};
-use surfaces::{assign_channel_order, classify_surfaces, suppress_short_weak_channels};
+use surfaces::{
+    assign_channel_order, classify_surfaces, remove_stranded_rivers, suppress_short_weak_channels,
+};
 
 pub(super) struct HydrologyState {
     pub(super) hydro_elevation: Vec<f32>,
@@ -110,7 +112,7 @@ pub(super) fn simulate_hydrology(
     );
     let mut downstream = build_downstream(world, ocean, &conditioning, &provisional.lake_id);
     break_downstream_cycles(&mut downstream, &conditioning.parent, ocean);
-    let accumulation_order = flow_accumulation_order(&conditioning);
+    let accumulation_order = flow_accumulation_order(&conditioning, &downstream, ocean);
     let contributing_area = accumulate_contributing_area(&accumulation_order, &downstream, ocean);
     let runoff = compute_runoff(world, config, ocean, &conditioning, &downstream);
     let discharge = accumulate_discharge(&accumulation_order, &downstream, ocean, &runoff);
@@ -127,12 +129,11 @@ pub(super) fn simulate_hydrology(
         config,
         ocean,
         &downstream,
-        &contributing_area,
         &discharge,
-        &stream_power,
         &provisional.lake_id,
     );
     suppress_short_weak_channels(world, &mut surfaces, &downstream, &stream_power);
+    remove_stranded_rivers(world, &mut surfaces, &downstream);
     let channel_order = assign_channel_order(world, &surfaces, &discharge);
     let (river_width, river_sinuosity, river_lateral_offset) = compute_river_shape(
         world,
@@ -186,8 +187,13 @@ pub(super) fn apply_channel_carving(world: &mut World, hydrology: &HydrologyStat
             })
             .unwrap_or(0.0);
         let slope_factor = if local_slope < 0.008 { 1.25 } else { 0.95 };
-        let carve = (0.0045 + ratio.ln() * 0.0135) * band_multiplier * slope_factor;
-        let carve = carve.clamp(0.0, 0.085);
+        // Deeper incision in lowlands so pass-2 routing captures surrounding flow into
+        // established valleys. Mountains use lighter carving so trunk rivers aren't
+        // trapped in highland gorges — they should escape to lowland plains.
+        let height_above_sea = (world.tiles[idx].raw_elevation - world.sea_level).max(0.0);
+        let lowland_factor = 1.0 - smoothstep(0.06, 0.22, height_above_sea) * 0.55;
+        let carve = (0.006 + ratio.ln() * 0.020) * band_multiplier * slope_factor * lowland_factor;
+        let carve = carve.clamp(0.0, 0.14);
         world.tiles[idx].raw_elevation = (world.tiles[idx].raw_elevation - carve).max(0.0);
 
         let (x, y) = world.coords(idx);
@@ -200,12 +206,14 @@ pub(super) fn apply_channel_carving(world: &mut World, hydrology: &HydrologyStat
             let distance = neighbor_distance(x, y, nx, ny);
             let neighbor_relief =
                 (world.tiles[nidx].raw_elevation - world.tiles[idx].raw_elevation).max(0.0);
+            // Reduced lateral carving of non-river land — preserving steeper gradient
+            // from hillslope into the channel improves basin capture in the second pass.
             let side_factor = if hydrology.surfaces[nidx] == Surface::River {
                 0.38
             } else if distance > 1.0 {
-                0.12
+                0.08
             } else {
-                0.22
+                0.15
             };
             let relief_factor = (0.5 + neighbor_relief * 1.8).clamp(0.5, 1.4);
             let lateral_carve = carve * side_factor * relief_factor;
@@ -261,7 +269,7 @@ fn compute_river_shape(
         let (x, y) = world.coords(idx);
         let q = (discharge[idx] / thresholds.stream.max(1.0)).max(0.0);
         let order_factor = channel_order[idx] as f32 / 4.0;
-        width[idx] = (0.32 + q.ln_1p() * 0.44 + order_factor * 0.42).clamp(0.35, 3.2);
+        width[idx] = (0.18 + q.ln_1p() * 0.58 + order_factor * 0.80).clamp(0.2, 6.0);
 
         let slope = downstream[idx]
             .map(|next| {

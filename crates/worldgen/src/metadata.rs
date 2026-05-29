@@ -326,14 +326,16 @@ fn tributary_spacing_variance(world: &World) -> f32 {
             if tile.surface != Surface::River || tile.channel_order < 3 {
                 break;
             }
-            let major_inputs = upstream[current]
+            // A confluence is where 2+ river tiles drain into this tile: the trunk
+            // continuation (1 tile) plus at least one tributary (1+ tiles).
+            // With threshold-all networks, this correctly identifies tributary junctions
+            // rather than relying on order-class comparisons that conflate channel
+            // continuation with true merges.
+            let river_inputs = upstream[current]
                 .iter()
-                .filter(|&&source| {
-                    let source_tile = &world.tiles[source];
-                    source_tile.surface == Surface::River && source_tile.channel_order >= 2
-                })
+                .filter(|&&source| world.tiles[source].surface == Surface::River)
                 .count();
-            if major_inputs >= 2 {
+            if river_inputs >= 2 {
                 intervals.push(since_junction as f32);
                 since_junction = 0;
             } else {

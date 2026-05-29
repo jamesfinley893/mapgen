@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::{World, WorldConfig};
 
@@ -6,13 +6,73 @@ use super::ConditioningState;
 use super::routing::local_relief;
 use crate::generate::util::{neighbor_distance, smoothstep};
 
-pub(super) fn flow_accumulation_order(conditioning: &ConditioningState) -> Vec<usize> {
-    let mut order: Vec<_> = (0..conditioning.hydro_elevation.len()).collect();
-    order.sort_by(|a, b| {
+// Topological sort of the routing DAG using Kahn's algorithm.
+//
+// Sorting by elevation alone is incorrect when flat-region routing chooses a
+// neighbor that is within HYDRO_EPSILON but technically slightly higher: the
+// downstream tile would be processed before its upstream contributor, producing
+// non-monotone discharge. A true topological sort on the downstream pointers
+// guarantees each tile is processed after all its upstream contributors.
+pub(super) fn flow_accumulation_order(
+    conditioning: &ConditioningState,
+    downstream: &[Option<usize>],
+    ocean: &[bool],
+) -> Vec<usize> {
+    let n = conditioning.hydro_elevation.len();
+
+    // In-degree: how many non-ocean upstream tiles route into each tile.
+    let mut in_degree = vec![0_u32; n];
+    for (idx, &next_opt) in downstream.iter().enumerate() {
+        if ocean[idx] {
+            continue;
+        }
+        if let Some(next) = next_opt {
+            if !ocean[next] {
+                in_degree[next] += 1;
+            }
+        }
+    }
+
+    // Seed queue with all source tiles (no non-ocean tile routes into them).
+    // Sort deterministically: highest elevation / highest rank (most upstream) first.
+    let mut sources: Vec<usize> = (0..n)
+        .filter(|&i| !ocean[i] && in_degree[i] == 0)
+        .collect();
+    sources.sort_by(|a, b| {
         conditioning.hydro_elevation[*b]
             .total_cmp(&conditioning.hydro_elevation[*a])
             .then_with(|| conditioning.rank[*b].cmp(&conditioning.rank[*a]))
     });
+
+    let mut order = Vec::with_capacity(n);
+    let mut queue: VecDeque<usize> = sources.into_iter().collect();
+
+    while let Some(idx) = queue.pop_front() {
+        order.push(idx);
+        if let Some(next) = downstream[idx] {
+            if !ocean[next] {
+                in_degree[next] -= 1;
+                if in_degree[next] == 0 {
+                    queue.push_back(next);
+                }
+            }
+        }
+    }
+
+    // Safety: include any tiles left over from residual cycles (shouldn't
+    // occur after break_downstream_cycles, but prevents silent data loss).
+    if order.len() < n {
+        let mut visited = vec![false; n];
+        for &i in &order {
+            visited[i] = true;
+        }
+        for i in 0..n {
+            if !ocean[i] && !visited[i] {
+                order.push(i);
+            }
+        }
+    }
+
     order
 }
 

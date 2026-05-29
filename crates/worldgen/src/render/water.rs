@@ -152,9 +152,9 @@ pub(super) fn draw_river(image: &mut RgbaImage, world: &World, idx: usize, scale
     let tile = &world.tiles[idx];
     let radius: i32 = match (tile.channel_order, scale) {
         (_, 1) => return, // scale=1: tile colour is sufficient
-        (3..=4, 2) => 0,
-        (3..=4, _) => ((tile.river_width * scale as f32 * 0.22).round() as i32).clamp(1, 3),
-        (2, 3..=u32::MAX) => ((tile.river_width * scale as f32 * 0.16).round() as i32).clamp(0, 2),
+        (3..=4, 2) => 1,
+        (3..=4, _) => ((tile.river_width * scale as f32 * 0.26).round() as i32).clamp(1, 7),
+        (2, 3..=u32::MAX) => ((tile.river_width * scale as f32 * 0.18).round() as i32).clamp(0, 3),
         (1, 4..=u32::MAX) => 0,
         _ => return,
     };
