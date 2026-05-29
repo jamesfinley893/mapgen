@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::river::{RiverBandThresholds, river_band_thresholds, river_direction};
+use crate::river::river_direction;
 use crate::{Biome, Surface, World, WorldConfig, audit_rivers};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,13 +69,10 @@ struct TileSummary {
 }
 
 pub fn build_metadata(world: &World, config: &WorldConfig) -> WorldMetadata {
-    let thresholds = river_band_thresholds(world);
-    let tile_summary = collect_tile_summary(world, thresholds);
-    let (confined_trunk_fraction, average_trunk_confinement) =
-        trunk_confinement_stats(world, thresholds.trunk);
-    let trunk_straight_run_ratio = trunk_straight_run_ratio(world, thresholds.trunk);
-    let tributary_spacing_variance =
-        tributary_spacing_variance(world, thresholds.trunk, thresholds.secondary);
+    let tile_summary = collect_tile_summary(world);
+    let (confined_trunk_fraction, average_trunk_confinement) = trunk_confinement_stats(world);
+    let trunk_straight_run_ratio = trunk_straight_run_ratio(world);
+    let tributary_spacing_variance = tributary_spacing_variance(world);
     let mountain_exit_irregularity_score = mountain_exit_irregularity_score(world);
     let river_audit = audit_rivers(world);
 
@@ -110,7 +107,7 @@ pub fn build_metadata(world: &World, config: &WorldConfig) -> WorldMetadata {
         median_source_segment_length: river_audit.segment_median,
         p90_source_segment_length: river_audit.segment_p90,
         dominant_river_direction_fraction: river_audit.dominant_direction_fraction,
-        longest_trunk_length: longest_trunk_length(world, thresholds.trunk),
+        longest_trunk_length: longest_trunk_length(world),
         trunk_straight_run_ratio,
         tributary_spacing_variance,
         mountain_exit_irregularity_score,
@@ -126,7 +123,7 @@ pub fn build_metadata(world: &World, config: &WorldConfig) -> WorldMetadata {
     }
 }
 
-fn collect_tile_summary(world: &World, thresholds: RiverBandThresholds) -> TileSummary {
+fn collect_tile_summary(world: &World) -> TileSummary {
     let mut land_tiles = 0;
     let mut ocean_tiles = 0;
     let mut river_tiles = 0;
@@ -154,12 +151,10 @@ fn collect_tile_summary(world: &World, thresholds: RiverBandThresholds) -> TileS
                 land_tiles += 1;
                 total_river_discharge += tile.discharge;
                 max_river_discharge = max_river_discharge.max(tile.discharge);
-                let band = if tile.discharge >= thresholds.trunk {
-                    2
-                } else if tile.discharge >= thresholds.secondary {
-                    1
-                } else {
-                    0
+                let band = match tile.channel_order {
+                    3 | 4 => 2,
+                    2 => 1,
+                    _ => 0,
                 };
                 river_band_counts[band] += 1;
             }
@@ -208,10 +203,10 @@ fn collect_tile_summary(world: &World, thresholds: RiverBandThresholds) -> TileS
     }
 }
 
-fn longest_trunk_length(world: &World, trunk_threshold: f32) -> usize {
+fn longest_trunk_length(world: &World) -> usize {
     let mut best = 0;
     for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.surface != Surface::River || tile.discharge < trunk_threshold {
+        if tile.surface != Surface::River || tile.channel_order < 3 {
             continue;
         }
         let mut current = idx;
@@ -237,13 +232,13 @@ fn longest_trunk_length(world: &World, trunk_threshold: f32) -> usize {
     best
 }
 
-fn trunk_confinement_stats(world: &World, trunk_threshold: f32) -> (f32, f32) {
+fn trunk_confinement_stats(world: &World) -> (f32, f32) {
     let mut trunk_tiles = 0_usize;
     let mut confined = 0_usize;
     let mut total = 0.0_f32;
 
     for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.surface != Surface::River || tile.discharge < trunk_threshold {
+        if tile.surface != Surface::River || tile.channel_order < 3 {
             continue;
         }
         let Some(next) = tile.downstream else {
@@ -267,20 +262,18 @@ fn trunk_confinement_stats(world: &World, trunk_threshold: f32) -> (f32, f32) {
     }
 }
 
-fn trunk_straight_run_ratio(world: &World, trunk_threshold: f32) -> f32 {
+fn trunk_straight_run_ratio(world: &World) -> f32 {
     let mut total = 0_usize;
     let mut straight = 0_usize;
 
     for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.surface != Surface::River || tile.discharge < trunk_threshold {
+        if tile.surface != Surface::River || tile.channel_order < 3 {
             continue;
         }
         let Some(next) = tile.downstream else {
             continue;
         };
-        if world.tiles[next].surface != Surface::River
-            || world.tiles[next].discharge < trunk_threshold
-        {
+        if world.tiles[next].surface != Surface::River || world.tiles[next].channel_order < 3 {
             continue;
         }
         let Some(next2) = world.tiles[next].downstream else {
@@ -302,7 +295,7 @@ fn trunk_straight_run_ratio(world: &World, trunk_threshold: f32) -> f32 {
     }
 }
 
-fn tributary_spacing_variance(world: &World, trunk_threshold: f32, stream_threshold: f32) -> f32 {
+fn tributary_spacing_variance(world: &World) -> f32 {
     let mut upstream = vec![Vec::new(); world.tiles.len()];
     for (idx, tile) in world.tiles.iter().enumerate() {
         if let Some(next) = tile.downstream {
@@ -312,14 +305,14 @@ fn tributary_spacing_variance(world: &World, trunk_threshold: f32, stream_thresh
 
     let mut intervals = Vec::new();
     for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.surface != Surface::River || tile.discharge < trunk_threshold {
+        if tile.surface != Surface::River || tile.channel_order < 3 {
             continue;
         }
         let upstream_trunk = upstream[idx]
             .iter()
             .filter(|&&source| {
                 let source_tile = &world.tiles[source];
-                source_tile.surface == Surface::River && source_tile.discharge >= trunk_threshold
+                source_tile.surface == Surface::River && source_tile.channel_order >= 3
             })
             .count();
         if upstream_trunk != 0 {
@@ -330,15 +323,14 @@ fn tributary_spacing_variance(world: &World, trunk_threshold: f32, stream_thresh
         let mut guard = 0;
         while guard < world.tiles.len() {
             let tile = &world.tiles[current];
-            if tile.surface != Surface::River || tile.discharge < trunk_threshold {
+            if tile.surface != Surface::River || tile.channel_order < 3 {
                 break;
             }
             let major_inputs = upstream[current]
                 .iter()
                 .filter(|&&source| {
                     let source_tile = &world.tiles[source];
-                    source_tile.surface == Surface::River
-                        && source_tile.discharge >= stream_threshold
+                    source_tile.surface == Surface::River && source_tile.channel_order >= 2
                 })
                 .count();
             if major_inputs >= 2 {

@@ -1,7 +1,6 @@
 use image::{Rgba, RgbaImage};
 
 use crate::generate::smoothstep;
-use crate::river::RiverBandThresholds;
 use crate::{Biome, Surface, World};
 
 use super::shading::{draw_disc, draw_thick_line, lerp_rgba, put_pixel_checked, tile_center_px};
@@ -60,27 +59,19 @@ pub(super) fn draw_lake(image: &mut RgbaImage, world: &World, idx: usize, scale:
     }
 }
 
-pub(super) fn draw_river(
-    image: &mut RgbaImage,
-    world: &World,
-    idx: usize,
-    scale: u32,
-    flow: f32,
-    thresholds: RiverBandThresholds,
-) {
-    let radius = river_radius_px(world, idx, flow, scale, thresholds);
+pub(super) fn draw_river(image: &mut RgbaImage, world: &World, idx: usize, scale: u32) {
+    let radius = river_radius_px(world, idx, scale);
     if radius < 0 {
         return;
     }
+    let tile = &world.tiles[idx];
     let (x, y) = world.coords(idx);
-    let color = river_color(flow, thresholds);
+    let color = river_color(tile.channel_order);
     let start = tile_center_px(x, y, scale);
 
-    if let Some(next) = world.tiles[idx].downstream {
+    if let Some(next) = tile.downstream {
         let (nx, ny) = world.coords(next);
-        let dx = nx.abs_diff(x);
-        let dy = ny.abs_diff(y);
-        if dx <= 1 && dy <= 1 {
+        if nx.abs_diff(x) <= 1 && ny.abs_diff(y) <= 1 {
             draw_thick_line(image, start, tile_center_px(nx, ny, scale), radius, color);
             return;
         }
@@ -89,30 +80,26 @@ pub(super) fn draw_river(
     draw_disc(image, start, radius, color);
 }
 
-fn river_color(flow: f32, thresholds: RiverBandThresholds) -> Rgba<u8> {
-    if flow > thresholds.trunk {
+fn river_color(channel_order: u8) -> Rgba<u8> {
+    if channel_order >= 3 {
         Rgba([42, 118, 192, 255])
-    } else if flow > thresholds.secondary {
+    } else if channel_order >= 2 {
         Rgba([58, 148, 214, 255])
     } else {
         Rgba([88, 176, 228, 255])
     }
 }
 
-fn river_radius_px(
-    world: &World,
-    idx: usize,
-    flow: f32,
-    scale: u32,
-    thresholds: RiverBandThresholds,
-) -> i32 {
+fn river_radius_px(world: &World, idx: usize, scale: u32) -> i32 {
     let tile = &world.tiles[idx];
     let height_above_sea = tile.raw_elevation - world.sea_level;
     let lowland = height_above_sea < 0.16;
     let steep = matches!(tile.biome, Biome::Alpine | Biome::Foothills) || height_above_sea > 0.32;
 
-    if tile.channel_order >= 3 || flow >= thresholds.trunk {
-        let excess = flow / thresholds.trunk;
+    if tile.channel_order >= 3 {
+        let ws = world.effective_world_size();
+        let trunk_threshold = (ws * ws * 0.00075).max(12.0) * 18.0;
+        let excess = tile.discharge / trunk_threshold;
         match scale {
             // Trunk rivers always visible; guarantee at least 1px even at minimum scale.
             0 | 1 => 1,
@@ -125,7 +112,7 @@ fn river_radius_px(
                 ((width.round() as i32) / 2).clamp(1, (scale as i32 * 2).max(2))
             }
         }
-    } else if tile.channel_order >= 2 || flow >= thresholds.secondary {
+    } else if tile.channel_order >= 2 {
         match scale {
             0 | 1 => 0,
             2 | 3 => i32::from(!steep),
