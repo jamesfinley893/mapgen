@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::World;
 
-use super::{ConditioningState, RoutingCandidate};
+use super::{ConditioningState, RoutingCandidate, ValleyErosion};
 use crate::generate::HYDRO_EPSILON;
 use crate::generate::util::{
     direction_vector, local_aspect, local_aspect_on_values, neighbor_distance, normalize,
@@ -26,6 +26,15 @@ struct CandidateGeometry {
     unit_direction: (f32, f32),
     hydro_drop: f32,
     raw_slope: f32,
+    current_valley: f32,
+    next_valley: f32,
+    current_depth: f32,
+    next_depth: f32,
+    next_width: f32,
+    next_discharge_memory: f32,
+    next_trunk: f32,
+    next_tributary: f32,
+    effective_drop: f32,
 }
 
 pub(super) fn build_downstream(
@@ -33,6 +42,7 @@ pub(super) fn build_downstream(
     ocean: &[bool],
     conditioning: &ConditioningState,
     lake_id: &[Option<u32>],
+    valleys: &ValleyErosion,
 ) -> Vec<Option<usize>> {
     let mut downstream = vec![None; world.tiles.len()];
     let mut order: Vec<_> = (0..world.tiles.len()).collect();
@@ -51,12 +61,19 @@ pub(super) fn build_downstream(
         if ocean[idx] {
             continue;
         }
-        downstream[idx] = routing_candidates(world, idx, conditioning, lake_id)
+        downstream[idx] = routing_candidates(world, idx, conditioning, lake_id, valleys)
             .first()
             .map(|candidate| candidate.next);
     }
 
-    refine_lowland_bends(world, ocean, conditioning, lake_id, &mut downstream);
+    refine_lowland_bends(
+        world,
+        ocean,
+        conditioning,
+        lake_id,
+        valleys,
+        &mut downstream,
+    );
 
     downstream
 }
@@ -66,6 +83,7 @@ fn routing_candidates(
     idx: usize,
     conditioning: &ConditioningState,
     lake_id: &[Option<u32>],
+    valleys: &ValleyErosion,
 ) -> Vec<RoutingCandidate> {
     let (x, y) = world.coords(idx);
     let current_hydro = conditioning.hydro_elevation[idx];
@@ -95,6 +113,7 @@ fn routing_candidates(
             current_raw,
             nx,
             ny,
+            valleys,
         );
         let slope = geometry.hydro_drop / geometry.distance;
         let score = score_routing_candidate(&scoring, &geometry, slope, conditioning.parent[idx]);
@@ -157,6 +176,7 @@ fn candidate_geometry(
     current_raw: f32,
     nx: usize,
     ny: usize,
+    valleys: &ValleyErosion,
 ) -> CandidateGeometry {
     let (x, y) = from;
     let next = world.idx(nx, ny);
@@ -164,6 +184,11 @@ fn candidate_geometry(
     let unit_direction = direction_vector((x, y), (nx, ny)).unwrap_or((0.0, 0.0));
     let hydro_drop = (current_hydro - conditioning.hydro_elevation[next]).max(0.0);
     let raw_drop = (current_raw - world.tiles[next].raw_elevation).max(-0.08);
+    let current_bias = valleys.routing_bias(world.idx(x, y));
+    let next_bias = valleys.routing_bias(next);
+    let effective_drop =
+        (current_hydro - current_bias - (conditioning.hydro_elevation[next] - next_bias))
+            .max(-0.02);
 
     CandidateGeometry {
         next,
@@ -175,6 +200,15 @@ fn candidate_geometry(
         unit_direction,
         hydro_drop,
         raw_slope: raw_drop / distance,
+        current_valley: valleys.activity(world.idx(x, y)),
+        next_valley: valleys.activity(next),
+        current_depth: valleys.valley_depth(world.idx(x, y)),
+        next_depth: valleys.valley_depth(next),
+        next_width: valleys.valley_width(next),
+        next_discharge_memory: valleys.long_term_discharge(next),
+        next_trunk: valleys.trunk_strength(next),
+        next_tributary: valleys.tributary_strength(next),
+        effective_drop: effective_drop / distance,
     }
 }
 
@@ -232,8 +266,23 @@ fn score_routing_candidate(
     } else {
         0.0
     };
+    let valley_gradient = geometry.next_valley - geometry.current_valley;
+    let valley_capture_bonus = (geometry.next_valley * 0.34
+        + geometry.next_trunk * 0.26
+        + geometry.next_tributary * 0.12
+        + geometry.next_depth * 2.20
+        + (geometry.next_width / 18.0).clamp(0.0, 1.0) * 0.18
+        + valley_gradient.max(0.0) * 0.42
+        - (-valley_gradient).max(0.0) * 0.08)
+        * (0.48 + scoring.lowland_opening * 0.28 + scoring.mountain_front * 0.24);
+    let discharge_memory_bonus =
+        geometry.next_discharge_memory.max(1.0).ln_1p() * 0.010 * geometry.next_valley;
+    let valley_abandonment_penalty = (geometry.current_depth - geometry.next_depth).max(0.0)
+        * (0.95 + scoring.mountain_front * 0.65)
+        + (geometry.current_valley - geometry.next_valley).max(0.0) * 0.10;
 
     slope * 8.3
+        + geometry.effective_drop.max(-0.004) * 5.5
         + geometry.raw_slope.max(0.0) * 2.8
         + alignment * 0.92
         + persistence_bonus
@@ -242,7 +291,10 @@ fn score_routing_candidate(
         + spacing_bonus
         + mountain_exit_bonus
         + parent_bonus
+        + valley_capture_bonus
+        + discharge_memory_bonus
         - anisotropy_penalty
+        - valley_abandonment_penalty
 }
 
 fn rotate_vector(v: (f32, f32), angle: f32) -> (f32, f32) {
@@ -255,6 +307,7 @@ fn refine_lowland_bends(
     ocean: &[bool],
     conditioning: &ConditioningState,
     lake_id: &[Option<u32>],
+    valleys: &ValleyErosion,
     downstream: &mut [Option<usize>],
 ) {
     let mut order: Vec<_> = (0..world.tiles.len()).collect();
@@ -288,7 +341,7 @@ fn refine_lowland_bends(
             };
             let current_dir = direction_for(world, target, current);
             let target_slope = local_downstream_slope(world, conditioning, downstream, target);
-            let candidates = routing_candidates(world, target, conditioning, lake_id);
+            let candidates = routing_candidates(world, target, conditioning, lake_id, valleys);
             let current_score = candidates
                 .iter()
                 .find(|candidate| candidate.next == current)

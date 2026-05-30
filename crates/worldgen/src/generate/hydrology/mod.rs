@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 
 mod conditioning;
+mod erosion;
 mod flow;
 mod lakes;
 mod ocean;
@@ -12,6 +13,7 @@ use crate::{Surface, World, WorldConfig};
 use super::util::neighbor_distance;
 use super::util::{sample_seed_field, smoothstep};
 
+pub(super) use erosion::{HYDROLOGY_EROSION_CYCLES, ValleyErosion, apply_valley_erosion_cycle};
 pub(super) use ocean::classify_ocean;
 
 use conditioning::condition_terrain;
@@ -101,6 +103,7 @@ pub(super) fn simulate_hydrology(
     world: &World,
     config: &WorldConfig,
     ocean: &[bool],
+    valleys: &ValleyErosion,
 ) -> HydrologyState {
     let conditioning = condition_terrain(world, ocean);
     let provisional = identify_lakes(
@@ -110,11 +113,12 @@ pub(super) fn simulate_hydrology(
         &conditioning.fill_depth,
         &conditioning.parent,
     );
-    let mut downstream = build_downstream(world, ocean, &conditioning, &provisional.lake_id);
+    let mut downstream =
+        build_downstream(world, ocean, &conditioning, &provisional.lake_id, valleys);
     break_downstream_cycles(&mut downstream, &conditioning.parent, ocean);
     let accumulation_order = flow_accumulation_order(&conditioning, &downstream, ocean);
     let contributing_area = accumulate_contributing_area(&accumulation_order, &downstream, ocean);
-    let runoff = compute_runoff(world, config, ocean, &conditioning, &downstream);
+    let runoff = compute_runoff(world, config, ocean, &conditioning, &downstream, valleys);
     let discharge = accumulate_discharge(&accumulation_order, &downstream, ocean, &runoff);
     let stream_power = compute_stream_power(world, &conditioning, &downstream, &discharge);
     let basin_id = assign_basin_ids(
@@ -131,10 +135,11 @@ pub(super) fn simulate_hydrology(
         &downstream,
         &discharge,
         &provisional.lake_id,
+        valleys,
     );
     suppress_short_weak_channels(world, &mut surfaces, &downstream, &stream_power);
     remove_stranded_rivers(world, &mut surfaces, &downstream);
-    let channel_order = assign_channel_order(world, &surfaces, &discharge);
+    let channel_order = assign_channel_order(world, &surfaces, &discharge, valleys);
     let (river_width, river_sinuosity, river_lateral_offset) = compute_river_shape(
         world,
         &conditioning.hydro_elevation,
@@ -142,6 +147,7 @@ pub(super) fn simulate_hydrology(
         &downstream,
         &discharge,
         &channel_order,
+        valleys,
     );
 
     HydrologyState {
@@ -159,67 +165,6 @@ pub(super) fn simulate_hydrology(
         lake_id: provisional.lake_id,
         water_level: provisional.water_level,
         basin_id,
-    }
-}
-
-pub(super) fn apply_channel_carving(world: &mut World, hydrology: &HydrologyState) {
-    let thresholds = channel_thresholds(world);
-
-    for idx in 0..world.tiles.len() {
-        if hydrology.surfaces[idx] != Surface::River {
-            continue;
-        }
-        let discharge = hydrology.discharge[idx];
-        let ratio = (discharge / thresholds.stream).max(1.0);
-        let band_multiplier = if discharge >= thresholds.trunk {
-            1.75
-        } else if discharge >= thresholds.secondary {
-            1.25
-        } else {
-            1.0
-        };
-        let local_slope = hydrology.downstream[idx]
-            .map(|next| {
-                let (x, y) = world.coords(idx);
-                let (nx, ny) = world.coords(next);
-                (hydrology.hydro_elevation[idx] - hydrology.hydro_elevation[next]).max(0.0)
-                    / neighbor_distance(x, y, nx, ny)
-            })
-            .unwrap_or(0.0);
-        let slope_factor = if local_slope < 0.008 { 1.25 } else { 0.95 };
-        // Deeper incision in lowlands so pass-2 routing captures surrounding flow into
-        // established valleys. Mountains use lighter carving so trunk rivers aren't
-        // trapped in highland gorges — they should escape to lowland plains.
-        let height_above_sea = (world.tiles[idx].raw_elevation - world.sea_level).max(0.0);
-        let lowland_factor = 1.0 - smoothstep(0.06, 0.22, height_above_sea) * 0.55;
-        let carve = (0.006 + ratio.ln() * 0.020) * band_multiplier * slope_factor * lowland_factor;
-        let carve = carve.clamp(0.0, 0.14);
-        world.tiles[idx].raw_elevation = (world.tiles[idx].raw_elevation - carve).max(0.0);
-
-        let (x, y) = world.coords(idx);
-        let neighbors: Vec<_> = world.neighbors8(x, y).collect();
-        for (nx, ny) in neighbors {
-            let nidx = world.idx(nx, ny);
-            if hydrology.surfaces[nidx] == Surface::Ocean {
-                continue;
-            }
-            let distance = neighbor_distance(x, y, nx, ny);
-            let neighbor_relief =
-                (world.tiles[nidx].raw_elevation - world.tiles[idx].raw_elevation).max(0.0);
-            // Reduced lateral carving of non-river land — preserving steeper gradient
-            // from hillslope into the channel improves basin capture in the second pass.
-            let side_factor = if hydrology.surfaces[nidx] == Surface::River {
-                0.38
-            } else if distance > 1.0 {
-                0.08
-            } else {
-                0.15
-            };
-            let relief_factor = (0.5 + neighbor_relief * 1.8).clamp(0.5, 1.4);
-            let lateral_carve = carve * side_factor * relief_factor;
-            world.tiles[nidx].raw_elevation =
-                (world.tiles[nidx].raw_elevation - lateral_carve).max(0.0);
-        }
     }
 }
 
@@ -256,6 +201,7 @@ fn compute_river_shape(
     downstream: &[Option<usize>],
     discharge: &[f32],
     channel_order: &[u8],
+    valleys: &ValleyErosion,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let mut width = vec![0.0_f32; world.tiles.len()];
     let mut sinuosity = vec![0.0_f32; world.tiles.len()];
@@ -267,9 +213,20 @@ fn compute_river_shape(
             continue;
         }
         let (x, y) = world.coords(idx);
-        let q = (discharge[idx] / thresholds.stream.max(1.0)).max(0.0);
+        let long_q = valleys.long_term_discharge(idx);
+        let long_fit = if long_q <= thresholds.stream {
+            0.0
+        } else {
+            smoothstep(long_q * 0.18, long_q * 0.72, discharge[idx])
+        };
+        let supported_q =
+            discharge[idx].max(long_q * long_fit * valleys.activity(idx).clamp(0.0, 1.0) * 0.62);
+        let q = (supported_q / thresholds.stream.max(1.0)).max(0.0);
         let order_factor = channel_order[idx] as f32 / 4.0;
-        width[idx] = (0.18 + q.ln_1p() * 0.58 + order_factor * 0.80).clamp(0.2, 6.0);
+        let valley_width = (valleys.valley_width(idx) / 8.0).clamp(0.0, 2.0);
+        width[idx] =
+            (0.18 + q.ln_1p() * 0.58 + order_factor * 0.80 + valley_width * long_fit * 0.42)
+                .clamp(0.2, 7.0);
 
         let slope = downstream[idx]
             .map(|next| {

@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use crate::{Surface, World, WorldConfig};
 
-use super::channel_thresholds;
+use super::{ValleyErosion, channel_thresholds};
 use crate::generate::util::{sample_seed_field, smoothstep};
 
 pub(super) fn classify_surfaces(
@@ -12,6 +12,7 @@ pub(super) fn classify_surfaces(
     downstream: &[Option<usize>],
     discharge: &[f32],
     lake_id: &[Option<u32>],
+    valleys: &ValleyErosion,
 ) -> Vec<Surface> {
     let mut surfaces = vec![Surface::Land; world.tiles.len()];
     let thresholds = channel_thresholds(world);
@@ -35,7 +36,7 @@ pub(super) fn classify_surfaces(
         if surfaces[idx] != Surface::Land {
             continue;
         }
-        if is_river_tile(world, idx, thresholds.stream, density, discharge) {
+        if is_river_tile(world, idx, thresholds.stream, density, discharge, valleys) {
             surfaces[idx] = Surface::River;
         }
     }
@@ -43,7 +44,14 @@ pub(super) fn classify_surfaces(
     // Where many independent catchments reach the ocean within a short coastal stretch,
     // keep only the highest-discharge outlet in each cluster. Upstream fragments made
     // stranded by this suppression are cleaned up by remove_stranded_rivers.
-    suppress_parallel_mouths(world, &mut surfaces, downstream, discharge, 30, thresholds.secondary);
+    suppress_parallel_mouths(
+        world,
+        &mut surfaces,
+        downstream,
+        discharge,
+        30,
+        thresholds.secondary,
+    );
 
     for idx in 0..world.tiles.len() {
         if surfaces[idx] != Surface::Land {
@@ -67,6 +75,7 @@ fn is_river_tile(
     stream_threshold: f32,
     density: f32,
     discharge: &[f32],
+    valleys: &ValleyErosion,
 ) -> bool {
     let (x, y) = world.coords(idx);
     // Two-scale noise: coarse sets regional drainage density, fine adds local texture.
@@ -79,12 +88,31 @@ fn is_river_tile(
     // Climate is already encoded in discharge (via runoff coefficients), but an explicit
     // threshold shift ensures that very dry regions don't show ephemeral channels.
     let climate_factor = 0.75 + (1.0 - wet) * 0.75; // wet=0.75 to dry=1.50
+    let height_above_sea = (world.tiles[idx].raw_elevation - world.sea_level).max(0.0);
+    let highland = smoothstep(0.16, 0.42, height_above_sea);
     // Regional noise creates density variation: favorable zones have dense headwaters,
     // unfavorable inter-basin areas have none.
-    let noise_factor = 0.80 + (1.0 - local_noise) * 0.40; // 0.80 to 1.20
+    let noise_factor = 0.80 + (1.0 - local_noise) * (0.40 - highland * 0.16);
+    let mountain_factor = 1.0 - highland * 0.34;
 
-    let threshold = stream_threshold * 0.55 * climate_factor * noise_factor / density.powf(0.62);
-    discharge[idx] >= threshold
+    let valley_activity = valleys.activity(idx);
+    let long_q = valleys.long_term_discharge(idx);
+    let reoccupied = discharge[idx] >= (long_q * 0.20).max(stream_threshold * 0.10);
+    let valley_factor = if reoccupied {
+        1.0 - (valley_activity * 0.18 + valleys.trunk_strength(idx) * 0.12).clamp(0.0, 0.30)
+    } else {
+        1.0
+    };
+    let effective_discharge = if reoccupied {
+        discharge[idx].max(long_q * valley_activity * 0.38)
+    } else {
+        discharge[idx]
+    };
+
+    let threshold =
+        stream_threshold * 0.55 * climate_factor * noise_factor * mountain_factor * valley_factor
+            / density.powf(0.62);
+    effective_discharge >= threshold
 }
 
 fn suppress_parallel_mouths(
@@ -200,12 +228,17 @@ pub(super) fn assign_channel_order(
     world: &World,
     surfaces: &[Surface],
     discharge: &[f32],
+    valleys: &ValleyErosion,
 ) -> Vec<u8> {
     let mut order = vec![0_u8; world.tiles.len()];
-    let mut river_discharge: Vec<_> = discharge
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, value)| (surfaces[idx] == Surface::River).then_some(*value))
+    let mut river_discharge: Vec<_> = (0..world.tiles.len())
+        .filter_map(|idx| {
+            (surfaces[idx] == Surface::River).then_some(effective_channel_discharge(
+                discharge[idx],
+                valleys,
+                idx,
+            ))
+        })
         .collect();
     river_discharge.sort_by(f32::total_cmp);
     if river_discharge.is_empty() {
@@ -220,11 +253,12 @@ pub(super) fn assign_channel_order(
         if surfaces[idx] != Surface::River {
             continue;
         }
-        order[idx] = if discharge[idx] >= q94 {
+        let effective = effective_channel_discharge(discharge[idx], valleys, idx);
+        order[idx] = if effective >= q94 {
             4
-        } else if discharge[idx] >= q82 {
+        } else if effective >= q82 {
             3
-        } else if discharge[idx] >= q55 {
+        } else if effective >= q55 {
             2
         } else {
             1
@@ -232,6 +266,16 @@ pub(super) fn assign_channel_order(
     }
 
     order
+}
+
+fn effective_channel_discharge(discharge: f32, valleys: &ValleyErosion, idx: usize) -> f32 {
+    let long_q = valleys.long_term_discharge(idx);
+    let long_fit = if long_q <= f32::EPSILON {
+        0.0
+    } else {
+        smoothstep(long_q * 0.18, long_q * 0.72, discharge)
+    };
+    discharge.max(long_q * valleys.activity(idx) * long_fit * 0.62)
 }
 
 fn path_len_to_junction_or_sink(

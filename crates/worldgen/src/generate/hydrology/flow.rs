@@ -2,8 +2,8 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::{World, WorldConfig};
 
-use super::ConditioningState;
 use super::routing::local_relief;
+use super::{ConditioningState, ValleyErosion};
 use crate::generate::util::{neighbor_distance, smoothstep};
 
 // Topological sort of the routing DAG using Kahn's algorithm.
@@ -35,9 +35,7 @@ pub(super) fn flow_accumulation_order(
 
     // Seed queue with all source tiles (no non-ocean tile routes into them).
     // Sort deterministically: highest elevation / highest rank (most upstream) first.
-    let mut sources: Vec<usize> = (0..n)
-        .filter(|&i| !ocean[i] && in_degree[i] == 0)
-        .collect();
+    let mut sources: Vec<usize> = (0..n).filter(|&i| !ocean[i] && in_degree[i] == 0).collect();
     sources.sort_by(|a, b| {
         conditioning.hydro_elevation[*b]
             .total_cmp(&conditioning.hydro_elevation[*a])
@@ -101,6 +99,7 @@ pub(super) fn compute_runoff(
     ocean: &[bool],
     conditioning: &ConditioningState,
     downstream: &[Option<usize>],
+    valleys: &ValleyErosion,
 ) -> Vec<f32> {
     let mut runoff = vec![0.0_f32; world.tiles.len()];
     for idx in 0..world.tiles.len() {
@@ -123,19 +122,92 @@ pub(super) fn compute_runoff(
         let lowland_storage = (1.0 - smoothstep(0.0, 0.18, height_above_sea)) * 0.28;
         let slope_runoff = smoothstep(0.004, 0.055, slope) * 0.30;
         let relief_runoff = smoothstep(0.012, 0.08, relief) * 0.20;
+        let convergence = topographic_convergence(world, idx);
+        let valley_memory = valleys.activity(idx);
+        let valley_depth = valleys.valley_depth(idx);
+        let valley_width = (valleys.valley_width(idx) / 18.0).clamp(0.0, 1.0);
+        let trunk_memory = valleys.trunk_strength(idx);
+        let tributary_memory = valleys.tributary_strength(idx);
+        let discharge_memory = smoothstep(
+            8.0,
+            (world.effective_world_size() * world.effective_world_size() * 0.025).max(64.0),
+            valleys.long_term_discharge(idx),
+        );
+        let valley_capture = convergence
+            * smoothstep(
+                world.sea_level + 0.08,
+                world.sea_level + 0.62,
+                tile.raw_elevation,
+            )
+            * (0.55 + relief * 2.2).clamp(0.55, 1.45)
+            + valley_memory * (0.34 + relief * 1.3).clamp(0.34, 0.92)
+            + valley_depth * 2.6
+            + valley_width * 0.20
+            + trunk_memory * 0.22
+            + tributary_memory * 0.08
+            + discharge_memory * valley_memory * 0.16;
         let cold_rock = smoothstep(
             world.sea_level + 0.24,
             world.sea_level + 0.52,
             tile.raw_elevation,
         ) * (1.0 - tile.temperature)
             * 0.18;
-        let infiltration = (0.18 + lowland_storage + aridity * 0.35).clamp(0.0, 0.72);
-        let runoff_coeff = (0.18 + precipitation * 0.46 + slope_runoff + relief_runoff + cold_rock
+        let infiltration = (0.18 + lowland_storage + aridity * 0.35
+            - valley_capture * 0.20
+            - valley_memory * 0.12
+            - valley_depth * 0.55
+            - trunk_memory * 0.08)
+            .clamp(0.0, 0.72);
+        let runoff_coeff = (0.18
+            + precipitation * 0.46
+            + slope_runoff
+            + relief_runoff
+            + cold_rock
+            + valley_capture * 0.55
+            + valley_memory * 0.18
+            + valley_depth * 0.65
+            + valley_width * 0.08
+            + trunk_memory * 0.12
             - infiltration * 0.38)
-            .clamp(0.04, 1.25);
-        runoff[idx] = (precipitation.powf(1.35) * runoff_coeff * config.runoff_scale).max(0.0);
+            .clamp(0.04, 1.85);
+        runoff[idx] = (precipitation.powf(1.30) * runoff_coeff * config.runoff_scale).max(0.0);
     }
     runoff
+}
+
+fn topographic_convergence(world: &World, idx: usize) -> f32 {
+    let (x, y) = world.coords(idx);
+    let current = world.tiles[idx].raw_elevation;
+    let mut weighted_rise = 0.0_f32;
+    let mut weighted_drop = 0.0_f32;
+    let mut weight_sum = 0.0_f32;
+
+    for (nx, ny) in world.neighbors8(x, y) {
+        let nidx = world.idx(nx, ny);
+        let distance = neighbor_distance(x, y, nx, ny);
+        let weight = 1.0 / distance;
+        let delta = world.tiles[nidx].raw_elevation - current;
+        if delta > 0.0 {
+            weighted_rise += delta * weight;
+        } else {
+            weighted_drop += -delta * weight;
+        }
+        weight_sum += weight;
+    }
+
+    if weight_sum <= f32::EPSILON {
+        return 0.0;
+    }
+
+    let avg_rise = weighted_rise / weight_sum;
+    let avg_drop = weighted_drop / weight_sum;
+    let concavity = smoothstep(0.006, 0.055, avg_rise - avg_drop * 0.45);
+    let enclosed = smoothstep(
+        0.18,
+        0.62,
+        weighted_rise / (weighted_rise + weighted_drop + 0.0001),
+    );
+    (concavity * enclosed).clamp(0.0, 1.0)
 }
 
 pub(super) fn accumulate_discharge(

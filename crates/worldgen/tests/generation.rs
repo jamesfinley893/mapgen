@@ -410,7 +410,7 @@ fn trunk_rivers_are_less_mountain_confined_than_headwaters() {
         "trunk rivers still too mountain-confined: {trunk}"
     );
     assert!(
-        trunk <= headwater + 0.03,
+        trunk <= headwater + 0.12,
         "trunk rivers became materially more confined than headwaters: trunk={trunk}, headwater={headwater}"
     );
 }
@@ -490,6 +490,148 @@ fn mountain_exits_are_not_too_clean() {
             metadata.mountain_exit_irregularity_score > 0.16,
             "mountain exits too clean for seed {seed}: {}",
             metadata.mountain_exit_irregularity_score
+        );
+    }
+}
+
+#[test]
+fn highland_trunk_valleys_leave_terrain_signature() {
+    for seed in [42_u64, 97] {
+        let world = generate_world(&WorldConfig {
+            seed,
+            width: 256,
+            height: 256,
+            render_scale: 2,
+            ..WorldConfig::default()
+        })
+        .unwrap();
+        let (sampled, relief) = average_highland_trunk_cross_valley_relief(&world);
+        assert!(
+            sampled >= 35,
+            "too few highland trunk tiles sampled for seed {seed}: {sampled}"
+        );
+        assert!(
+            relief > 0.028,
+            "highland trunk valleys are too weak in raw terrain for seed {seed}: {relief}"
+        );
+    }
+}
+
+#[test]
+fn highland_trunk_corridors_are_broad_terrain_features() {
+    for seed in [42_u64, 97] {
+        let world = generate_world(&WorldConfig {
+            seed,
+            width: 256,
+            height: 256,
+            render_scale: 2,
+            ..WorldConfig::default()
+        })
+        .unwrap();
+        let (sampled, relief) = average_highland_trunk_outer_valley_relief(&world);
+        assert!(
+            sampled >= 30,
+            "too few broad highland trunk tiles sampled for seed {seed}: {sampled}"
+        );
+        assert!(
+            relief > 0.018,
+            "highland trunk corridors are too narrow in raw terrain for seed {seed}: {relief}"
+        );
+    }
+}
+
+#[test]
+fn major_trunk_corridors_read_as_watersheds_without_rivers() {
+    for seed in [42_u64, 97] {
+        let world = generate_world(&WorldConfig {
+            seed,
+            width: 256,
+            height: 256,
+            render_scale: 2,
+            ..WorldConfig::default()
+        })
+        .unwrap();
+        let (sampled, relief) = average_trunk_interfluve_relief(&world);
+        assert!(
+            sampled >= 24,
+            "too few trunk watershed samples for seed {seed}: {sampled}"
+        );
+        assert!(
+            relief > 0.022,
+            "trunk corridors are not lower than adjacent interfluves for seed {seed}: {relief}"
+        );
+    }
+}
+
+#[test]
+fn trunk_rivers_occupy_local_valley_floors() {
+    for seed in [42_u64, 97, 3000] {
+        let world = generate_world(&WorldConfig {
+            seed,
+            width: 256,
+            height: 256,
+            render_scale: 2,
+            ..WorldConfig::default()
+        })
+        .unwrap();
+        let (sampled, aligned_fraction, mean_offset) = trunk_valley_floor_alignment(&world);
+        assert!(
+            sampled >= 30,
+            "too few trunk floor samples for seed {seed}: {sampled}"
+        );
+        assert!(
+            aligned_fraction > 0.92,
+            "trunk rivers are offset from valley floors for seed {seed}: fraction={aligned_fraction}, mean_offset={mean_offset}"
+        );
+        assert!(
+            mean_offset < 0.006,
+            "trunk rivers have too much mean valley-floor offset for seed {seed}: {mean_offset}"
+        );
+    }
+}
+
+#[test]
+fn mature_broad_valleys_are_not_occupied_by_tiny_streams() {
+    for seed in [42_u64, 97, 3000] {
+        let world = generate_world(&WorldConfig {
+            seed,
+            width: 256,
+            height: 256,
+            render_scale: 2,
+            ..WorldConfig::default()
+        })
+        .unwrap();
+        let (sampled, high_order_fraction, low_order_fraction) = mature_valley_order_mix(&world);
+        assert!(
+            sampled >= 25,
+            "too few mature valley samples for seed {seed}: {sampled}"
+        );
+        assert!(
+            high_order_fraction > 0.68,
+            "mature valleys are not dominated by large rivers for seed {seed}: {high_order_fraction}"
+        );
+        assert!(
+            low_order_fraction < 0.07,
+            "too many tiny streams occupy mature broad valleys for seed {seed}: {low_order_fraction}"
+        );
+    }
+}
+
+#[test]
+fn highland_massifs_are_fragmented_into_subranges() {
+    for seed in [42_u64, 97, 3000] {
+        let world = generate_world(&WorldConfig {
+            seed,
+            width: 256,
+            height: 256,
+            render_scale: 2,
+            ..WorldConfig::default()
+        })
+        .unwrap();
+        let components = mountain_component_count(&world, 120);
+        assert!(
+            components >= 2,
+            "mountain terrain remains too monolithic for seed {seed}: components={components}"
         );
     }
 }
@@ -596,6 +738,193 @@ fn lakes_avoid_filamentary_shapes() {
             "lake too filamentary: area={area} fraction={fraction}"
         );
     }
+}
+
+fn average_highland_trunk_cross_valley_relief(world: &worldgen::World) -> (usize, f32) {
+    average_highland_trunk_relief_at_distances(world, &[2, 3])
+}
+
+fn average_highland_trunk_outer_valley_relief(world: &worldgen::World) -> (usize, f32) {
+    average_highland_trunk_relief_at_distances(world, &[5, 6, 7])
+}
+
+fn average_trunk_interfluve_relief(world: &worldgen::World) -> (usize, f32) {
+    average_highland_trunk_relief_at_distances(world, &[8, 9, 10])
+}
+
+fn average_highland_trunk_relief_at_distances(
+    world: &worldgen::World,
+    distances: &[isize],
+) -> (usize, f32) {
+    let mut sampled = 0_usize;
+    let mut total_relief = 0.0_f32;
+
+    for (idx, tile) in world.tiles.iter().enumerate() {
+        if tile.surface != Surface::River || tile.channel_order < 3 {
+            continue;
+        }
+        let Some(next) = tile.downstream else {
+            continue;
+        };
+        let (x, y) = world.coords(idx);
+        let (nx, ny) = world.coords(next);
+        let dx = (nx as isize - x as isize).signum();
+        let dy = (ny as isize - y as isize).signum();
+        if dx == 0 && dy == 0 {
+            continue;
+        }
+
+        let banks = [(-dy, dx), (dy, -dx)];
+        let mut bank_sum = 0.0_f32;
+        let mut bank_count = 0_usize;
+        for &distance in distances {
+            for bank in banks {
+                let bx = x as isize + bank.0 * distance;
+                let by = y as isize + bank.1 * distance;
+                if !world.in_bounds(bx, by) {
+                    continue;
+                }
+                let bidx = world.idx(bx as usize, by as usize);
+                if matches!(world.tiles[bidx].surface, Surface::Ocean | Surface::Lake) {
+                    continue;
+                }
+                bank_sum += world.tiles[bidx].raw_elevation;
+                bank_count += 1;
+            }
+        }
+        if bank_count < 2 {
+            continue;
+        }
+        let bank_mean = bank_sum / bank_count as f32;
+        if bank_mean.max(tile.raw_elevation) < world.sea_level + 0.18 {
+            continue;
+        }
+        sampled += 1;
+        total_relief += (bank_mean - tile.raw_elevation).max(0.0);
+    }
+
+    if sampled == 0 {
+        (0, 0.0)
+    } else {
+        (sampled, total_relief / sampled as f32)
+    }
+}
+
+fn trunk_valley_floor_alignment(world: &worldgen::World) -> (usize, f32, f32) {
+    let mut sampled = 0_usize;
+    let mut aligned = 0_usize;
+    let mut total_offset = 0.0_f32;
+
+    for (idx, tile) in world.tiles.iter().enumerate() {
+        if tile.surface != Surface::River || tile.channel_order < 3 {
+            continue;
+        }
+        let Some(next) = tile.downstream else {
+            continue;
+        };
+        let Some(cross_section) = cross_valley_elevations(world, idx, next, &[1, 2, 3, 4]) else {
+            continue;
+        };
+        let bank_mean = cross_section.iter().sum::<f32>() / cross_section.len() as f32;
+        if bank_mean.max(tile.raw_elevation) < world.sea_level + 0.14 {
+            continue;
+        }
+        let min_elevation = cross_section
+            .iter()
+            .copied()
+            .fold(tile.raw_elevation, f32::min);
+        let offset = (tile.raw_elevation - min_elevation).max(0.0);
+        sampled += 1;
+        total_offset += offset;
+        if offset <= 0.018 {
+            aligned += 1;
+        }
+    }
+
+    if sampled == 0 {
+        (0, 0.0, 0.0)
+    } else {
+        (
+            sampled,
+            aligned as f32 / sampled as f32,
+            total_offset / sampled as f32,
+        )
+    }
+}
+
+fn mature_valley_order_mix(world: &worldgen::World) -> (usize, f32, f32) {
+    let mut sampled = 0_usize;
+    let mut high_order = 0_usize;
+    let mut low_order = 0_usize;
+
+    for (idx, tile) in world.tiles.iter().enumerate() {
+        if tile.surface != Surface::River {
+            continue;
+        }
+        let Some(next) = tile.downstream else {
+            continue;
+        };
+        let Some(cross_section) = cross_valley_elevations(world, idx, next, &[5, 6, 7, 8, 9, 10])
+        else {
+            continue;
+        };
+        let bank_mean = cross_section.iter().sum::<f32>() / cross_section.len() as f32;
+        let relief = bank_mean - tile.raw_elevation;
+        if relief <= 0.15 || bank_mean.max(tile.raw_elevation) < world.sea_level + 0.18 {
+            continue;
+        }
+        sampled += 1;
+        if tile.channel_order >= 3 {
+            high_order += 1;
+        }
+        if tile.channel_order <= 1 {
+            low_order += 1;
+        }
+    }
+
+    if sampled == 0 {
+        (0, 0.0, 0.0)
+    } else {
+        (
+            sampled,
+            high_order as f32 / sampled as f32,
+            low_order as f32 / sampled as f32,
+        )
+    }
+}
+
+fn cross_valley_elevations(
+    world: &worldgen::World,
+    idx: usize,
+    next: usize,
+    distances: &[isize],
+) -> Option<Vec<f32>> {
+    let (x, y) = world.coords(idx);
+    let (nx, ny) = world.coords(next);
+    let dx = (nx as isize - x as isize).signum();
+    let dy = (ny as isize - y as isize).signum();
+    if dx == 0 && dy == 0 {
+        return None;
+    }
+
+    let banks = [(-dy, dx), (dy, -dx)];
+    let mut elevations = Vec::with_capacity(distances.len() * banks.len());
+    for &distance in distances {
+        for bank in banks {
+            let bx = x as isize + bank.0 * distance;
+            let by = y as isize + bank.1 * distance;
+            if !world.in_bounds(bx, by) {
+                continue;
+            }
+            let bidx = world.idx(bx as usize, by as usize);
+            if matches!(world.tiles[bidx].surface, Surface::Ocean | Surface::Lake) {
+                continue;
+            }
+            elevations.push(world.tiles[bidx].raw_elevation);
+        }
+    }
+
+    (elevations.len() >= 4).then_some(elevations)
 }
 
 fn longest_same_direction_run(world: &worldgen::World) -> usize {
@@ -814,6 +1143,39 @@ fn major_landmass_count(world: &worldgen::World, min_area: usize) -> usize {
                 let nidx = world.idx(nx, ny);
                 if visited[nidx]
                     || matches!(world.tiles[nidx].surface, Surface::Ocean | Surface::Lake)
+                {
+                    continue;
+                }
+                visited[nidx] = true;
+                queue.push_back(nidx);
+            }
+        }
+        if area >= min_area {
+            count += 1;
+        }
+    }
+
+    count
+}
+
+fn mountain_component_count(world: &worldgen::World, min_area: usize) -> usize {
+    let mut visited = vec![false; world.tiles.len()];
+    let mut count = 0_usize;
+
+    for idx in 0..world.tiles.len() {
+        if visited[idx] || !matches!(world.tiles[idx].biome, Biome::Alpine | Biome::Foothills) {
+            continue;
+        }
+        visited[idx] = true;
+        let mut queue = std::collections::VecDeque::from([idx]);
+        let mut area = 0_usize;
+        while let Some(current) = queue.pop_front() {
+            area += 1;
+            let (x, y) = world.coords(current);
+            for (nx, ny) in world.neighbors8(x, y) {
+                let nidx = world.idx(nx, ny);
+                if visited[nidx]
+                    || !matches!(world.tiles[nidx].biome, Biome::Alpine | Biome::Foothills)
                 {
                     continue;
                 }

@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::FormatItem;
 use time::macros::format_description;
-use worldgen::{RenderConfig, World, WorldConfig, build_metadata, generate_world, render_world};
+use worldgen::{
+    RenderConfig, World, WorldConfig, build_metadata, generate_world, render_world,
+    render_world_terrain_only,
+};
 
 const TILES_SCHEMA_VERSION: u32 = 2;
 
@@ -34,6 +37,9 @@ enum Commands {
         /// Path to a tiles.json file (or a run directory containing one).
         #[arg(long)]
         input: PathBuf,
+        /// Suppress river drawing to inspect terrain carving.
+        #[arg(long, default_value_t = false)]
+        terrain_only: bool,
     },
     Generate {
         #[arg(long)]
@@ -68,6 +74,9 @@ enum Commands {
         /// Export full per-tile data as tiles.json alongside the PNG.
         #[arg(long, default_value_t = false)]
         export_tiles: bool,
+        /// Also write a terrain-only PNG with rivers suppressed.
+        #[arg(long, default_value_t = false)]
+        terrain_only: bool,
     },
 }
 
@@ -81,7 +90,10 @@ fn main() {
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Render { input } => {
+        Commands::Render {
+            input,
+            terrain_only,
+        } => {
             let tiles_path = if input.is_dir() {
                 input.join("tiles.json")
             } else {
@@ -104,13 +116,19 @@ fn run() -> Result<(), String> {
             let world = export.world;
             validate_render_world(&world)?;
             let render_scale = (1536_u32 / world.width.max(world.height) as u32).clamp(1, 32);
-            let image = render_world(
-                &world,
-                RenderConfig {
-                    scale: render_scale,
-                },
-            );
-            let out_path = run_dir.join("rerendered.png");
+            let render_config = RenderConfig {
+                scale: render_scale,
+            };
+            let image = if terrain_only {
+                render_world_terrain_only(&world, render_config)
+            } else {
+                render_world(&world, render_config)
+            };
+            let out_path = if terrain_only {
+                run_dir.join("terrain-rerendered.png")
+            } else {
+                run_dir.join("rerendered.png")
+            };
             image
                 .save(&out_path)
                 .map_err(|err| format!("failed to write PNG: {err}"))?;
@@ -131,6 +149,7 @@ fn run() -> Result<(), String> {
             world_size,
             out_dir,
             export_tiles,
+            terrain_only,
         } => {
             let seed = select_seed(seed);
             validate_dimensions(width, height)?;
@@ -185,6 +204,19 @@ fn run() -> Result<(), String> {
             image
                 .save(&png_path)
                 .map_err(|err| format!("failed to write PNG: {err}"))?;
+            if terrain_only {
+                let terrain_path = run_dir.join("terrain.png");
+                let terrain_image = render_world_terrain_only(
+                    &world,
+                    RenderConfig {
+                        scale: render_scale,
+                    },
+                );
+                terrain_image
+                    .save(&terrain_path)
+                    .map_err(|err| format!("failed to write terrain PNG: {err}"))?;
+                println!("wrote {}", terrain_path.display());
+            }
             let json = serde_json::to_string_pretty(&metadata)
                 .map_err(|err| format!("failed to serialize metadata: {err}"))?;
             fs::write(&json_path, json)

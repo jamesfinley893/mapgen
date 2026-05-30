@@ -211,13 +211,22 @@ fn biome_for_tile_with_support(ctx: BiomeContext) -> Biome {
         Surface::Coast => Biome::Coast,
         Surface::Lake => Biome::Lake,
         Surface::River => {
-            if ctx.elevation > ctx.sea_level + 0.38 && ctx.support > 0.48 {
+            if ctx.elevation > ctx.sea_level + 0.38
+                && ctx.support > 0.48
+                && (ctx.trunk_river < 0.22
+                    || (ctx.elevation > ctx.sea_level + 0.44
+                        && ctx.support > 0.64
+                        && ctx.proximity > 0.38))
+            {
                 Biome::Alpine
             } else if ctx.elevation > ctx.sea_level + 0.30
                 && ctx.support > 0.22
                 && ctx.proximity > 0.18
                 && ctx.relief > 0.04
-                && (ctx.trunk_river < 0.18 || (ctx.support > 0.34 && ctx.proximity > 0.28))
+                && (ctx.trunk_river < 0.18
+                    || (ctx.elevation > ctx.sea_level + 0.36
+                        && ctx.support > 0.52
+                        && ctx.proximity > 0.34))
             {
                 Biome::Foothills
             } else {
@@ -243,14 +252,19 @@ fn land_biome(temperature: f32, moisture: f32, elevation: f32, sea_level: f32) -
 }
 
 fn land_biome_with_support(ctx: BiomeContext) -> Biome {
-    if ctx.elevation > ctx.sea_level + 0.38 && ctx.support > 0.5 {
+    if ctx.elevation > ctx.sea_level + 0.38
+        && ctx.support > 0.5
+        && (ctx.trunk_river < 0.22
+            || (ctx.elevation > ctx.sea_level + 0.44 && ctx.support > 0.66 && ctx.proximity > 0.4))
+    {
         return Biome::Alpine;
     }
     if ctx.elevation > ctx.sea_level + 0.31
         && ctx.support > 0.24
         && ctx.proximity > 0.2
         && ctx.relief > 0.04
-        && (ctx.trunk_river < 0.2 || (ctx.support > 0.35 && ctx.proximity > 0.3))
+        && (ctx.trunk_river < 0.2
+            || (ctx.elevation > ctx.sea_level + 0.36 && ctx.support > 0.54 && ctx.proximity > 0.36))
     {
         return Biome::Foothills;
     }

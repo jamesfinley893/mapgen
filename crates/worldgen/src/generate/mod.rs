@@ -42,19 +42,23 @@ pub fn generate_world(config: &WorldConfig) -> Result<World, String> {
         &climate_noise,
     );
 
-    let hydrology = hydrology::simulate_hydrology(&world, config, &ocean);
-    hydrology::apply_channel_carving(&mut world, &hydrology);
+    let mut valley_erosion = hydrology::ValleyErosion::new(world.tiles.len());
+    for cycle in 0..hydrology::HYDROLOGY_EROSION_CYCLES {
+        let hydrology = hydrology::simulate_hydrology(&world, config, &ocean, &valley_erosion);
+        hydrology::apply_valley_erosion_cycle(&mut world, &hydrology, &mut valley_erosion, cycle);
 
-    ocean = hydrology::classify_ocean(&world);
-    let distance_to_ocean = climate::fill_ocean_distance(&world, &ocean);
-    climate::populate_base_climate(
-        &mut world,
-        config,
-        &ocean,
-        &distance_to_ocean,
-        &climate_noise,
-    );
-    let hydrology = hydrology::simulate_hydrology(&world, config, &ocean);
+        ocean = hydrology::classify_ocean(&world);
+        let distance_to_ocean = climate::fill_ocean_distance(&world, &ocean);
+        climate::populate_base_climate(
+            &mut world,
+            config,
+            &ocean,
+            &distance_to_ocean,
+            &climate_noise,
+        );
+    }
+
+    let hydrology = hydrology::simulate_hydrology(&world, config, &ocean, &valley_erosion);
     hydrology::apply_hydrology_to_world(&mut world, &ocean, &hydrology);
 
     let distance_to_ocean = climate::fill_ocean_distance(&world, &ocean);

@@ -201,6 +201,8 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
         }
     }
 
+    let mut valley_memory = vec![0.0_f32; terrain.len()];
+
     for step in 0..EROSION_STEPS {
         let progress = (step + 1) as f32 / EROSION_STEPS as f32;
         for idx in 0..terrain.len() {
@@ -230,6 +232,17 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
             &trib_opportunity,
             &meander_field,
         );
+        for idx in 0..terrain.len() {
+            if flow.is_ocean[idx] {
+                valley_memory[idx] *= 0.86;
+                continue;
+            }
+            let highland_path = smoothstep(0.50, 0.74, terrain[idx]);
+            let drainage_strength = smoothstep(24.0, 2400.0, flow.contributing_area[idx])
+                * (0.62 + smoothstep(0.002, 0.07, flow.local_slope[idx]) * 0.38)
+                * highland_path;
+            valley_memory[idx] = (valley_memory[idx] * 0.88).max(drainage_strength);
+        }
         let mut next = terrain.clone();
         let mut lateral_erosion = vec![0.0_f32; terrain.len()];
 
@@ -298,6 +311,8 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
             let deposition = flow.deposition[idx];
             let sediment_flux = flow.sediment_flux[idx];
             let transport_capacity = flow.transport_capacity[idx];
+            let persistent_valley = valley_memory[idx] * highland;
+            let trunk_persistence = persistent_valley * smoothstep(80.0, 2200.0, ca);
             let sediment_ratio = if transport_capacity <= f32::EPSILON {
                 0.0
             } else {
@@ -341,6 +356,10 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
                 * (1.0 - confinement)
                 * (0.0015 + plain_zone * 0.003 + basin_zone * 0.0025 + highland * 0.0030)
                 * (0.55 + smoothstep(0.0, 0.09, flow.local_slope[idx]));
+            let persistent_corridor_lowering = persistent_valley
+                * (0.0035 + trunk_persistence * 0.018 + stream_power_val.min(12.0) * 0.0016)
+                * (0.55 + (1.0 - confinement) * 0.45)
+                * (0.7 + progress * 0.55);
             let alluvial_fill = deposition
                 * floodplain_scale
                 * (0.006
@@ -369,11 +388,12 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
                 - shoulder_denudation
                 - basin_subsidence
                 - valley_floor_lowering
+                - persistent_corridor_lowering
                 + alluvial_fill)
                 .max(0.0);
 
             if !flow.is_ocean[idx]
-                && valley_scale > 0.02
+                && (valley_scale > 0.02 || persistent_valley > 0.04)
                 && let Some(next_idx) = flow.downstream[idx]
             {
                 let (nx, ny) = world.coords(next_idx);
@@ -386,13 +406,16 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
                         * (1.0 - confinement)
                         * (0.0024 + basin_zone * 0.003 + plain_zone * 0.002)
                         + highland * stream_power_val * 0.0035) // valley-wall undercutting in mountain terrain
-                        + (floodplain_scale * (0.0045 + basin_zone * 0.0045 + plain_zone * 0.0035));
+                        + (floodplain_scale * (0.0045 + basin_zone * 0.0045 + plain_zone * 0.0035))
+                        + persistent_valley * (0.0035 + trunk_persistence * 0.010);
                     let lateral_strength = lateral_strength * (0.65 + (1.0 - uplift_core) * 0.35);
                     // Trunk rivers in highland zones carve broad U/V valleys; extend the
                     // lateral erosion radius so the valley floor spans multiple tiles.
                     let trunk_valley = smoothstep(100.0, 2000.0, ca) * highland;
-                    let lat_distances: &[(isize, f32)] = if trunk_valley > 0.35 {
-                        &[(1, 1.0), (2, 0.45), (3, 0.18), (4, 0.07)]
+                    let lat_distances: &[(isize, f32)] = if trunk_persistence > 0.42 {
+                        &[(1, 1.0), (2, 0.62), (3, 0.34), (4, 0.18), (5, 0.09)]
+                    } else if trunk_valley > 0.35 || persistent_valley > 0.22 {
+                        &[(1, 1.0), (2, 0.50), (3, 0.22), (4, 0.10)]
                     } else {
                         &[(1, 1.0), (2, 0.45)]
                     };
@@ -405,8 +428,8 @@ pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridg
                             }
                             let sidx = world.idx(sx as usize, sy as usize);
                             let height_above = (terrain[sidx] - current).max(0.0);
-                            let carve = lateral_strength * weight * (0.45 + height_above * 3.4);
-                            lateral_erosion[sidx] += carve.min(0.018);
+                            let carve = lateral_strength * weight * (0.45 + height_above * 3.8);
+                            lateral_erosion[sidx] += carve.min(0.024 + trunk_persistence * 0.014);
                         }
                     }
                     if floodplain_scale > 0.08 {

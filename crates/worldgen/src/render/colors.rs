@@ -5,11 +5,17 @@ use crate::{Biome, Surface, World, permanent_snow_cover};
 
 use super::shading::{lerp_rgba, offset, sample_noise};
 
-pub(super) fn land_base_colors(world: &World, scale: u32) -> Vec<Rgba<u8>> {
+pub(super) fn land_base_colors(world: &World, scale: u32, show_rivers: bool) -> Vec<Rgba<u8>> {
     // Minimum channel_order considered "drawn" at this scale. Tiles below this
     // are culled: they get terrain colour and the culling correction strips their
     // moisture inflation. Tiles at or above get the shared flat river colour.
-    let min_river_order: u8 = if scale <= 1 { 2 } else { 1 };
+    let min_river_order: u8 = if !show_rivers {
+        u8::MAX
+    } else if scale <= 1 {
+        2
+    } else {
+        1
+    };
     // Keep visual noise blob size roughly constant in pixels across scales.
     let noise_cell = ((56 / scale.max(1)) as usize).clamp(10, 56);
     // Per-tile micro hash: scale down amplitude at scale=1 to avoid salt-and-pepper noise.
@@ -227,13 +233,19 @@ fn tile_land_color(
 // River tiles are skipped — their water colour must stay intact.
 // Land tiles at river banks blend with the water colour, creating a natural
 // bank tint without a separate rendering pass.
-pub(super) fn soften_biome_edges(world: &World, colors: &[Rgba<u8>]) -> Vec<Rgba<u8>> {
+pub(super) fn soften_biome_edges(
+    world: &World,
+    colors: &[Rgba<u8>],
+    show_rivers: bool,
+) -> Vec<Rgba<u8>> {
     let mut out = colors.to_vec();
     for idx in 0..world.tiles.len() {
         let tile = &world.tiles[idx];
         let my_biome = tile.biome;
         // River tiles: keep their water colour pure.
-        if matches!(my_biome, Biome::Ocean | Biome::Lake) || tile.surface == Surface::River {
+        if matches!(my_biome, Biome::Ocean | Biome::Lake)
+            || (show_rivers && tile.surface == Surface::River)
+        {
             continue;
         }
         let (x, y) = world.coords(idx);
@@ -246,7 +258,7 @@ pub(super) fn soften_biome_edges(world: &World, colors: &[Rgba<u8>]) -> Vec<Rgba
             let nb = world.tiles[nidx].biome;
             // River neighbours are always treated as a distinct "biome" so the land
             // tile at the bank blends a little water colour in — a natural bank tint.
-            let nb_is_river = world.tiles[nidx].surface == Surface::River;
+            let nb_is_river = show_rivers && world.tiles[nidx].surface == Surface::River;
             if !nb_is_river && (nb == my_biome || matches!(nb, Biome::Ocean | Biome::Lake)) {
                 continue;
             }
@@ -260,13 +272,17 @@ pub(super) fn soften_biome_edges(world: &World, colors: &[Rgba<u8>]) -> Vec<Rgba
     out
 }
 
-pub(super) fn apply_snow_overlay(world: &World, colors: &[Rgba<u8>]) -> Vec<Rgba<u8>> {
+pub(super) fn apply_snow_overlay(
+    world: &World,
+    colors: &[Rgba<u8>],
+    show_rivers: bool,
+) -> Vec<Rgba<u8>> {
     colors
         .iter()
         .enumerate()
         .map(|(idx, &color)| {
             // Rivers are flowing water; they don't accumulate permanent snow.
-            if world.tiles[idx].surface == Surface::River {
+            if show_rivers && world.tiles[idx].surface == Surface::River {
                 return color;
             }
             let snow = permanent_snow_cover(world, idx);
