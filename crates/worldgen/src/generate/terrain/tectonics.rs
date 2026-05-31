@@ -12,9 +12,9 @@ pub(super) fn generate_plates(world: &World) -> Vec<Plate> {
     let world_units_y = world.height as f32 / ws;
     let world_area = world_units_x * world_units_y;
     // Base count for a 1×1 world; scale linearly with geographic area.
-    let base = (ws * ws / 18000.0).round() as usize;
+    let base = (ws * ws / 12000.0).round() as usize;
     let approx = (base as f32 * world_area).round() as usize;
-    let plate_count = approx.clamp(8, 120);
+    let plate_count = approx.clamp(12, 140);
     let mut plates = Vec::with_capacity(plate_count);
     for i in 0..plate_count {
         let xf = hash01(world.seed.wrapping_add(17), i * 13 + 1, 0) * world_units_x;
@@ -88,16 +88,16 @@ pub(super) fn sample_tectonic_elevation(
     let boundary_mid = smoothstep(0.22, 0.82, tectonics);
     let boundary_narrow = smoothstep(0.48, 0.94, tectonics);
     let axial_uplift =
-        (boundary_narrow * segmentation * transfer_gap * (0.50 + ridge_detail * 0.32) * land_mask)
+        (boundary_narrow * segmentation * transfer_gap * (0.68 + ridge_detail * 0.42) * land_mask)
             .clamp(0.0, 1.0);
     let shoulder_uplift = ((boundary_mid - boundary_narrow * 0.45).max(0.0)
-        * (0.34 + segment_noise * 0.24)
+        * (0.42 + segment_noise * 0.30)
         * land_mask)
         .clamp(0.0, 1.0);
     let plateau_support = (boundary_mid
         * smoothstep(0.56, 0.86, plateau_noise)
         * smoothstep(0.48, 0.86, ridge_detail)
-        * (0.11 + axial_uplift * 0.20)
+        * (0.13 + axial_uplift * 0.26)
         * land_mask)
         .clamp(0.0, 1.0);
     let foreland_loading = ((boundary_wide - boundary_mid * 0.55).max(0.0)
@@ -161,13 +161,13 @@ fn sample_uplift_field(plates: &[Plate], xf: f32, yf: f32) -> f32 {
     }
 
     let boundary_gap = (second.1.sqrt() - best.1.sqrt()).abs();
-    let boundary = (1.0 - smoothstep(0.01, 0.09, boundary_gap)).powf(1.85);
+    let boundary = (1.0 - smoothstep(0.012, 0.12, boundary_gap)).powf(1.65);
     let normal = normalize((second.2 - best.2, second.3 - best.3));
     let rel_velocity = (best.4 - second.4, best.5 - second.5);
     let convergence =
         ((rel_velocity.0 * normal.0 + rel_velocity.1 * normal.1) * 0.5 + 0.5).clamp(0.0, 1.0);
     let shear = ((rel_velocity.0 * -normal.1 + rel_velocity.1 * normal.0).abs()).clamp(0.0, 1.0);
-    let orogeny = smoothstep(0.45, 0.92, convergence * 0.9 + shear * 0.18);
+    let orogeny = smoothstep(0.40, 0.90, convergence * 0.9 + shear * 0.18);
 
     boundary * orogeny
 }

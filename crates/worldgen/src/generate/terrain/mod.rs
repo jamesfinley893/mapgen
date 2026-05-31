@@ -12,6 +12,7 @@ use normalize::normalize_terrain;
 use tectonics::{generate_plates, sample_tectonic_elevation};
 
 const TERRAIN_RELAX_STEPS: usize = 18;
+const TECTONIC_EQUILIBRIUM_STEPS: usize = 14;
 
 #[derive(Clone, Copy)]
 struct Plate {
@@ -103,6 +104,7 @@ pub(super) fn generate_terrain_fields(
 
     relax_terrain(world, &fields, &mut elevation);
     normalize_terrain(&mut elevation, 0.02, 0.98);
+    apply_tectonic_equilibrium(world, ridge, &fields, &mut elevation);
     apply_mountain_crag_detail(world, ridge, &fields, &mut elevation);
 
     let mut terrain = TerrainFields::from_elevation(elevation);
@@ -256,8 +258,100 @@ fn apply_mountain_crag_detail(
             let ribs = ridge_noise(ridge, xf * 18.0 + 7.0, yf * 18.0 - 11.0, 3);
             let fracture = octave_noise(ridge, xf * 31.0 - 19.0, yf * 31.0 + 23.0, 2, 0.52, 2.1);
             let detail = (ribs - 0.40) * 0.070 + (fracture - 0.5) * 0.032;
-            terrain[idx] = (current + detail * crag_mask).clamp(0.02, 0.98);
+            terrain[idx] = (current + detail * crag_mask).max(0.02);
         }
+    }
+}
+
+fn apply_tectonic_equilibrium(
+    world: &World,
+    ridge: &OpenSimplex,
+    fields: &OrogenFields,
+    terrain: &mut Vec<f32>,
+) {
+    let ws = world.effective_world_size();
+
+    for step in 0..TECTONIC_EQUILIBRIUM_STEPS {
+        let progress = (step + 1) as f32 / TECTONIC_EQUILIBRIUM_STEPS as f32;
+        let mut next = terrain.clone();
+
+        for (idx, value) in next.iter_mut().enumerate() {
+            let current = terrain[idx];
+            if current <= world.sea_level {
+                continue;
+            }
+
+            let (x, y) = world.coords(idx);
+            let xf = x as f64 / ws as f64;
+            let yf = y as f64 / ws as f64;
+            let stats = terrain_neighbor_stats(world, terrain, x, y, current);
+            let height_above_sea = (current - world.sea_level).max(0.0);
+            let uplift_signal = fields.axial_uplift[idx] + fields.shoulder_uplift[idx] * 0.28;
+            let active_core = smoothstep(0.14, 0.66, uplift_signal);
+            let highland = smoothstep(0.12, 0.40, height_above_sea);
+            let shoulder_zone = smoothstep(
+                0.16,
+                0.58,
+                fields.shoulder_uplift[idx] + fields.plateau_support[idx] * 0.48,
+            );
+            let basin_load = (fields.foreland_loading[idx] * 0.55
+                + fields.backarc_loading[idx] * 0.45)
+                .clamp(0.0, 1.0);
+            let ridge_segmentation = ridge_noise(ridge, xf * 9.5 + 17.0, yf * 9.5 - 23.0, 3);
+            let ridge_focus = smoothstep(0.42, 0.84, ridge_segmentation);
+            let inherited_root = highland
+                * smoothstep(0.34, 0.44, height_above_sea)
+                * ridge_focus
+                * (0.34
+                    + fields.plateau_support[idx] * 0.38
+                    + fields.shoulder_uplift[idx] * 0.24
+                    + active_core * 0.18)
+                * (1.0 - basin_load * 0.35)
+                * (1.0 - fields.craton_stability[idx] * 0.38);
+            let crest_focus = active_core * highland * (0.45 + ridge_focus * 0.55)
+                + inherited_root * (0.42 + ridge_focus * 0.38);
+            let root_support = (fields.axial_uplift[idx] * 1.08
+                + fields.shoulder_uplift[idx] * 0.28
+                + fields.plateau_support[idx] * 0.34)
+                * highland
+                * (1.0 - basin_load * 0.28)
+                + inherited_root * 0.82;
+            let tectonic_uplift = root_support
+                * (0.010
+                    + crest_focus * 0.027
+                    + fields.axial_uplift[idx] * 0.012
+                    + progress * 0.004);
+
+            let local_drop = stats.max_neighbor_drop;
+            let above_neighbors = (current - stats.avg_neighbor).max(0.0);
+            let active_relief_protection = (1.0 - active_core * 0.58).max(0.36);
+            let slope_failure = local_drop.powf(1.18)
+                * (0.014 + height_above_sea * 0.019 + (1.0 - active_core) * 0.014)
+                * active_relief_protection;
+            let height_denudation = height_above_sea.powf(1.72)
+                * (0.0016 + shoulder_zone * 0.0022 + (1.0 - active_core) * 0.0036)
+                * active_relief_protection;
+            let relief_denudation = above_neighbors
+                * (0.0038 + local_drop * 0.023 + height_above_sea * 0.0045)
+                * (1.0 - crest_focus * 0.36).max(0.52);
+            let diffusion = (stats.avg_neighbor - current)
+                * (0.006
+                    + local_drop * 0.020
+                    + shoulder_zone * 0.011
+                    + (1.0 - active_core) * 0.013)
+                * (1.0 - crest_focus * 0.48).max(0.42);
+            let glacial_wear = smoothstep(0.52, 0.84, height_above_sea)
+                * (0.0015 + local_drop * 0.012 + above_neighbors * 0.006);
+
+            *value = (current + tectonic_uplift + diffusion
+                - slope_failure
+                - height_denudation
+                - relief_denudation
+                - glacial_wear)
+                .max(world.sea_level + 0.001);
+        }
+
+        *terrain = next;
     }
 }
 
