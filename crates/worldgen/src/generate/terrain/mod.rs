@@ -102,8 +102,8 @@ pub(super) fn generate_terrain_fields(
     let mut elevation = fields.initial_terrain();
 
     relax_terrain(world, &fields, &mut elevation);
-    apply_mountain_crag_detail(world, ridge, &fields, &mut elevation);
     normalize_terrain(&mut elevation, 0.02, 0.98);
+    apply_mountain_crag_detail(world, ridge, &fields, &mut elevation);
 
     let mut terrain = TerrainFields::from_elevation(elevation);
     refresh_derived_fields(world, &mut terrain);
@@ -255,8 +255,8 @@ fn apply_mountain_crag_detail(
             let yf = y as f64 / ws as f64;
             let ribs = ridge_noise(ridge, xf * 18.0 + 7.0, yf * 18.0 - 11.0, 3);
             let fracture = octave_noise(ridge, xf * 31.0 - 19.0, yf * 31.0 + 23.0, 2, 0.52, 2.1);
-            let detail = (ribs - 0.40) * 0.055 + (fracture - 0.5) * 0.026;
-            terrain[idx] = (current + detail * crag_mask).max(0.0);
+            let detail = (ribs - 0.40) * 0.070 + (fracture - 0.5) * 0.032;
+            terrain[idx] = (current + detail * crag_mask).clamp(0.02, 0.98);
         }
     }
 }

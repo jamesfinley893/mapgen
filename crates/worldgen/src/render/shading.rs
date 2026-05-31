@@ -45,9 +45,9 @@ pub(super) fn draw_tile_hillshaded(
     let get_hs = |cx: usize, cy: usize| -> f32 {
         let cx = cx.min(world.width.saturating_sub(1));
         let cy = cy.min(world.height.saturating_sub(1));
-        // Don't interpolate hillshade across biome boundaries — a bright Alpine
-        // face would otherwise bleed into adjacent forest/grassland tiles.
-        if world.tiles[world.idx(cx, cy)].biome != center_biome {
+        // Land height is continuous across biome boundaries; only avoid blending
+        // with ocean tiles, which use their own depth rendering.
+        if world.tiles[world.idx(cx, cy)].biome == Biome::Ocean {
             h00
         } else {
             hillshade[world.idx(cx, cy)]
@@ -109,15 +109,14 @@ pub(super) fn draw_tile_hillshaded(
 pub(super) fn compute_hillshade(world: &World, x: usize, y: usize) -> f32 {
     let center_biome = world.tiles[world.idx(x, y)].biome;
     let center_elev = world.tiles[world.idx(x, y)].raw_elevation;
-    // Don't let a neighbor from a different biome drive the gradient — a forest
-    // tile at the base of a mountain would otherwise inherit the mountain's steep
-    // slope and render as a bright halo.
+    // Use the actual land elevation field across biome boundaries so the render
+    // remains faithful to terrain height; clamp ocean neighbors to sea level.
     let get_elev = |xi: isize, yi: isize| -> f32 {
         let cx = xi.clamp(0, world.width as isize - 1) as usize;
         let cy = yi.clamp(0, world.height as isize - 1) as usize;
         let neighbor = &world.tiles[world.idx(cx, cy)];
-        if neighbor.biome != center_biome {
-            center_elev
+        if neighbor.biome == Biome::Ocean {
+            world.sea_level.min(center_elev)
         } else {
             neighbor.raw_elevation
         }
