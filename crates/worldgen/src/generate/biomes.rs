@@ -162,15 +162,16 @@ fn biome_for_tile_with_support(ctx: BiomeContext) -> Biome {
 
 fn land_biome_with_support(ctx: BiomeContext) -> Biome {
     if ctx.elevation > ctx.sea_level + 0.36
-        && ctx.support > 0.46
-        && (ctx.relief > 0.022 || ctx.elevation > ctx.sea_level + 0.42)
+        && ctx.support > 0.50
+        && (ctx.relief > 0.034
+            || (ctx.elevation > ctx.sea_level + 0.48 && ctx.support > 0.58 && ctx.proximity > 0.24))
     {
         return Biome::Alpine;
     }
     if ctx.elevation > ctx.sea_level + 0.27
         && ctx.support > 0.18
         && ctx.proximity > 0.16
-        && ctx.relief > 0.020
+        && ctx.relief > 0.024
     {
         return Biome::Foothills;
     }

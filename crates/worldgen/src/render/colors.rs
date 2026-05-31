@@ -33,30 +33,30 @@ fn tile_land_color(
     if biome != Biome::Ocean {
         let height_above_sea = (tile.raw_elevation - world.sea_level).max(0.0);
         if matches!(biome, Biome::Alpine) {
-            let alpine_t = ((height_above_sea - 0.36) / 0.08).clamp(0.0, 1.0);
+            let alpine_t = smoothstep(0.38, 0.72, height_above_sea);
             let rugged = smoothstep(0.020, 0.080, tile.relief + tile.slope * 0.75);
             color = lerp_rgba(
                 lerp_rgba(
-                    Rgba([110, 104, 94, 255]),
-                    Rgba([142, 134, 122, 255]),
+                    Rgba([104, 102, 96, 255]),
+                    Rgba([136, 132, 122, 255]),
                     rugged,
                 ),
                 lerp_rgba(
-                    Rgba([146, 144, 138, 255]),
-                    Rgba([184, 184, 178, 255]),
+                    Rgba([132, 132, 126, 255]),
+                    Rgba([170, 170, 164, 255]),
                     rugged,
                 ),
-                alpine_t,
+                alpine_t * 0.55 + rugged * 0.25,
             );
         } else {
-            let tint_strength = smoothstep(0.06, 0.32, height_above_sea) * 0.24;
+            let tint_strength = smoothstep(0.04, 0.30, height_above_sea) * 0.28;
             if tint_strength > 0.0 {
                 color = lerp_rgba(color, elevation_tint(height_above_sea), tint_strength);
             }
         }
         let variation = hash01(world.seed, x, y);
         let regional = sample_noise(world.seed.wrapping_add(0xCAFE_BABE), x, y, noise_cell);
-        let elev_shade = (height_above_sea * 18.0) as i16;
+        let elev_shade = (height_above_sea * 24.0) as i16;
         let micro = (variation * micro_amp as f32) as i16 - micro_amp / 2;
         let macro_v = ((regional - 0.5) * 10.0) as i16;
         color = offset(color, elev_shade + micro + macro_v);
@@ -95,11 +95,12 @@ pub(super) fn soften_biome_edges(world: &World, colors: &[Rgba<u8>]) -> Vec<Rgba
 }
 
 pub(super) fn apply_snow_overlay(world: &World, colors: &[Rgba<u8>]) -> Vec<Rgba<u8>> {
+    let snow_cover = smoothed_snow_cover(world);
     colors
         .iter()
         .enumerate()
         .map(|(idx, &color)| {
-            let snow = permanent_snow_cover(world, idx);
+            let snow = snow_cover[idx];
             if snow > 0.0 {
                 lerp_rgba(color, Rgba([240, 244, 248, 255]), snow)
             } else {
@@ -107,6 +108,43 @@ pub(super) fn apply_snow_overlay(world: &World, colors: &[Rgba<u8>]) -> Vec<Rgba
             }
         })
         .collect()
+}
+
+fn smoothed_snow_cover(world: &World) -> Vec<f32> {
+    let mut cover = (0..world.tiles.len())
+        .map(|idx| permanent_snow_cover(world, idx))
+        .collect::<Vec<_>>();
+
+    for _ in 0..2 {
+        let previous = cover.clone();
+        for idx in 0..world.tiles.len() {
+            if !can_carry_snow_overlay(world.tiles[idx].biome) {
+                cover[idx] = 0.0;
+                continue;
+            }
+
+            let (x, y) = world.coords(idx);
+            let mut sum = previous[idx] * 6.0;
+            let mut weight = 6.0_f32;
+            for (nx, ny) in world.neighbors8(x, y) {
+                let nidx = world.idx(nx, ny);
+                if can_carry_snow_overlay(world.tiles[nidx].biome) {
+                    sum += previous[nidx];
+                    weight += 1.0;
+                }
+            }
+            cover[idx] = sum / weight;
+        }
+    }
+
+    cover
+}
+
+fn can_carry_snow_overlay(biome: Biome) -> bool {
+    matches!(
+        biome,
+        Biome::Alpine | Biome::Foothills | Biome::Tundra | Biome::PolarDesert
+    )
 }
 
 fn elevation_tint(height_above_sea: f32) -> Rgba<u8> {

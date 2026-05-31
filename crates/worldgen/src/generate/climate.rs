@@ -80,7 +80,8 @@ fn sample_climate_fields(
                 0.5,
                 2.0,
             );
-            let lowland = 1.0 - ((elevation - world.sea_level) / 0.24).clamp(0.0, 1.0);
+            let height_above_sea = (elevation - world.sea_level).max(0.0);
+            let lowland = 1.0 - (height_above_sea / 0.24).clamp(0.0, 1.0);
             let equatorial_warmth = (1.0 - lat.powf(1.08)).clamp(0.0, 1.0);
             let subtropical_cooling =
                 smoothstep(0.16, 0.34, lat) * (1.0_f32 - smoothstep(0.46, 0.68, lat));
@@ -90,7 +91,7 @@ fn sample_climate_fields(
                 + climate_noise * 0.13
                 + seasonal_noise * 0.08
                 + maritime_temp
-                - elevation * 0.34
+                - height_above_sea * 0.42
                 - inputs.regional_continentality[idx] * 0.07 * lowland
                 + config.temperature_bias)
                 .clamp(0.0, 1.0);

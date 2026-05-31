@@ -30,12 +30,40 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
 }
 
 fn build_hillshade(world: &World) -> Vec<f32> {
-    (0..world.tiles.len())
+    let raw = (0..world.tiles.len())
         .map(|idx| {
             let (x, y) = world.coords(idx);
             compute_hillshade(world, x, y)
         })
-        .collect()
+        .collect::<Vec<_>>();
+    let softened = soften_hillshade(world, &raw);
+    soften_hillshade(world, &softened)
+}
+
+fn soften_hillshade(world: &World, hillshade: &[f32]) -> Vec<f32> {
+    let mut out = hillshade.to_vec();
+
+    for idx in 0..world.tiles.len() {
+        if world.tiles[idx].biome == Biome::Ocean {
+            continue;
+        }
+
+        let (x, y) = world.coords(idx);
+        let mut sum = hillshade[idx] * 5.0;
+        let mut weight = 5.0_f32;
+        for (nx, ny) in world.neighbors8(x, y) {
+            let nidx = world.idx(nx, ny);
+            if world.tiles[nidx].biome == Biome::Ocean {
+                continue;
+            }
+            sum += hillshade[nidx];
+            weight += 1.0;
+        }
+
+        out[idx] = sum / weight;
+    }
+
+    out
 }
 
 fn build_land_colors(world: &World, scale: u32) -> Vec<Rgba<u8>> {

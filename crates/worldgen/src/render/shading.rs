@@ -66,9 +66,9 @@ pub(super) fn draw_tile_hillshaded(
                 + h01 * (1.0 - fx) * fy
                 + h11 * fx * fy;
             let shade_factor = match center_biome {
-                Biome::Alpine => 0.22 + shade * 0.96,
-                Biome::Foothills => 0.26 + shade * 0.86,
-                _ => 0.30 + shade * 0.74,
+                Biome::Alpine => 0.34 + shade * 0.72,
+                Biome::Foothills => 0.36 + shade * 0.68,
+                _ => 0.37 + shade * 0.61,
             };
             let color = scale_rgb(base_color, shade_factor);
             // Aspect tinting: lit faces warm (+R, -B), shadowed faces cool (-R, +B).
@@ -108,30 +108,37 @@ pub(super) fn draw_tile_hillshaded(
 
 pub(super) fn compute_hillshade(world: &World, x: usize, y: usize) -> f32 {
     let center_biome = world.tiles[world.idx(x, y)].biome;
-    let center_elev = world.tiles[world.idx(x, y)].raw_elevation;
+    let center_raw_elev = world.tiles[world.idx(x, y)].raw_elevation;
+    let visual_elevation = |elevation: f32| -> f32 {
+        let height_above_sea = (elevation - world.sea_level).max(0.0);
+        height_above_sea / (height_above_sea + 0.74)
+    };
     // Use the actual land elevation field across biome boundaries so the render
-    // remains faithful to terrain height; clamp ocean neighbors to sea level.
-    let get_elev = |xi: isize, yi: isize| -> f32 {
+    // remains faithful to terrain height; transform it through a visual curve so
+    // extreme peaks do not alias into black one-tile cliffs.
+    let get_visual_elev = |xi: isize, yi: isize| -> f32 {
         let cx = xi.clamp(0, world.width as isize - 1) as usize;
         let cy = yi.clamp(0, world.height as isize - 1) as usize;
         let neighbor = &world.tiles[world.idx(cx, cy)];
         if neighbor.biome == Biome::Ocean {
-            world.sea_level.min(center_elev)
+            0.0
         } else {
-            neighbor.raw_elevation
+            visual_elevation(neighbor.raw_elevation)
         }
     };
     let xi = x as isize;
     let yi = y as isize;
-    let dz_dx = get_elev(xi + 1, yi) - get_elev(xi - 1, yi);
-    let dz_dy = get_elev(xi, yi + 1) - get_elev(xi, yi - 1);
+    let dz_dx = get_visual_elev(xi + 1, yi) - get_visual_elev(xi - 1, yi);
+    let dz_dy = get_visual_elev(xi, yi + 1) - get_visual_elev(xi, yi - 1);
     // Adaptive z_scale: mountains get dramatic relief, plains stay gentle.
-    let elev = get_elev(xi, yi);
-    let height_above_sea = (elev - world.sea_level).max(0.0);
+    let height_above_sea = (center_raw_elev - world.sea_level).max(0.0);
+    let visual_height = height_above_sea / (height_above_sea + 0.82);
+    let lowland_relief =
+        smoothstep(0.04, 0.22, height_above_sea) * (1.0 - smoothstep(0.30, 0.70, height_above_sea));
     let z_scale = match center_biome {
-        Biome::Alpine => 11.0 + height_above_sea * 34.0,
-        Biome::Foothills => 8.0 + height_above_sea * 28.0,
-        _ => 5.0 + height_above_sea * 20.0,
+        Biome::Alpine => 10.0 + visual_height * 31.0,
+        Biome::Foothills => 7.5 + visual_height * 25.0,
+        _ => 6.5 + visual_height * 24.0 + lowland_relief * 3.0,
     };
     let nx = -dz_dx * z_scale;
     let ny = 1.0_f32;

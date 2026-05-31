@@ -55,6 +55,7 @@ pub(super) fn sample_tectonic_elevation(
     let transfer_noise = octave_noise(base, xf64 * 6.8 - 31.0, yf64 * 6.8 + 7.0, 2, 0.5, 2.0);
     let basin_noise = octave_noise(base, xf64 * 2.8 - 17.0, yf64 * 2.8 + 29.0, 3, 0.52, 2.0);
     let plateau_noise = octave_noise(base, xf64 * 1.9 + 37.0, yf64 * 1.9 - 15.0, 3, 0.5, 2.0);
+    let massif_noise = octave_noise(ridge, xf64 * 2.15 + 73.0, yf64 * 2.15 - 101.0, 4, 0.54, 2.0);
     let plain_bands = octave_noise(base, xf64 * 1.25 - 41.0, yf64 * 1.25 + 33.0, 3, 0.54, 2.0);
     let shelf_break = octave_noise(base, xf64 * 0.78 - 13.0, yf64 * 0.78 + 17.0, 2, 0.5, 2.0);
     let margin_variation = octave_noise(base, xf64 * 1.6 + 51.0, yf64 * 1.6 - 27.0, 3, 0.55, 2.0);
@@ -79,58 +80,108 @@ pub(super) fn sample_tectonic_elevation(
         + plain_bands * 0.06)
         .clamp(0.0, 1.0);
 
-    let tectonics = sample_uplift_field(plates, xf, yf);
-    let land_mask = smoothstep(0.38, 0.72, continent_mask);
-    let segmentation =
-        smoothstep(0.42, 0.78, segment_noise) * 0.75 + smoothstep(0.52, 0.86, ridge_detail) * 0.25;
-    let transfer_gap = 1.0 - smoothstep(0.58, 0.84, transfer_noise) * 0.62;
-    let boundary_wide = smoothstep(0.08, 0.72, tectonics);
-    let boundary_mid = smoothstep(0.22, 0.82, tectonics);
+    let boundary_warp_x =
+        octave_noise(base, xf64 * 1.75 + 67.0, yf64 * 1.75 - 43.0, 3, 0.52, 2.0) - 0.5;
+    let boundary_warp_y =
+        octave_noise(base, xf64 * 1.75 - 89.0, yf64 * 1.75 + 71.0, 3, 0.52, 2.0) - 0.5;
+    let boundary_fold_x =
+        octave_noise(base, xf64 * 4.4 - 53.0, yf64 * 4.4 + 97.0, 2, 0.50, 2.0) - 0.5;
+    let boundary_fold_y =
+        octave_noise(base, xf64 * 4.4 + 109.0, yf64 * 4.4 - 61.0, 2, 0.50, 2.0) - 0.5;
+    let tectonics = sample_uplift_field(
+        plates,
+        xf + boundary_warp_x * 0.160 + boundary_fold_x * 0.060,
+        yf + boundary_warp_y * 0.160 + boundary_fold_y * 0.060,
+    );
+    let crust_mask = smoothstep(0.12, 0.52, continent_mask);
+    let orogenic_crust = smoothstep(0.20, 0.58, continent_mask);
+    let continental_root = smoothstep(0.16, 0.56, continent_mask)
+        * (0.62 + continental.interior * 0.28 + craton * 0.10);
+    let segmentation = smoothstep(0.42, 0.82, segment_noise)
+        * (0.35 + smoothstep(0.42, 0.84, ridge_detail) * 0.65);
+    let transfer_gap = 1.0 - smoothstep(0.46, 0.78, transfer_noise) * 0.90;
+    let boundary_wide = smoothstep(0.05, 0.68, tectonics);
+    let boundary_mid = smoothstep(0.18, 0.80, tectonics);
     let boundary_narrow = smoothstep(0.48, 0.94, tectonics);
-    let axial_uplift =
-        (boundary_narrow * segmentation * transfer_gap * (0.68 + ridge_detail * 0.42) * land_mask)
-            .clamp(0.0, 1.0);
-    let shoulder_uplift = ((boundary_mid - boundary_narrow * 0.45).max(0.0)
-        * (0.42 + segment_noise * 0.30)
-        * land_mask)
+    let massif_patch = smoothstep(0.50, 0.80, massif_noise) * smoothstep(0.34, 0.78, ridge_detail);
+    let range_focus = ((0.34 + segmentation * 0.44 + massif_patch * 0.36)
+        * (0.72 + transfer_gap * 0.28))
         .clamp(0.0, 1.0);
-    let plateau_support = (boundary_mid
-        * smoothstep(0.56, 0.86, plateau_noise)
-        * smoothstep(0.48, 0.86, ridge_detail)
-        * (0.13 + axial_uplift * 0.26)
-        * land_mask)
+    let axial_uplift = (boundary_narrow
+        * segmentation
+        * transfer_gap
+        * (0.68 + ridge_detail * 0.42)
+        * 0.55
+        * orogenic_crust)
+        .clamp(0.0, 1.0);
+    let orogenic_swell = (boundary_wide
+        * (0.42 + boundary_mid * 0.34)
+        * (0.72 + ridge_detail * 0.20 + plateau_noise * 0.18)
+        * (0.45 + range_focus * 0.55)
+        * orogenic_crust)
+        .clamp(0.0, 1.0);
+    let massif_support =
+        (massif_patch * (0.28 + boundary_wide * 0.42 + boundary_mid * 0.18) * orogenic_crust)
+            .clamp(0.0, 1.0);
+    let shoulder_uplift = ((boundary_wide * 0.36 + boundary_mid * 0.40 - boundary_narrow * 0.42)
+        .max(0.0)
+        * (0.54 + segment_noise * 0.30 + ridge_detail * 0.16)
+        * (0.48 + range_focus * 0.52)
+        * orogenic_crust)
+        .clamp(0.0, 1.0);
+    let plateau_support = ((boundary_wide * 0.30 + boundary_mid * 0.42 + massif_support * 0.70)
+        * smoothstep(0.40, 0.78, plateau_noise)
+        * smoothstep(0.34, 0.78, ridge_detail)
+        * (0.24 + boundary_mid * 0.16 + axial_uplift * 0.22 + orogenic_swell * 0.20)
+        * (0.54 + range_focus * 0.46)
+        * orogenic_crust)
         .clamp(0.0, 1.0);
     let foreland_loading = ((boundary_wide - boundary_mid * 0.55).max(0.0)
         * smoothstep(0.34, 0.74, basin_noise)
         * (0.72 + boundary_mid * 0.18)
-        * land_mask)
+        * crust_mask)
         .clamp(0.0, 1.0);
     let backarc_loading = ((boundary_mid - boundary_narrow * 0.8).max(0.0)
         * smoothstep(0.46, 0.82, 1.0 - basin_noise)
-        * land_mask
+        * crust_mask
         * 0.92)
         .clamp(0.0, 1.0);
     let craton_stability = (smoothstep(0.48, 0.84, craton)
         * smoothstep(0.34, 0.74, plain_bands)
         * (0.58 + continental.interior * 0.42)
         * (1.0 - boundary_mid * 0.75)
-        * land_mask)
+        * crust_mask)
         .clamp(0.0, 1.0);
     let basin_bias = (smoothstep(0.44, 0.82, basin_noise)
         * (0.78 + seaway_land_cut * 0.34 + continental.ocean_basin * 0.18)
         * (0.45 + (1.0 - boundary_narrow) * 0.4)
-        * land_mask)
+        * crust_mask)
         .clamp(0.0, 1.0);
 
-    let basement = (continent_mask * 0.52
-        + plains * 0.12
+    let oceanic_basement = world.sea_level - 0.43 + shelves * 0.08 + shelf_break * 0.05
+        - continental.ocean_basin * 0.16
+        - seaway_land_cut * 0.08;
+    let continental_basement = world.sea_level
+        + 0.03
+        + continent_mask * 0.62
+        + continental.interior * 0.26
         + craton * 0.16
-        + plain_bands * 0.08
-        + continental.interior * 0.08
-        - basin_bias * 0.10
+        + plains * 0.10
+        + plain_bands * 0.07
+        + continental_root * 0.34
+        + orogenic_swell * 0.17
+        + massif_support * 0.38
+        + shoulder_uplift * 0.11
+        + plateau_support * 0.25
+        + (plains - 0.5) * 0.15
+        + (plain_bands - 0.5) * 0.10
+        + (margin_variation - 0.5) * 0.09
+        + (ridge_detail - 0.5) * 0.10 * orogenic_crust
+        - basin_bias * 0.14
         - continental.ocean_basin * 0.10
-        - seaway_land_cut * 0.04)
-        .clamp(0.0, 1.0);
+        - seaway_land_cut * 0.06;
+    let basement =
+        (oceanic_basement + (continental_basement - oceanic_basement) * crust_mask).max(0.02);
 
     OrogenSample {
         basement,

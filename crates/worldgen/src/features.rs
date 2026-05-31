@@ -26,12 +26,12 @@ pub fn permanent_snow_cover(world: &World, idx: usize) -> f32 {
         Biome::Alpine => {
             let feature = classify_alpine_feature(world, idx);
             let (line_offset, max_cover) = match feature {
-                MountainFeature::Summit => (0.00, 0.75),
-                MountainFeature::Ridge => (0.04, 0.48),
-                MountainFeature::AlpineSlope => (0.10, 0.22),
-                MountainFeature::None | MountainFeature::Foothill => (0.10, 0.22),
+                MountainFeature::Summit => (0.04, 0.58),
+                MountainFeature::Ridge => (0.08, 0.34),
+                MountainFeature::AlpineSlope => (0.10, 0.16),
+                MountainFeature::None | MountainFeature::Foothill => (0.10, 0.16),
             };
-            let snow_line = (world.sea_level + 0.26 + tile.temperature * 0.20 + line_offset)
+            let snow_line = (world.sea_level + 0.28 + tile.temperature * 0.20 + line_offset)
                 .min(world.sea_level + 0.56);
             (snow_line, 0.12, max_cover)
         }
@@ -41,7 +41,7 @@ pub fn permanent_snow_cover(world: &World, idx: usize) -> f32 {
             }
             let snow_line =
                 (world.sea_level + 0.34 + tile.temperature * 0.14).min(world.sea_level + 0.54);
-            (snow_line, 0.12, 0.18)
+            (snow_line, 0.12, 0.12)
         }
         Biome::Tundra | Biome::PolarDesert => {
             if tile.temperature > 0.16 || height_above_sea < 0.28 {

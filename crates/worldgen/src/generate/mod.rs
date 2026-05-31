@@ -28,14 +28,13 @@ pub fn generate_world(config: &WorldConfig) -> Result<World, String> {
     let climate_noise = OpenSimplex::new(config.seed.wrapping_add(2) as u32);
 
     let mut terrain_fields = terrain::generate_terrain_fields(&world, &base, &ridge);
-    terrain::apply_terrain_mutators(&world, &mut terrain_fields);
     terrain::refresh_derived_fields(&world, &mut terrain_fields);
     terrain::finalize_sea_level(&mut world, &terrain_fields);
 
-    let ocean = ocean::classify_ocean(&world, &terrain_fields.elevation);
-    let surfaces = ocean::classify_surfaces(&world, &ocean);
-    let distance_to_ocean = climate::fill_ocean_distance(&world, &ocean);
-    let climate_fields = climate::generate_climate_fields(
+    let mut ocean = ocean::classify_ocean(&world, &terrain_fields.elevation);
+    let mut surfaces = ocean::classify_surfaces(&world, &ocean);
+    let mut distance_to_ocean = climate::fill_ocean_distance(&world, &ocean);
+    let mut climate_fields = climate::generate_climate_fields(
         &world,
         config,
         &terrain_fields,
@@ -43,6 +42,28 @@ pub fn generate_world(config: &WorldConfig) -> Result<World, String> {
         &distance_to_ocean,
         &climate_noise,
     );
+
+    let mutation_context = terrain::TerrainMutationContext {
+        ocean: &ocean,
+        surfaces: &surfaces,
+        climate: &climate_fields,
+    };
+    if terrain::apply_terrain_mutators(&world, &mutation_context, &mut terrain_fields) {
+        terrain::refresh_derived_fields(&world, &mut terrain_fields);
+        terrain::finalize_sea_level(&mut world, &terrain_fields);
+        ocean = ocean::classify_ocean(&world, &terrain_fields.elevation);
+        surfaces = ocean::classify_surfaces(&world, &ocean);
+        distance_to_ocean = climate::fill_ocean_distance(&world, &ocean);
+        climate_fields = climate::generate_climate_fields(
+            &world,
+            config,
+            &terrain_fields,
+            &ocean,
+            &distance_to_ocean,
+            &climate_noise,
+        );
+    }
+
     let biomes = biomes::assign_biomes(&world, &terrain_fields, &climate_fields, &surfaces);
 
     commit_tiles(
