@@ -13,10 +13,10 @@ struct BiomeContext {
 }
 
 pub(super) fn assign_biomes(world: &mut World) {
-    let mut biomes = Vec::with_capacity(world.tiles.len());
-    for idx in 0..world.tiles.len() {
-        biomes.push(biome_for_world_tile(world, idx));
-    }
+    let biomes = (0..world.tiles.len())
+        .map(|idx| biome_for_world_tile(world, idx))
+        .collect::<Vec<_>>();
+
     for (tile, biome) in world.tiles.iter_mut().zip(biomes.into_iter()) {
         tile.biome = biome;
     }
@@ -37,51 +37,54 @@ fn biome_for_world_tile(world: &World, idx: usize) -> Biome {
 }
 
 fn mountain_support(world: &World, idx: usize) -> f32 {
-    let (x, y) = world.coords(idx);
     let high_threshold = world.sea_level + 0.24;
     let alpine_threshold = world.sea_level + 0.34;
-    let mut support = 0.0_f32;
-    let mut total = 0.0_f32;
-
-    for dy in -2..=2 {
-        for dx in -2..=2 {
-            if dx == 0 && dy == 0 {
-                continue;
-            }
-            let nx = x as isize + dx;
-            let ny = y as isize + dy;
-            if !world.in_bounds(nx, ny) {
-                continue;
-            }
-            let nidx = world.idx(nx as usize, ny as usize);
+    weighted_neighbor_support(
+        world,
+        idx,
+        2,
+        alpine_threshold,
+        high_threshold,
+        0.55,
+        |dx, dy| {
             let dist = dx.abs().max(dy.abs()) as f32;
-            let weight = if dist <= 1.0 { 1.0 } else { 0.45 };
-            let elev = world.tiles[nidx].raw_elevation;
-            total += weight;
-            if elev > alpine_threshold {
-                support += weight;
-            } else if elev > high_threshold {
-                support += weight * 0.55;
-            }
-        }
-    }
-
-    if total <= f32::EPSILON {
-        0.0
-    } else {
-        (support / total).clamp(0.0, 1.0)
-    }
+            if dist <= 1.0 { 1.0 } else { 0.45 }
+        },
+    )
 }
 
 fn mountain_proximity(world: &World, idx: usize) -> f32 {
-    let (x, y) = world.coords(idx);
     let alpine_threshold = world.sea_level + 0.38;
     let ridge_threshold = world.sea_level + 0.32;
+    weighted_neighbor_support(
+        world,
+        idx,
+        4,
+        alpine_threshold,
+        ridge_threshold,
+        0.45,
+        |dx, dy| {
+            let dist = ((dx * dx + dy * dy) as f32).sqrt();
+            (1.0 / (1.0 + dist)).clamp(0.12, 0.7)
+        },
+    )
+}
+
+fn weighted_neighbor_support(
+    world: &World,
+    idx: usize,
+    radius: isize,
+    full_threshold: f32,
+    partial_threshold: f32,
+    partial_weight: f32,
+    weight_for: impl Fn(isize, isize) -> f32,
+) -> f32 {
+    let (x, y) = world.coords(idx);
     let mut support = 0.0_f32;
     let mut total = 0.0_f32;
 
-    for dy in -4..=4 {
-        for dx in -4..=4 {
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
             if dx == 0 && dy == 0 {
                 continue;
             }
@@ -91,14 +94,13 @@ fn mountain_proximity(world: &World, idx: usize) -> f32 {
                 continue;
             }
             let nidx = world.idx(nx as usize, ny as usize);
-            let dist = ((dx * dx + dy * dy) as f32).sqrt();
-            let weight = (1.0 / (1.0 + dist)).clamp(0.12, 0.7);
+            let weight = weight_for(dx, dy);
             let elev = world.tiles[nidx].raw_elevation;
             total += weight;
-            if elev > alpine_threshold {
+            if elev > full_threshold {
                 support += weight;
-            } else if elev > ridge_threshold {
-                support += weight * 0.45;
+            } else if elev > partial_threshold {
+                support += weight * partial_weight;
             }
         }
     }

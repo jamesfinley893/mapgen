@@ -262,7 +262,7 @@ fn lowlands_are_not_overwhelmingly_woodland_and_tundra() {
 fn highland_massifs_are_fragmented_into_subranges() {
     for seed in [42_u64, 97, 3000] {
         let world = fixed_world(seed);
-        let components = mountain_component_count(&world, 120);
+        let components = mountain_component_count(world, 120);
         assert!(
             components >= 2,
             "mountain terrain remains too monolithic for seed {seed}: components={components}"
@@ -274,7 +274,7 @@ fn highland_massifs_are_fragmented_into_subranges() {
 fn landmass_shape_is_not_strongly_center_biased() {
     for seed in [42_u64, 97, 7073116918442829777] {
         let world = fixed_world(seed);
-        let (center, outer) = center_vs_outer_land_fraction(&world);
+        let (center, outer) = center_vs_outer_land_fraction(world);
         assert!(
             center <= outer * 2.2 + 0.12,
             "land remains too center-biased for seed {seed}: center={center} outer={outer}"
@@ -286,7 +286,7 @@ fn landmass_shape_is_not_strongly_center_biased() {
 fn edge_land_distribution_varies_by_edge() {
     for seed in [42_u64, 97, 7073116918442829777] {
         let world = fixed_world(seed);
-        let fractions = edge_land_fractions(&world, 20);
+        let fractions = edge_land_fractions(world, 20);
         let min = fractions.iter().copied().fold(1.0_f32, f32::min);
         let max = fractions.iter().copied().fold(0.0_f32, f32::max);
         assert!(
@@ -303,7 +303,7 @@ fn fixed_seed_set_includes_multiple_major_landmasses() {
     let mut found = false;
     for seed in seeds {
         let world = fixed_world(seed);
-        let masses = major_landmass_count(&world, 900);
+        let masses = major_landmass_count(world, 900);
         if masses >= 2 {
             found = true;
             break;

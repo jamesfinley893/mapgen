@@ -21,7 +21,7 @@ pub(super) fn populate_climate(
         ocean,
         distance_to_ocean,
         climate,
-        Some(&nearby_water),
+        &nearby_water,
         &regional_continentality,
     );
 }
@@ -32,7 +32,7 @@ fn populate_climate_from_fields(
     ocean: &[bool],
     distance_to_ocean: &[u16],
     climate: &OpenSimplex,
-    nearby_water: Option<&[f32]>,
+    nearby_water: &[f32],
     regional_continentality: &[f32],
 ) {
     let wind_tilt = prevailing_wind_angle(world.seed);
@@ -56,7 +56,7 @@ fn populate_climate_from_fields(
             let equatorial_warmth = (1.0 - lat.powf(1.08)).clamp(0.0, 1.0);
             let subtropical_cooling =
                 smoothstep(0.16, 0.34, lat) * (1.0_f32 - smoothstep(0.46, 0.68, lat));
-            let nw = nearby_water.map_or(0.0, |nw| nw[idx]);
+            let nw = nearby_water[idx];
             let maritime_temp = nw * 0.06 + (1.0 - regional_continentality[idx]) * 0.06;
             let temperature = (equatorial_warmth * 0.82 - subtropical_cooling * 0.04
                 + climate_noise * 0.13
@@ -171,7 +171,7 @@ struct MoistureFields<'a> {
     ocean: &'a [bool],
     distance_to_ocean: &'a [u16],
     climate: &'a OpenSimplex,
-    nearby_water: Option<&'a [f32]>,
+    nearby_water: &'a [f32],
     regional_continentality: &'a [f32],
     wind: (f32, f32),
 }
@@ -220,7 +220,7 @@ fn moisture_value(world: &World, fields: &MoistureFields<'_>, x: usize, y: usize
         + noise * 0.22
         + monsoon * 0.08 * equatorial_wetness
         + shadow * 0.14
-        + fields.nearby_water.map_or(0.0, |nw| nw[idx]) * 0.16
+        + fields.nearby_water[idx] * 0.16
         - continentality * 0.20 * (0.7 + subtropical_dryness * 0.45) * lowland)
         .clamp(0.0, 1.0)
 }

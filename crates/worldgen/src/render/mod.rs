@@ -22,44 +22,49 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
     let width = world.width as u32 * scale;
     let height = world.height as u32 * scale;
     let mut image = RgbaImage::new(width, height);
+    let hillshade = build_hillshade(world);
+    let land_colors = build_land_colors(world, scale);
 
-    // Hillshade computed per tile; bilinear-interpolated at sub-pixel level.
-    let hillshade: Vec<f32> = (0..world.tiles.len())
+    draw_base_layer(&mut image, world, scale, &hillshade, &land_colors);
+    draw_land_features(&mut image, world, scale);
+
+    image
+}
+
+fn build_hillshade(world: &World) -> Vec<f32> {
+    (0..world.tiles.len())
         .map(|idx| {
             let (x, y) = world.coords(idx);
             compute_hillshade(world, x, y)
         })
-        .collect();
+        .collect()
+}
 
+fn build_land_colors(world: &World, scale: u32) -> Vec<Rgba<u8>> {
     // Pre-compute land base colors, soften biome-boundary edges, then apply snow.
     // Snow must come after softening so partially-snowed tiles don't bleed white
     // into neighboring biomes through the blend pass.
     let land_colors = land_base_colors(world, scale);
     let land_colors = soften_biome_edges(world, &land_colors);
-    let land_colors = apply_snow_overlay(world, &land_colors);
+    apply_snow_overlay(world, &land_colors)
+}
 
+fn draw_base_layer(
+    image: &mut RgbaImage,
+    world: &World,
+    scale: u32,
+    hillshade: &[f32],
+    land_colors: &[Rgba<u8>],
+) {
     for (idx, tile) in world.tiles.iter().enumerate() {
         let (x, y) = world.coords(idx);
-        let variation = hash01(world.seed, x, y);
 
         if matches!(tile.biome, Biome::Ocean) {
-            let depth = (world.sea_level - tile.raw_elevation).max(0.0);
-            let shelf_t = (1.0 - smoothstep(0.0, 0.048, depth)).clamp(0.0, 1.0);
-            let deep_t = smoothstep(0.06, 0.26, depth).clamp(0.0, 1.0);
-            let shelf_color = Rgba([58, 132, 182, 255]);
-            let ocean_color = Rgba([38, 84, 148, 255]);
-            let abyss_color = Rgba([18, 46, 102, 255]);
-            let base = lerp_rgba(
-                lerp_rgba(ocean_color, shelf_color, shelf_t),
-                abyss_color,
-                deep_t,
-            );
-            let tex = ((variation - 0.5) * 6.0) as i16;
-            draw_tile(&mut image, x as u32, y as u32, scale, offset(base, tex));
+            draw_ocean_tile(image, world, idx, x, y, scale);
         } else {
             draw_tile_hillshaded(
-                &mut image,
-                &hillshade,
+                image,
+                hillshade,
                 world,
                 x as u32,
                 y as u32,
@@ -68,35 +73,74 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
             );
         }
     }
+}
 
+fn draw_ocean_tile(
+    image: &mut RgbaImage,
+    world: &World,
+    idx: usize,
+    x: usize,
+    y: usize,
+    scale: u32,
+) {
+    let tile = &world.tiles[idx];
+    let variation = hash01(world.seed, x, y);
+    let depth = (world.sea_level - tile.raw_elevation).max(0.0);
+    let shelf_t = (1.0 - smoothstep(0.0, 0.048, depth)).clamp(0.0, 1.0);
+    let deep_t = smoothstep(0.06, 0.26, depth).clamp(0.0, 1.0);
+    let shelf_color = Rgba([58, 132, 182, 255]);
+    let ocean_color = Rgba([38, 84, 148, 255]);
+    let abyss_color = Rgba([18, 46, 102, 255]);
+    let base = lerp_rgba(
+        lerp_rgba(ocean_color, shelf_color, shelf_t),
+        abyss_color,
+        deep_t,
+    );
+    let tex = ((variation - 0.5) * 6.0) as i16;
+    draw_tile(image, x as u32, y as u32, scale, offset(base, tex));
+}
+
+fn draw_land_features(image: &mut RgbaImage, world: &World, scale: u32) {
     for (idx, tile) in world.tiles.iter().enumerate() {
         let (x, y) = world.coords(idx);
         if tile.biome != Biome::Ocean {
-            match mountain_feature_for_tile(world, idx) {
-                MountainFeature::Summit => draw_peak(&mut image, x as u32, y as u32, scale),
-                MountainFeature::Ridge => draw_ridge(&mut image, world, idx, scale),
-                MountainFeature::AlpineSlope => {}
-                MountainFeature::Foothill => draw_hills(&mut image, x as u32, y as u32, scale),
-                MountainFeature::None => {}
-            }
-
-            if matches!(tile.biome, Biome::Desert | Biome::PolarDesert) {
-                draw_dunes(&mut image, x as u32, y as u32, scale);
-            } else if matches!(
-                tile.biome,
-                Biome::TemperateForest
-                    | Biome::BorealForest
-                    | Biome::Rainforest
-                    | Biome::TropicalForest
-            ) {
-                draw_forest(&mut image, x as u32, y as u32, scale);
-            }
-
-            if tile.biome == Biome::Coast {
-                draw_coastline(&mut image, world, idx, scale);
-            }
+            draw_mountain_feature(image, world, idx, x, y, scale);
+            draw_biome_symbol(image, tile.biome, x, y, scale);
+            draw_coast_feature(image, world, idx, scale);
         }
     }
+}
 
-    image
+fn draw_mountain_feature(
+    image: &mut RgbaImage,
+    world: &World,
+    idx: usize,
+    x: usize,
+    y: usize,
+    scale: u32,
+) {
+    match mountain_feature_for_tile(world, idx) {
+        MountainFeature::Summit => draw_peak(image, x as u32, y as u32, scale),
+        MountainFeature::Ridge => draw_ridge(image, world, idx, scale),
+        MountainFeature::AlpineSlope => {}
+        MountainFeature::Foothill => draw_hills(image, x as u32, y as u32, scale),
+        MountainFeature::None => {}
+    }
+}
+
+fn draw_biome_symbol(image: &mut RgbaImage, biome: Biome, x: usize, y: usize, scale: u32) {
+    if matches!(biome, Biome::Desert | Biome::PolarDesert) {
+        draw_dunes(image, x as u32, y as u32, scale);
+    } else if matches!(
+        biome,
+        Biome::TemperateForest | Biome::BorealForest | Biome::Rainforest | Biome::TropicalForest
+    ) {
+        draw_forest(image, x as u32, y as u32, scale);
+    }
+}
+
+fn draw_coast_feature(image: &mut RgbaImage, world: &World, idx: usize, scale: u32) {
+    if world.tiles[idx].biome == Biome::Coast {
+        draw_coastline(image, world, idx, scale);
+    }
 }
