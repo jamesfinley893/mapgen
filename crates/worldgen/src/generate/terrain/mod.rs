@@ -6,7 +6,7 @@ mod tectonics;
 
 use crate::World;
 
-use super::util::{latitude_factor, smoothstep};
+use super::util::{latitude_factor, octave_noise, ridge_noise, smoothstep};
 use continents::build_continental_config;
 use normalize::normalize_terrain;
 use tectonics::{generate_plates, sample_tectonic_elevation};
@@ -80,6 +80,12 @@ struct OrogenFields {
     basin_bias: Vec<f32>,
 }
 
+pub(crate) struct TerrainFields {
+    pub(crate) elevation: Vec<f32>,
+    pub(crate) slope: Vec<f32>,
+    pub(crate) relief: Vec<f32>,
+}
+
 struct NeighborStats {
     avg_neighbor: f32,
     count: f32,
@@ -87,14 +93,65 @@ struct NeighborStats {
     ocean_neighbors: f32,
 }
 
-pub(super) fn populate_raw_elevation(world: &mut World, base: &OpenSimplex, ridge: &OpenSimplex) {
+pub(super) fn generate_terrain_fields(
+    world: &World,
+    base: &OpenSimplex,
+    ridge: &OpenSimplex,
+) -> TerrainFields {
     let fields = sample_orogen_fields(world, base, ridge);
-    let mut terrain = fields.initial_terrain();
+    let mut elevation = fields.initial_terrain();
 
-    relax_terrain(world, &fields, &mut terrain);
-    normalize_terrain(&mut terrain, 0.02, 0.98);
-    write_terrain_to_world(world, terrain);
-    enforce_min_land_fraction(world);
+    relax_terrain(world, &fields, &mut elevation);
+    apply_mountain_crag_detail(world, ridge, &fields, &mut elevation);
+    normalize_terrain(&mut elevation, 0.02, 0.98);
+
+    let mut terrain = TerrainFields::from_elevation(elevation);
+    refresh_derived_fields(world, &mut terrain);
+    terrain
+}
+
+pub(super) fn apply_terrain_mutators(_world: &World, _terrain: &mut TerrainFields) {
+    // Extension point for future landscape mutators such as erosion. Mutators should
+    // edit terrain fields before ocean/surface/climate/biome classification runs.
+}
+
+pub(super) fn refresh_derived_fields(world: &World, terrain: &mut TerrainFields) {
+    for idx in 0..world.tile_count() {
+        let current = terrain.elevation[idx];
+        let mut min_elev = current;
+        let mut max_elev = current;
+        let mut max_delta = 0.0_f32;
+
+        for nidx in world.neighbor_indices8(idx) {
+            let neighbor = terrain.elevation[nidx];
+            min_elev = min_elev.min(neighbor);
+            max_elev = max_elev.max(neighbor);
+            max_delta = max_delta.max((current - neighbor).abs());
+        }
+
+        terrain.slope[idx] = max_delta.clamp(0.0, 1.0);
+        terrain.relief[idx] = (max_elev - min_elev).clamp(0.0, 1.0);
+    }
+}
+
+pub(super) fn finalize_sea_level(world: &mut World, terrain: &TerrainFields) {
+    const MIN_LAND_FRAC: f32 = 0.25;
+    let mut elevs = terrain.elevation.clone();
+    elevs.sort_by(|a, b| a.total_cmp(b));
+    let threshold_idx =
+        ((elevs.len() as f32 * (1.0 - MIN_LAND_FRAC)) as usize).min(elevs.len().saturating_sub(1));
+    world.sea_level = world.sea_level.min(elevs[threshold_idx]);
+}
+
+impl TerrainFields {
+    fn from_elevation(elevation: Vec<f32>) -> Self {
+        let tile_count = elevation.len();
+        Self {
+            elevation,
+            slope: vec![0.0; tile_count],
+            relief: vec![0.0; tile_count],
+        }
+    }
 }
 
 impl OrogenFields {
@@ -127,7 +184,7 @@ impl OrogenFields {
             .iter()
             .zip(self.foreland_loading.iter())
             .zip(self.backarc_loading.iter())
-            .map(|((base, foreland), backarc)| (base - foreland * 0.16 - backarc * 0.09).max(0.0))
+            .map(|((base, foreland), backarc)| (base - foreland * 0.18 - backarc * 0.11).max(0.0))
             .collect()
     }
 }
@@ -153,7 +210,7 @@ fn sample_orogen_fields(world: &World, base: &OpenSimplex, ridge: &OpenSimplex) 
 }
 
 fn relax_terrain(world: &World, fields: &OrogenFields, terrain: &mut Vec<f32>) {
-    let uplift_per_step = 0.145 / TERRAIN_RELAX_STEPS as f32;
+    let uplift_per_step = 0.136 / TERRAIN_RELAX_STEPS as f32;
 
     for step in 0..TERRAIN_RELAX_STEPS {
         let progress = (step + 1) as f32 / TERRAIN_RELAX_STEPS as f32;
@@ -165,6 +222,42 @@ fn relax_terrain(world: &World, fields: &OrogenFields, terrain: &mut Vec<f32>) {
         }
 
         *terrain = next;
+    }
+}
+
+fn apply_mountain_crag_detail(
+    world: &World,
+    ridge: &OpenSimplex,
+    fields: &OrogenFields,
+    terrain: &mut [f32],
+) {
+    let ws = world.effective_world_size();
+    for y in 0..world.height {
+        for x in 0..world.width {
+            let idx = world.idx(x, y);
+            let current = terrain[idx];
+            if current <= world.sea_level {
+                continue;
+            }
+
+            let uplift = smoothstep(
+                0.10,
+                0.58,
+                fields.axial_uplift[idx] + fields.shoulder_uplift[idx] * 0.65,
+            );
+            let highland = smoothstep(0.58, 0.86, current);
+            let crag_mask = highland * (0.35 + uplift * 0.65);
+            if crag_mask <= 0.0 {
+                continue;
+            }
+
+            let xf = x as f64 / ws as f64;
+            let yf = y as f64 / ws as f64;
+            let ribs = ridge_noise(ridge, xf * 18.0 + 7.0, yf * 18.0 - 11.0, 3);
+            let fracture = octave_noise(ridge, xf * 31.0 - 19.0, yf * 31.0 + 23.0, 2, 0.52, 2.1);
+            let detail = (ribs - 0.40) * 0.055 + (fracture - 0.5) * 0.026;
+            terrain[idx] = (current + detail * crag_mask).max(0.0);
+        }
     }
 }
 
@@ -241,26 +334,26 @@ fn relaxed_tile_elevation(
     let ridge_crest = highland * (1.0 - smoothstep(0.012, 0.075, stats.max_neighbor_drop));
     let coastal = stats.ocean_neighbors / stats.count.max(1.0);
     let diffusion = (stats.avg_neighbor - current)
-        * (0.019 * (1.0 - ridge_crest * 0.65)
+        * (0.019 * (1.0 - ridge_crest * 0.78)
             + stats.max_neighbor_drop * 0.034
-            + interior_high * 0.046 * (1.0 - ridge_crest * 0.55)
+            + interior_high * 0.046 * (1.0 - ridge_crest * 0.72)
             + shoulder_zone * 0.022
             + plain_zone * 0.03
             + basin_zone * 0.028
             + coastal * 0.025
-            + alpine * 0.016 * (1.0 - uplift_core * 0.35)
+            + alpine * 0.012 * (1.0 - uplift_core * 0.45)
             + glacial_band * 0.02);
     let slope_failure = stats.max_neighbor_drop
         * (0.011
             + interior_high * 0.03
             + shoulder_zone * 0.012
-            + alpine * 0.015 * (1.0 - uplift_core * 0.18)
+            + alpine * 0.011 * (1.0 - uplift_core * 0.24)
             + glacial_band * 0.012);
     let ridge_decay = relief
         * (0.013
             + interior_high * 0.044
             + shoulder_zone * 0.022
-            + alpine * 0.016 * (1.0 - uplift_core * 0.3))
+            + alpine * 0.011 * (1.0 - uplift_core * 0.38))
         * (1.0 - fields.axial_uplift[idx] * 0.22).max(0.48);
     let alpine_relax = interior_high * 0.018
         + shoulder_zone * 0.008
@@ -325,19 +418,4 @@ fn terrain_neighbor_stats(
         max_neighbor_drop,
         ocean_neighbors,
     }
-}
-
-fn write_terrain_to_world(world: &mut World, terrain: Vec<f32>) {
-    for (tile, value) in world.tiles.iter_mut().zip(terrain.into_iter()) {
-        tile.raw_elevation = value;
-    }
-}
-
-fn enforce_min_land_fraction(world: &mut World) {
-    const MIN_LAND_FRAC: f32 = 0.25;
-    let mut elevs: Vec<f32> = world.tiles.iter().map(|t| t.raw_elevation).collect();
-    elevs.sort_by(|a, b| a.total_cmp(b));
-    let threshold_idx =
-        ((elevs.len() as f32 * (1.0 - MIN_LAND_FRAC)) as usize).min(elevs.len().saturating_sub(1));
-    world.sea_level = world.sea_level.min(elevs[threshold_idx]);
 }

@@ -1,8 +1,8 @@
 use std::sync::OnceLock;
 
 use worldgen::{
-    Biome, RenderConfig, Surface, Tile, World, WorldConfig, build_metadata, generate_world,
-    render_world,
+    Biome, MountainFeature, RenderConfig, Surface, Tile, World, WorldConfig, build_metadata,
+    generate_world, mountain_feature_for_tile, render_world,
 };
 
 fn config() -> WorldConfig {
@@ -166,8 +166,70 @@ fn metadata_counts_land_and_ocean_only() {
         world.tiles.len()
     );
     assert!(metadata.highest_elevation >= world.sea_level);
+    assert!((0.0..=1.0).contains(&metadata.mean_land_slope));
+    assert!((0.0..=1.0).contains(&metadata.mean_land_relief));
+    assert!((0.0..=1.0).contains(&metadata.mean_land_continentality));
     assert!((0.0..=1.0).contains(&metadata.alpine_fraction));
     assert!((0.0..=1.0).contains(&metadata.foothill_fraction));
+}
+
+#[test]
+fn exported_tiles_include_bounded_geology_context() {
+    let world = generate_world(&config()).unwrap();
+
+    for (idx, tile) in world.tiles.iter().enumerate() {
+        assert!(tile.slope.is_finite(), "tile {idx} slope is not finite");
+        assert!(tile.relief.is_finite(), "tile {idx} relief is not finite");
+        assert!(
+            (0.0..=1.0).contains(&tile.slope),
+            "tile {idx} slope out of range: {}",
+            tile.slope
+        );
+        assert!(
+            (0.0..=1.0).contains(&tile.relief),
+            "tile {idx} relief out of range: {}",
+            tile.relief
+        );
+        assert!(
+            (0.0..=1.0).contains(&tile.continentality),
+            "tile {idx} continentality out of range: {}",
+            tile.continentality
+        );
+        if tile.surface == Surface::Ocean {
+            assert_eq!(tile.ocean_distance, 0);
+        } else {
+            assert!(tile.ocean_distance > 0);
+        }
+        assert_eq!(
+            tile.mountain_feature,
+            mountain_feature_for_tile(&world, idx)
+        );
+    }
+}
+
+#[test]
+fn exported_mountain_features_track_mountain_biomes() {
+    let world = fixed_world(42);
+    let mut mountains = 0_usize;
+
+    for tile in &world.tiles {
+        match tile.biome {
+            Biome::Foothills => {
+                mountains += 1;
+                assert_eq!(tile.mountain_feature, MountainFeature::Foothill);
+            }
+            Biome::Alpine => {
+                mountains += 1;
+                assert!(matches!(
+                    tile.mountain_feature,
+                    MountainFeature::AlpineSlope | MountainFeature::Ridge | MountainFeature::Summit
+                ));
+            }
+            _ => assert_eq!(tile.mountain_feature, MountainFeature::None),
+        }
+    }
+
+    assert!(mountains > 0);
 }
 
 #[test]

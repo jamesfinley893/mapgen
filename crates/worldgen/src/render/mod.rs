@@ -3,14 +3,12 @@ use coast::draw_coastline;
 use colors::{apply_snow_overlay, land_base_colors, soften_biome_edges};
 use image::{Rgba, RgbaImage};
 use shading::{compute_hillshade, draw_tile, draw_tile_hillshaded, lerp_rgba, offset};
-use symbols::{draw_dunes, draw_forest, draw_hills, draw_peak, draw_ridge};
 
 mod coast;
 mod colors;
 mod shading;
-mod symbols;
 
-use crate::{Biome, MountainFeature, World, mountain_feature_for_tile};
+use crate::{Biome, World};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RenderConfig {
@@ -102,40 +100,9 @@ fn draw_ocean_tile(
 
 fn draw_land_features(image: &mut RgbaImage, world: &World, scale: u32) {
     for (idx, tile) in world.tiles.iter().enumerate() {
-        let (x, y) = world.coords(idx);
         if tile.biome != Biome::Ocean {
-            draw_mountain_feature(image, world, idx, x, y, scale);
-            draw_biome_symbol(image, tile.biome, x, y, scale);
             draw_coast_feature(image, world, idx, scale);
         }
-    }
-}
-
-fn draw_mountain_feature(
-    image: &mut RgbaImage,
-    world: &World,
-    idx: usize,
-    x: usize,
-    y: usize,
-    scale: u32,
-) {
-    match mountain_feature_for_tile(world, idx) {
-        MountainFeature::Summit => draw_peak(image, x as u32, y as u32, scale),
-        MountainFeature::Ridge => draw_ridge(image, world, idx, scale),
-        MountainFeature::AlpineSlope => {}
-        MountainFeature::Foothill => draw_hills(image, x as u32, y as u32, scale),
-        MountainFeature::None => {}
-    }
-}
-
-fn draw_biome_symbol(image: &mut RgbaImage, biome: Biome, x: usize, y: usize, scale: u32) {
-    if matches!(biome, Biome::Desert | Biome::PolarDesert) {
-        draw_dunes(image, x as u32, y as u32, scale);
-    } else if matches!(
-        biome,
-        Biome::TemperateForest | Biome::BorealForest | Biome::Rainforest | Biome::TropicalForest
-    ) {
-        draw_forest(image, x as u32, y as u32, scale);
     }
 }
 

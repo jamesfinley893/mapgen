@@ -1,5 +1,8 @@
 use crate::{Biome, Surface, World};
 
+use super::climate::ClimateFields;
+use super::terrain::TerrainFields;
+
 #[derive(Clone, Copy)]
 struct BiomeContext {
     surface: Surface,
@@ -12,40 +15,57 @@ struct BiomeContext {
     relief: f32,
 }
 
-pub(super) fn assign_biomes(world: &mut World) {
-    let biomes = (0..world.tiles.len())
-        .map(|idx| biome_for_world_tile(world, idx))
-        .collect::<Vec<_>>();
-
-    for (tile, biome) in world.tiles.iter_mut().zip(biomes.into_iter()) {
-        tile.biome = biome;
-    }
+#[derive(Clone, Copy)]
+struct NeighborSupportSpec {
+    radius: isize,
+    full_threshold: f32,
+    partial_threshold: f32,
+    partial_weight: f32,
 }
 
-fn biome_for_world_tile(world: &World, idx: usize) -> Biome {
-    let tile = &world.tiles[idx];
+pub(super) fn assign_biomes(
+    world: &World,
+    terrain: &TerrainFields,
+    climate: &ClimateFields,
+    surfaces: &[Surface],
+) -> Vec<Biome> {
+    (0..world.tile_count())
+        .map(|idx| biome_for_world_tile(world, terrain, climate, surfaces, idx))
+        .collect()
+}
+
+fn biome_for_world_tile(
+    world: &World,
+    terrain: &TerrainFields,
+    climate: &ClimateFields,
+    surfaces: &[Surface],
+    idx: usize,
+) -> Biome {
     biome_for_tile_with_support(BiomeContext {
-        surface: tile.surface,
-        elevation: tile.raw_elevation,
+        surface: surfaces[idx],
+        elevation: terrain.elevation[idx],
         sea_level: world.sea_level,
-        temperature: tile.temperature,
-        moisture: tile.moisture,
-        support: mountain_support(world, idx),
-        proximity: mountain_proximity(world, idx),
-        relief: local_relief(world, idx),
+        temperature: climate.temperature[idx],
+        moisture: climate.moisture[idx],
+        support: mountain_support(world, terrain, idx),
+        proximity: mountain_proximity(world, terrain, idx),
+        relief: terrain.relief[idx],
     })
 }
 
-fn mountain_support(world: &World, idx: usize) -> f32 {
+fn mountain_support(world: &World, terrain: &TerrainFields, idx: usize) -> f32 {
     let high_threshold = world.sea_level + 0.24;
     let alpine_threshold = world.sea_level + 0.34;
     weighted_neighbor_support(
         world,
+        terrain,
         idx,
-        2,
-        alpine_threshold,
-        high_threshold,
-        0.55,
+        NeighborSupportSpec {
+            radius: 2,
+            full_threshold: alpine_threshold,
+            partial_threshold: high_threshold,
+            partial_weight: 0.55,
+        },
         |dx, dy| {
             let dist = dx.abs().max(dy.abs()) as f32;
             if dist <= 1.0 { 1.0 } else { 0.45 }
@@ -53,16 +73,19 @@ fn mountain_support(world: &World, idx: usize) -> f32 {
     )
 }
 
-fn mountain_proximity(world: &World, idx: usize) -> f32 {
+fn mountain_proximity(world: &World, terrain: &TerrainFields, idx: usize) -> f32 {
     let alpine_threshold = world.sea_level + 0.38;
     let ridge_threshold = world.sea_level + 0.32;
     weighted_neighbor_support(
         world,
+        terrain,
         idx,
-        4,
-        alpine_threshold,
-        ridge_threshold,
-        0.45,
+        NeighborSupportSpec {
+            radius: 4,
+            full_threshold: alpine_threshold,
+            partial_threshold: ridge_threshold,
+            partial_weight: 0.45,
+        },
         |dx, dy| {
             let dist = ((dx * dx + dy * dy) as f32).sqrt();
             (1.0 / (1.0 + dist)).clamp(0.12, 0.7)
@@ -72,19 +95,17 @@ fn mountain_proximity(world: &World, idx: usize) -> f32 {
 
 fn weighted_neighbor_support(
     world: &World,
+    terrain: &TerrainFields,
     idx: usize,
-    radius: isize,
-    full_threshold: f32,
-    partial_threshold: f32,
-    partial_weight: f32,
+    spec: NeighborSupportSpec,
     weight_for: impl Fn(isize, isize) -> f32,
 ) -> f32 {
     let (x, y) = world.coords(idx);
     let mut support = 0.0_f32;
     let mut total = 0.0_f32;
 
-    for dy in -radius..=radius {
-        for dx in -radius..=radius {
+    for dy in -spec.radius..=spec.radius {
+        for dx in -spec.radius..=spec.radius {
             if dx == 0 && dy == 0 {
                 continue;
             }
@@ -95,12 +116,12 @@ fn weighted_neighbor_support(
             }
             let nidx = world.idx(nx as usize, ny as usize);
             let weight = weight_for(dx, dy);
-            let elev = world.tiles[nidx].raw_elevation;
+            let elev = terrain.elevation[nidx];
             total += weight;
-            if elev > full_threshold {
+            if elev > spec.full_threshold {
                 support += weight;
-            } else if elev > partial_threshold {
-                support += weight * partial_weight;
+            } else if elev > spec.partial_threshold {
+                support += weight * spec.partial_weight;
             }
         }
     }
@@ -110,19 +131,6 @@ fn weighted_neighbor_support(
     } else {
         (support / total).clamp(0.0, 1.0)
     }
-}
-
-fn local_relief(world: &World, idx: usize) -> f32 {
-    let (x, y) = world.coords(idx);
-    let current = world.tiles[idx].raw_elevation;
-    let mut max_drop = 0.0_f32;
-    let mut max_rise = 0.0_f32;
-    for (nx, ny) in world.neighbors8(x, y) {
-        let elev = world.tiles[world.idx(nx, ny)].raw_elevation;
-        max_drop = max_drop.max((current - elev).max(0.0));
-        max_rise = max_rise.max((elev - current).max(0.0));
-    }
-    (max_drop + max_rise * 0.5).clamp(0.0, 1.0)
 }
 
 pub fn biome_for_tile(
@@ -153,13 +161,16 @@ fn biome_for_tile_with_support(ctx: BiomeContext) -> Biome {
 }
 
 fn land_biome_with_support(ctx: BiomeContext) -> Biome {
-    if ctx.elevation > ctx.sea_level + 0.38 && ctx.support > 0.5 {
+    if ctx.elevation > ctx.sea_level + 0.36
+        && ctx.support > 0.46
+        && (ctx.relief > 0.022 || ctx.elevation > ctx.sea_level + 0.42)
+    {
         return Biome::Alpine;
     }
-    if ctx.elevation > ctx.sea_level + 0.31
-        && ctx.support > 0.24
-        && ctx.proximity > 0.2
-        && ctx.relief > 0.04
+    if ctx.elevation > ctx.sea_level + 0.27
+        && ctx.support > 0.18
+        && ctx.proximity > 0.16
+        && ctx.relief > 0.020
     {
         return Biome::Foothills;
     }

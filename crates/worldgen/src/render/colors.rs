@@ -34,9 +34,18 @@ fn tile_land_color(
         let height_above_sea = (tile.raw_elevation - world.sea_level).max(0.0);
         if matches!(biome, Biome::Alpine) {
             let alpine_t = ((height_above_sea - 0.36) / 0.08).clamp(0.0, 1.0);
+            let rugged = smoothstep(0.020, 0.080, tile.relief + tile.slope * 0.75);
             color = lerp_rgba(
-                Rgba([132, 124, 108, 255]),
-                Rgba([152, 150, 144, 255]),
+                lerp_rgba(
+                    Rgba([110, 104, 94, 255]),
+                    Rgba([142, 134, 122, 255]),
+                    rugged,
+                ),
+                lerp_rgba(
+                    Rgba([146, 144, 138, 255]),
+                    Rgba([184, 184, 178, 255]),
+                    rugged,
+                ),
                 alpine_t,
             );
         } else {

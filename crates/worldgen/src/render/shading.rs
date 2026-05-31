@@ -14,50 +14,6 @@ pub(super) fn draw_tile(image: &mut RgbaImage, x: u32, y: u32, scale: u32, color
     }
 }
 
-pub(super) fn tile_center_px(x: usize, y: usize, scale: u32) -> (i32, i32) {
-    (
-        (x as u32 * scale + scale / 2) as i32,
-        (y as u32 * scale + scale / 2) as i32,
-    )
-}
-
-pub(super) fn draw_thick_line(
-    image: &mut RgbaImage,
-    start: (i32, i32),
-    end: (i32, i32),
-    radius: i32,
-    color: Rgba<u8>,
-) {
-    let dx = end.0 - start.0;
-    let dy = end.1 - start.1;
-    let steps = dx.abs().max(dy.abs()).max(1);
-
-    for step in 0..=steps {
-        let t = step as f32 / steps as f32;
-        let x = (start.0 as f32 + dx as f32 * t).round() as i32;
-        let y = (start.1 as f32 + dy as f32 * t).round() as i32;
-        draw_disc(image, (x, y), radius, color);
-    }
-}
-
-pub(super) fn draw_disc(image: &mut RgbaImage, center: (i32, i32), radius: i32, color: Rgba<u8>) {
-    let radius = radius.max(0);
-    let radius_sq = radius * radius;
-    for dy in -radius..=radius {
-        for dx in -radius..=radius {
-            if dx * dx + dy * dy <= radius_sq {
-                put_pixel_checked(image, center.0 + dx, center.1 + dy, color);
-            }
-        }
-    }
-}
-
-pub(super) fn put_pixel_checked(image: &mut RgbaImage, x: i32, y: i32, color: Rgba<u8>) {
-    if x >= 0 && y >= 0 && (x as u32) < image.width() && (y as u32) < image.height() {
-        image.put_pixel(x as u32, y as u32, color);
-    }
-}
-
 pub(super) fn offset(color: Rgba<u8>, delta: i16) -> Rgba<u8> {
     let mut out = [0_u8; 4];
     for (i, channel) in color.0.iter().enumerate() {
@@ -109,7 +65,12 @@ pub(super) fn draw_tile_hillshaded(
                 + h10 * fx * (1.0 - fy)
                 + h01 * (1.0 - fx) * fy
                 + h11 * fx * fy;
-            let color = scale_rgb(base_color, 0.30 + shade * 0.74);
+            let shade_factor = match center_biome {
+                Biome::Alpine => 0.22 + shade * 0.96,
+                Biome::Foothills => 0.26 + shade * 0.86,
+                _ => 0.30 + shade * 0.74,
+            };
+            let color = scale_rgb(base_color, shade_factor);
             // Aspect tinting: lit faces warm (+R, -B), shadowed faces cool (-R, +B).
             let tint = ((shade - 0.5) * 16.0) as i16;
             let mut color = Rgba([
@@ -136,7 +97,8 @@ pub(super) fn draw_tile_hillshaded(
                     Biome::Ocean => 0.0,
                     _ => 0.92,
                 };
-                let detail = (grain * (4.0 + relief * 4.2) * biome_strength) as i16;
+                let rugged = (center_tile.relief + center_tile.slope * 0.75).clamp(0.0, 1.0);
+                let detail = (grain * (4.0 + relief * 4.2 + rugged * 18.0) * biome_strength) as i16;
                 color = offset(color, detail);
             }
             image.put_pixel(ox + px, oy + py, color);
@@ -167,7 +129,11 @@ pub(super) fn compute_hillshade(world: &World, x: usize, y: usize) -> f32 {
     // Adaptive z_scale: mountains get dramatic relief, plains stay gentle.
     let elev = get_elev(xi, yi);
     let height_above_sea = (elev - world.sea_level).max(0.0);
-    let z_scale = 5.0 + height_above_sea * 20.0;
+    let z_scale = match center_biome {
+        Biome::Alpine => 11.0 + height_above_sea * 34.0,
+        Biome::Foothills => 8.0 + height_above_sea * 28.0,
+        _ => 5.0 + height_above_sea * 20.0,
+    };
     let nx = -dz_dx * z_scale;
     let ny = 1.0_f32;
     let nz = -dz_dy * z_scale;

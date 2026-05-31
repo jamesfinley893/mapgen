@@ -17,6 +17,9 @@ pub struct WorldMetadata {
     pub land_tiles: usize,
     pub ocean_tiles: usize,
     pub highest_elevation: f32,
+    pub mean_land_slope: f32,
+    pub mean_land_relief: f32,
+    pub mean_land_continentality: f32,
     pub alpine_fraction: f32,
     pub foothill_fraction: f32,
     pub largest_contiguous_alpine_region: usize,
@@ -28,6 +31,9 @@ struct TileSummary {
     land_tiles: usize,
     ocean_tiles: usize,
     highest_elevation: f32,
+    land_slope_sum: f32,
+    land_relief_sum: f32,
+    land_continentality_sum: f32,
     alpine_tiles: usize,
     foothill_tiles: usize,
     biome_counts: Vec<(Biome, usize)>,
@@ -50,6 +56,10 @@ pub fn build_metadata(world: &World, config: &WorldConfig) -> WorldMetadata {
         land_tiles: tile_summary.land_tiles,
         ocean_tiles: tile_summary.ocean_tiles,
         highest_elevation: tile_summary.highest_elevation,
+        mean_land_slope: tile_summary.land_slope_sum / tile_summary.land_tiles.max(1) as f32,
+        mean_land_relief: tile_summary.land_relief_sum / tile_summary.land_tiles.max(1) as f32,
+        mean_land_continentality: tile_summary.land_continentality_sum
+            / tile_summary.land_tiles.max(1) as f32,
         alpine_fraction: tile_summary.alpine_tiles as f32 / tile_summary.land_tiles.max(1) as f32,
         foothill_fraction: tile_summary.foothill_tiles as f32
             / tile_summary.land_tiles.max(1) as f32,
@@ -63,6 +73,9 @@ fn collect_tile_summary(world: &World) -> TileSummary {
     let mut land_tiles = 0;
     let mut ocean_tiles = 0;
     let mut highest_elevation = f32::MIN;
+    let mut land_slope_sum = 0.0_f32;
+    let mut land_relief_sum = 0.0_f32;
+    let mut land_continentality_sum = 0.0_f32;
     let mut alpine_tiles = 0_usize;
     let mut foothill_tiles = 0_usize;
     let mut counts = std::collections::BTreeMap::<String, (Biome, usize)>::new();
@@ -73,6 +86,9 @@ fn collect_tile_summary(world: &World) -> TileSummary {
             ocean_tiles += 1;
         } else {
             land_tiles += 1;
+            land_slope_sum += tile.slope;
+            land_relief_sum += tile.relief;
+            land_continentality_sum += tile.continentality;
         }
         if tile.biome == Biome::Alpine {
             alpine_tiles += 1;
@@ -92,6 +108,9 @@ fn collect_tile_summary(world: &World) -> TileSummary {
         land_tiles,
         ocean_tiles,
         highest_elevation,
+        land_slope_sum,
+        land_relief_sum,
+        land_continentality_sum,
         alpine_tiles,
         foothill_tiles,
         biome_counts,

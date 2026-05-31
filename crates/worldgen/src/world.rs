@@ -26,26 +26,46 @@ pub enum Biome {
     Alpine,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MountainFeature {
+    #[default]
+    None,
+    Foothill,
+    AlpineSlope,
+    Ridge,
+    Summit,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Tile {
     pub raw_elevation: f32,
+    pub slope: f32,
+    pub relief: f32,
     pub temperature: f32,
     pub moisture: f32,
     pub precipitation: f32,
+    pub continentality: f32,
+    pub ocean_distance: u16,
     pub surface: Surface,
     pub biome: Biome,
+    pub mountain_feature: MountainFeature,
 }
 
 impl Default for Tile {
     fn default() -> Self {
         Self {
             raw_elevation: 0.0,
+            slope: 0.0,
+            relief: 0.0,
             temperature: 0.0,
             moisture: 0.0,
             precipitation: 0.0,
+            continentality: 0.0,
+            ocean_distance: u16::MAX,
             surface: Surface::Ocean,
             biome: Biome::Ocean,
+            mountain_feature: MountainFeature::None,
         }
     }
 }
@@ -81,6 +101,10 @@ impl World {
         }
     }
 
+    pub fn tile_count(&self) -> usize {
+        self.tiles.len()
+    }
+
     pub fn idx(&self, x: usize, y: usize) -> usize {
         y * self.width + x
     }
@@ -109,5 +133,10 @@ impl World {
             let ny = y as isize + dy;
             self.in_bounds(nx, ny).then_some((nx as usize, ny as usize))
         })
+    }
+
+    pub fn neighbor_indices8(&self, idx: usize) -> impl Iterator<Item = usize> + '_ {
+        let (x, y) = self.coords(idx);
+        self.neighbors8(x, y).map(|(nx, ny)| self.idx(nx, ny))
     }
 }

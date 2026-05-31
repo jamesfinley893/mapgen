@@ -1,21 +1,19 @@
-use serde::{Deserialize, Serialize};
-
-use crate::{Biome, World};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MountainFeature {
-    None,
-    Foothill,
-    AlpineSlope,
-    Ridge,
-    Summit,
-}
+use crate::{Biome, MountainFeature, World};
 
 pub fn mountain_feature_for_tile(world: &World, idx: usize) -> MountainFeature {
     let tile = &world.tiles[idx];
     match tile.biome {
         Biome::Foothills => MountainFeature::Foothill,
-        Biome::Alpine => classify_alpine_feature(world, idx),
+        Biome::Alpine => {
+            if matches!(
+                tile.mountain_feature,
+                MountainFeature::AlpineSlope | MountainFeature::Ridge | MountainFeature::Summit
+            ) {
+                tile.mountain_feature
+            } else {
+                classify_alpine_feature(world, idx)
+            }
+        }
         _ => MountainFeature::None,
     }
 }
@@ -64,6 +62,7 @@ fn classify_alpine_feature(world: &World, idx: usize) -> MountainFeature {
     let (x, y) = world.coords(idx);
     let elevation = tile.raw_elevation;
     let height_above_sea = elevation - world.sea_level;
+    let ruggedness = (tile.relief + tile.slope * 0.65).clamp(0.0, 1.0);
     let mut higher_neighbors = 0_u8;
     let mut lower_neighbors = 0_u8;
     let mut alpine_neighbors = 0_u8;
@@ -86,11 +85,14 @@ fn classify_alpine_feature(world: &World, idx: usize) -> MountainFeature {
     }
 
     let relief = max_elev - min_elev;
-    if height_above_sea >= 0.38 && higher_neighbors == 0 && lower_neighbors >= 5 {
+    if height_above_sea >= 0.38
+        && higher_neighbors <= 1
+        && (lower_neighbors >= 4 || ruggedness >= 0.045)
+    {
         MountainFeature::Summit
     } else if height_above_sea >= 0.34
         && alpine_neighbors >= 2
-        && relief >= 0.03
+        && (relief >= 0.022 || ruggedness >= 0.030)
         && higher_neighbors <= 3
     {
         MountainFeature::Ridge

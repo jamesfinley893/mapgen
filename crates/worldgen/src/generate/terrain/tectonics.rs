@@ -88,16 +88,16 @@ pub(super) fn sample_tectonic_elevation(
     let boundary_mid = smoothstep(0.22, 0.82, tectonics);
     let boundary_narrow = smoothstep(0.48, 0.94, tectonics);
     let axial_uplift =
-        (boundary_narrow * segmentation * transfer_gap * (0.55 + ridge_detail * 0.35) * land_mask)
+        (boundary_narrow * segmentation * transfer_gap * (0.50 + ridge_detail * 0.32) * land_mask)
             .clamp(0.0, 1.0);
-    let shoulder_uplift = ((boundary_mid - boundary_narrow * 0.55).max(0.0)
-        * (0.30 + segment_noise * 0.20)
+    let shoulder_uplift = ((boundary_mid - boundary_narrow * 0.45).max(0.0)
+        * (0.34 + segment_noise * 0.24)
         * land_mask)
         .clamp(0.0, 1.0);
     let plateau_support = (boundary_mid
         * smoothstep(0.56, 0.86, plateau_noise)
         * smoothstep(0.48, 0.86, ridge_detail)
-        * (0.15 + axial_uplift * 0.28)
+        * (0.11 + axial_uplift * 0.20)
         * land_mask)
         .clamp(0.0, 1.0);
     let foreland_loading = ((boundary_wide - boundary_mid * 0.55).max(0.0)
