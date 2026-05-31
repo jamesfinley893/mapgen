@@ -6,6 +6,7 @@ mod tectonics;
 use crate::{Surface, World};
 
 use super::climate::ClimateFields;
+use super::hydrology::{self, HydrologyFields};
 use super::util::{latitude_factor, octave_noise, ridge_noise, smoothstep};
 use continents::build_continental_config;
 use tectonics::{generate_plates, sample_tectonic_elevation};
@@ -119,15 +120,87 @@ pub(super) fn generate_terrain_fields(
 }
 
 pub(super) fn apply_terrain_mutators(
-    _world: &World,
+    world: &World,
     context: &TerrainMutationContext<'_>,
-    _terrain: &mut TerrainFields,
+    terrain: &mut TerrainFields,
 ) -> bool {
-    let _ = context.tile_count();
-    // Extension point for future landscape mutators such as erosion. Mutators run
-    // after preliminary ocean/climate context exists; returning true asks the
-    // caller to refresh derived terrain fields and reclassify downstream context.
-    false
+    if context.tile_count() != world.tile_count() {
+        return false;
+    }
+
+    let hydrology = hydrology::generate_hydrology_fields(
+        world,
+        terrain,
+        context.climate,
+        context.ocean,
+        context.surfaces,
+    );
+    apply_fluvial_incision(world, context, terrain, &hydrology)
+}
+
+fn apply_fluvial_incision(
+    world: &World,
+    context: &TerrainMutationContext<'_>,
+    terrain: &mut TerrainFields,
+    hydrology: &HydrologyFields,
+) -> bool {
+    let mut delta = vec![0.0_f32; world.tile_count()];
+    let mut changed = false;
+
+    for idx in 0..world.tile_count() {
+        if context.ocean[idx] || hydrology.river[idx] <= 0.06 {
+            continue;
+        }
+
+        let current = terrain.elevation[idx];
+        let height_above_sea = (current - world.sea_level).max(0.0);
+        if height_above_sea <= 0.018 {
+            continue;
+        }
+
+        let river = hydrology.river[idx];
+        let channel = smoothstep(0.08, 0.78, river);
+        let elevated = smoothstep(0.035, 0.34, height_above_sea);
+        let wet = (context.climate.precipitation[idx] * 0.55
+            + context.climate.moisture[idx] * 0.45)
+            .clamp(0.0, 1.0);
+        let incision = channel * elevated * (0.0025 + wet * 0.0065 + river * 0.0050);
+        if incision <= 0.00008 {
+            continue;
+        }
+
+        delta[idx] -= incision;
+        let (x, y) = world.coords(idx);
+        for (nx, ny) in world.neighbors8(x, y) {
+            let nidx = world.idx(nx, ny);
+            if context.ocean[nidx] {
+                continue;
+            }
+            let dx = x.abs_diff(nx);
+            let dy = y.abs_diff(ny);
+            let flank_weight = if dx == 1 && dy == 1 { 0.10 } else { 0.18 };
+            let neighbor_height = (terrain.elevation[nidx] - world.sea_level).max(0.0);
+            let neighbor_emerged = smoothstep(0.025, 0.26, neighbor_height);
+            delta[nidx] -= incision * flank_weight * neighbor_emerged;
+        }
+    }
+
+    for (idx, change) in delta.into_iter().enumerate() {
+        if change >= -0.00001 {
+            continue;
+        }
+
+        let floor = if matches!(context.surfaces[idx], Surface::Coast) {
+            world.sea_level + 0.003
+        } else {
+            world.sea_level + 0.001
+        };
+        let next = (terrain.elevation[idx] + change).max(floor);
+        changed |= (terrain.elevation[idx] - next).abs() > 0.00005;
+        terrain.elevation[idx] = next;
+    }
+
+    changed
 }
 
 pub(super) fn refresh_derived_fields(world: &World, terrain: &mut TerrainFields) {
@@ -219,8 +292,9 @@ impl OrogenFields {
 }
 
 fn smooth_field(world: &World, values: &mut Vec<f32>, passes: usize, center_weight: f32) {
+    let mut next = vec![0.0_f32; values.len()];
+
     for _ in 0..passes {
-        let mut next = values.clone();
         for idx in 0..values.len() {
             let mut sum = values[idx] * center_weight;
             let mut weight = center_weight;
@@ -232,7 +306,7 @@ fn smooth_field(world: &World, values: &mut Vec<f32>, passes: usize, center_weig
 
             next[idx] = sum / weight;
         }
-        *values = next;
+        std::mem::swap(values, &mut next);
     }
 }
 
@@ -259,17 +333,17 @@ fn sample_orogen_fields(world: &World, base: &OpenSimplex, ridge: &OpenSimplex) 
 
 fn relax_terrain(world: &World, fields: &OrogenFields, terrain: &mut Vec<f32>) {
     let uplift_per_step = 0.54 / TERRAIN_RELAX_STEPS as f32;
+    let mut next = vec![0.0_f32; terrain.len()];
 
     for step in 0..TERRAIN_RELAX_STEPS {
         let progress = (step + 1) as f32 / TERRAIN_RELAX_STEPS as f32;
         apply_orogenic_uplift(fields, terrain, progress, uplift_per_step);
-        let mut next = terrain.clone();
 
         for (idx, value) in next.iter_mut().enumerate() {
             *value = relaxed_tile_elevation(world, fields, terrain, idx, progress);
         }
 
-        *terrain = next;
+        std::mem::swap(terrain, &mut next);
     }
 }
 
@@ -347,8 +421,10 @@ fn apply_landform_detail(
 }
 
 fn apply_talus_relaxation(world: &World, terrain: &mut [f32]) {
+    let mut delta = vec![0.0_f32; terrain.len()];
+
     for _ in 0..10 {
-        let mut delta = vec![0.0_f32; terrain.len()];
+        delta.fill(0.0);
 
         for idx in 0..terrain.len() {
             let current = terrain[idx];
@@ -386,7 +462,7 @@ fn apply_talus_relaxation(world: &World, terrain: &mut [f32]) {
             }
         }
 
-        for (elevation, change) in terrain.iter_mut().zip(delta.into_iter()) {
+        for (elevation, change) in terrain.iter_mut().zip(delta.iter().copied()) {
             if *elevation > world.sea_level {
                 *elevation = (*elevation + change).max(world.sea_level + 0.001);
             }
@@ -428,14 +504,15 @@ fn apply_tectonic_equilibrium(
     terrain: &mut Vec<f32>,
 ) {
     let ws = world.effective_world_size();
+    let mut next = vec![0.0_f32; terrain.len()];
 
     for step in 0..TECTONIC_EQUILIBRIUM_STEPS {
         let progress = (step + 1) as f32 / TECTONIC_EQUILIBRIUM_STEPS as f32;
-        let mut next = terrain.clone();
 
         for (idx, value) in next.iter_mut().enumerate() {
             let current = terrain[idx];
             if current <= world.sea_level {
+                *value = current;
                 continue;
             }
 
@@ -515,7 +592,7 @@ fn apply_tectonic_equilibrium(
                 .max(world.sea_level + 0.001);
         }
 
-        *terrain = next;
+        std::mem::swap(terrain, &mut next);
     }
 }
 

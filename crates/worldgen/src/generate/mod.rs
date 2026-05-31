@@ -1,5 +1,6 @@
 mod biomes;
 mod climate;
+mod hydrology;
 mod ocean;
 mod terrain;
 mod util;
@@ -10,7 +11,7 @@ use crate::features::mountain_feature_for_tile;
 use crate::{Biome, MountainFeature, Surface, World, WorldConfig};
 
 pub use biomes::biome_for_tile;
-pub(crate) use util::{hash01, smoothstep};
+pub(crate) use util::{hash01, smoothstep, value_noise};
 
 pub fn generate_world(config: &WorldConfig) -> Result<World, String> {
     config.validate()?;
@@ -28,7 +29,6 @@ pub fn generate_world(config: &WorldConfig) -> Result<World, String> {
     let climate_noise = OpenSimplex::new(config.seed.wrapping_add(2) as u32);
 
     let mut terrain_fields = terrain::generate_terrain_fields(&world, &base, &ridge);
-    terrain::refresh_derived_fields(&world, &mut terrain_fields);
     terrain::finalize_sea_level(&mut world, &terrain_fields);
 
     let mut ocean = ocean::classify_ocean(&world, &terrain_fields.elevation);
@@ -64,13 +64,28 @@ pub fn generate_world(config: &WorldConfig) -> Result<World, String> {
         );
     }
 
-    let biomes = biomes::assign_biomes(&world, &terrain_fields, &climate_fields, &surfaces);
+    let hydrology_fields = hydrology::generate_hydrology_fields(
+        &world,
+        &terrain_fields,
+        &climate_fields,
+        &ocean,
+        &surfaces,
+    );
+    let biomes = biomes::assign_biomes(
+        &world,
+        &terrain_fields,
+        &climate_fields,
+        &hydrology_fields,
+        &surfaces,
+        &climate_noise,
+    );
 
     commit_tiles(
         &mut world,
         &terrain_fields,
         &surfaces,
         &climate_fields,
+        &hydrology_fields,
         &biomes,
     );
 
@@ -82,6 +97,7 @@ fn commit_tiles(
     terrain: &terrain::TerrainFields,
     surfaces: &[Surface],
     climate: &climate::ClimateFields,
+    hydrology: &hydrology::HydrologyFields,
     biomes: &[Biome],
 ) {
     for idx in 0..world.tile_count() {
@@ -89,6 +105,10 @@ fn commit_tiles(
         tile.raw_elevation = terrain.elevation[idx];
         tile.slope = terrain.slope[idx];
         tile.relief = terrain.relief[idx];
+        tile.runoff = hydrology.runoff[idx];
+        tile.flow_accumulation = hydrology.flow_accumulation[idx];
+        tile.river = hydrology.river[idx];
+        tile.flow_direction = hydrology.flow_direction[idx];
         tile.temperature = climate.temperature[idx];
         tile.moisture = climate.moisture[idx];
         tile.precipitation = climate.precipitation[idx];

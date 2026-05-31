@@ -17,6 +17,25 @@ pub(crate) fn hash01(seed: u64, x: usize, y: usize) -> f32 {
     (z as f64 / u64::MAX as f64) as f32
 }
 
+pub(crate) fn value_noise(seed: u64, x: usize, y: usize, cell: usize) -> f32 {
+    let cell = cell.max(1);
+    let fx = x as f32 / cell as f32;
+    let fy = y as f32 / cell as f32;
+    let x0 = fx.floor() as usize;
+    let y0 = fy.floor() as usize;
+    let tx = fx - x0 as f32;
+    let ty = fy - y0 as f32;
+    let sx = tx * tx * (3.0 - 2.0 * tx);
+    let sy = ty * ty * (3.0 - 2.0 * ty);
+    let v00 = hash01(seed, x0, y0);
+    let v10 = hash01(seed, x0 + 1, y0);
+    let v01 = hash01(seed, x0, y0 + 1);
+    let v11 = hash01(seed, x0 + 1, y0 + 1);
+    let ix0 = v00 + (v10 - v00) * sx;
+    let ix1 = v01 + (v11 - v01) * sx;
+    ix0 + (ix1 - ix0) * sy
+}
+
 pub(super) fn octave_noise(
     noise: &OpenSimplex,
     x: f64,
