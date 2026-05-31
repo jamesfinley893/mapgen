@@ -9,7 +9,6 @@ struct BiomeContext {
     moisture: f32,
     support: f32,
     proximity: f32,
-    trunk_river: f32,
     relief: f32,
 }
 
@@ -25,44 +24,16 @@ pub(super) fn assign_biomes(world: &mut World) {
 
 fn biome_for_world_tile(world: &World, idx: usize) -> Biome {
     let tile = &world.tiles[idx];
-    let support = mountain_support(world, idx);
-    let proximity = mountain_proximity(world, idx);
-    let trunk_river = trunk_river_proximity(world, idx);
-    let local_relief = local_relief(world, idx);
-    // River tiles carry inflated climate moisture (they're water bodies), but their
-    // biome should describe the surrounding terrain — the river itself is the blue
-    // line drawn on top. Use neighbor land moisture so the tile blends with its
-    // context rather than forming a visibly distinct green channel.
-    let moisture = if tile.surface == Surface::River {
-        surrounding_land_moisture(world, idx).unwrap_or(tile.moisture)
-    } else {
-        tile.moisture
-    };
     biome_for_tile_with_support(BiomeContext {
         surface: tile.surface,
         elevation: tile.raw_elevation,
         sea_level: world.sea_level,
         temperature: tile.temperature,
-        moisture,
-        support,
-        proximity,
-        trunk_river,
-        relief: local_relief,
+        moisture: tile.moisture,
+        support: mountain_support(world, idx),
+        proximity: mountain_proximity(world, idx),
+        relief: local_relief(world, idx),
     })
-}
-
-fn surrounding_land_moisture(world: &World, idx: usize) -> Option<f32> {
-    let (x, y) = world.coords(idx);
-    let mut sum = 0.0f32;
-    let mut count = 0u32;
-    for (nx, ny) in world.neighbors8(x, y) {
-        let t = &world.tiles[world.idx(nx, ny)];
-        if matches!(t.surface, Surface::Land | Surface::Coast) {
-            sum += t.moisture;
-            count += 1;
-        }
-    }
-    (count > 0).then(|| sum / count as f32)
 }
 
 fn mountain_support(world: &World, idx: usize) -> f32 {
@@ -152,39 +123,6 @@ fn local_relief(world: &World, idx: usize) -> f32 {
     (max_drop + max_rise * 0.5).clamp(0.0, 1.0)
 }
 
-fn trunk_river_proximity(world: &World, idx: usize) -> f32 {
-    let (x, y) = world.coords(idx);
-    let mut influence = 0.0_f32;
-    let mut total = 0.0_f32;
-
-    for dy in -3..=3 {
-        for dx in -3..=3 {
-            if dx == 0 && dy == 0 {
-                continue;
-            }
-            let nx = x as isize + dx;
-            let ny = y as isize + dy;
-            if !world.in_bounds(nx, ny) {
-                continue;
-            }
-            let nidx = world.idx(nx as usize, ny as usize);
-            let dist = ((dx * dx + dy * dy) as f32).sqrt();
-            let weight = (1.0 / (1.0 + dist)).clamp(0.14, 0.75);
-            total += weight;
-            let neighbor = &world.tiles[nidx];
-            if neighbor.surface == Surface::River && neighbor.channel_order >= 3 {
-                influence += weight;
-            }
-        }
-    }
-
-    if total <= f32::EPSILON {
-        0.0
-    } else {
-        (influence / total).clamp(0.0, 1.0)
-    }
-}
-
 pub fn biome_for_tile(
     surface: Surface,
     elevation: f32,
@@ -200,7 +138,6 @@ pub fn biome_for_tile(
         moisture,
         support: 1.0,
         proximity: 1.0,
-        trunk_river: 0.0,
         relief: 0.08,
     })
 }
@@ -209,62 +146,18 @@ fn biome_for_tile_with_support(ctx: BiomeContext) -> Biome {
     match ctx.surface {
         Surface::Ocean => Biome::Ocean,
         Surface::Coast => Biome::Coast,
-        Surface::Lake => Biome::Lake,
-        Surface::River => {
-            if ctx.elevation > ctx.sea_level + 0.38
-                && ctx.support > 0.48
-                && (ctx.trunk_river < 0.22
-                    || (ctx.elevation > ctx.sea_level + 0.44
-                        && ctx.support > 0.64
-                        && ctx.proximity > 0.38))
-            {
-                Biome::Alpine
-            } else if ctx.elevation > ctx.sea_level + 0.30
-                && ctx.support > 0.22
-                && ctx.proximity > 0.18
-                && ctx.relief > 0.04
-                && (ctx.trunk_river < 0.18
-                    || (ctx.elevation > ctx.sea_level + 0.36
-                        && ctx.support > 0.52
-                        && ctx.proximity > 0.34))
-            {
-                Biome::Foothills
-            } else {
-                land_biome(ctx.temperature, ctx.moisture, ctx.elevation, ctx.sea_level)
-            }
-        }
         Surface::Land => land_biome_with_support(ctx),
     }
 }
 
-fn land_biome(temperature: f32, moisture: f32, elevation: f32, sea_level: f32) -> Biome {
-    land_biome_with_support(BiomeContext {
-        surface: Surface::Land,
-        temperature,
-        moisture,
-        elevation,
-        sea_level,
-        support: 1.0,
-        proximity: 1.0,
-        trunk_river: 0.0,
-        relief: 0.08,
-    })
-}
-
 fn land_biome_with_support(ctx: BiomeContext) -> Biome {
-    if ctx.elevation > ctx.sea_level + 0.38
-        && ctx.support > 0.5
-        && (ctx.trunk_river < 0.22
-            || (ctx.elevation > ctx.sea_level + 0.44 && ctx.support > 0.66 && ctx.proximity > 0.4))
-    {
+    if ctx.elevation > ctx.sea_level + 0.38 && ctx.support > 0.5 {
         return Biome::Alpine;
     }
     if ctx.elevation > ctx.sea_level + 0.31
         && ctx.support > 0.24
         && ctx.proximity > 0.2
         && ctx.relief > 0.04
-        && (ctx.trunk_river < 0.2
-            || (ctx.elevation > ctx.sea_level + 0.36 && ctx.support > 0.54 && ctx.proximity > 0.36))
     {
         return Biome::Foothills;
     }

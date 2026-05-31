@@ -6,25 +6,6 @@ use crate::{Surface, World, WorldConfig};
 
 use super::util::{hash01, latitude_factor, normalize, octave_noise, smoothstep};
 
-pub(super) fn populate_base_climate(
-    world: &mut World,
-    config: &WorldConfig,
-    ocean: &[bool],
-    distance_to_ocean: &[u16],
-    climate: &OpenSimplex,
-) {
-    let regional_continentality = compute_regional_continentality(world, ocean);
-    populate_climate_from_fields(
-        world,
-        config,
-        ocean,
-        distance_to_ocean,
-        climate,
-        None,
-        &regional_continentality,
-    );
-}
-
 pub(super) fn populate_climate(
     world: &mut World,
     config: &WorldConfig,
@@ -106,10 +87,7 @@ fn populate_climate_from_fields(
 fn compute_nearby_water(world: &World) -> Vec<f32> {
     let mut nearby = vec![0.0_f32; world.tiles.len()];
     for idx in 0..world.tiles.len() {
-        if matches!(
-            world.tiles[idx].surface,
-            Surface::Ocean | Surface::Lake | Surface::River
-        ) {
+        if world.tiles[idx].surface == Surface::Ocean {
             nearby[idx] = 1.0;
             let (x, y) = world.coords(idx);
             for (nx, ny) in world.neighbors8(x, y) {

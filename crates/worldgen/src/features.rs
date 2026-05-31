@@ -108,7 +108,6 @@ mod tests {
         let mut world = World::new(1, 1, 1, 0.50, 0);
         world.tiles[0] = Tile {
             raw_elevation: elevation,
-            hydro_elevation: elevation,
             temperature,
             surface: Surface::Land,
             biome,
@@ -134,7 +133,6 @@ mod tests {
             let idx = world.idx(x, y);
             world.tiles[idx] = Tile {
                 raw_elevation: neighbor_elevations[i],
-                hydro_elevation: neighbor_elevations[i],
                 temperature: 0.04,
                 surface: Surface::Land,
                 biome: Biome::Alpine,
@@ -145,7 +143,6 @@ mod tests {
         let center = world.idx(1, 1);
         world.tiles[center] = Tile {
             raw_elevation: center_elevation,
-            hydro_elevation: center_elevation,
             temperature: 0.04,
             surface: Surface::Land,
             biome: Biome::Alpine,

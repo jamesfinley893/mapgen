@@ -1,16 +1,16 @@
 use crate::generate::{hash01, smoothstep};
+use coast::draw_coastline;
 use colors::{apply_snow_overlay, land_base_colors, soften_biome_edges};
 use image::{Rgba, RgbaImage};
 use shading::{compute_hillshade, draw_tile, draw_tile_hillshaded, lerp_rgba, offset};
 use symbols::{draw_dunes, draw_forest, draw_hills, draw_peak, draw_ridge};
-use water::{draw_coastline, draw_lake, draw_river, draw_river_banks, draw_river_tile};
 
+mod coast;
 mod colors;
 mod shading;
 mod symbols;
-mod water;
 
-use crate::{Biome, MountainFeature, Surface, World, mountain_feature_for_tile};
+use crate::{Biome, MountainFeature, World, mountain_feature_for_tile};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RenderConfig {
@@ -18,18 +18,6 @@ pub struct RenderConfig {
 }
 
 pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
-    render_world_with_river_visibility(world, config, true)
-}
-
-pub fn render_world_terrain_only(world: &World, config: RenderConfig) -> RgbaImage {
-    render_world_with_river_visibility(world, config, false)
-}
-
-fn render_world_with_river_visibility(
-    world: &World,
-    config: RenderConfig,
-    show_rivers: bool,
-) -> RgbaImage {
     let scale = config.scale.max(1);
     let width = world.width as u32 * scale;
     let height = world.height as u32 * scale;
@@ -46,9 +34,9 @@ fn render_world_with_river_visibility(
     // Pre-compute land base colors, soften biome-boundary edges, then apply snow.
     // Snow must come after softening so partially-snowed tiles don't bleed white
     // into neighboring biomes through the blend pass.
-    let land_colors = land_base_colors(world, scale, show_rivers);
-    let land_colors = soften_biome_edges(world, &land_colors, show_rivers);
-    let land_colors = apply_snow_overlay(world, &land_colors, show_rivers);
+    let land_colors = land_base_colors(world, scale);
+    let land_colors = soften_biome_edges(world, &land_colors);
+    let land_colors = apply_snow_overlay(world, &land_colors);
 
     for (idx, tile) in world.tiles.iter().enumerate() {
         let (x, y) = world.coords(idx);
@@ -68,8 +56,6 @@ fn render_world_with_river_visibility(
             );
             let tex = ((variation - 0.5) * 6.0) as i16;
             draw_tile(&mut image, x as u32, y as u32, scale, offset(base, tex));
-        } else if show_rivers && tile.surface == Surface::River {
-            draw_river_tile(&mut image, world, idx, scale, &land_colors);
         } else {
             draw_tile_hillshaded(
                 &mut image,
@@ -81,9 +67,11 @@ fn render_world_with_river_visibility(
                 land_colors[idx],
             );
         }
+    }
 
-        // Terrain symbols and coastline are land features — skip on river tiles.
-        if !show_rivers || tile.surface != Surface::River {
+    for (idx, tile) in world.tiles.iter().enumerate() {
+        let (x, y) = world.coords(idx);
+        if tile.biome != Biome::Ocean {
             match mountain_feature_for_tile(world, idx) {
                 MountainFeature::Summit => draw_peak(&mut image, x as u32, y as u32, scale),
                 MountainFeature::Ridge => draw_ridge(&mut image, world, idx, scale),
@@ -106,33 +94,6 @@ fn render_world_with_river_visibility(
 
             if tile.biome == Biome::Coast {
                 draw_coastline(&mut image, world, idx, scale);
-            }
-        }
-    }
-
-    for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.biome == Biome::Lake {
-            draw_lake(&mut image, world, idx, scale);
-        }
-    }
-
-    if show_rivers {
-        for (idx, tile) in world.tiles.iter().enumerate() {
-            if !matches!(
-                tile.surface,
-                Surface::River | Surface::Lake | Surface::Ocean
-            ) {
-                draw_river_banks(&mut image, world, idx, scale);
-            }
-        }
-    }
-
-    // At scale=1 the flat water tile colour is the complete river rendering.
-    // At scale>=2 same-colour connector strokes keep diagonal/downstream paths continuous.
-    if show_rivers && scale >= 2 {
-        for (idx, tile) in world.tiles.iter().enumerate() {
-            if tile.surface == Surface::River {
-                draw_river(&mut image, world, idx, scale);
             }
         }
     }

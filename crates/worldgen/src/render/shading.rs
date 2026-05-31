@@ -1,7 +1,8 @@
 use image::{Rgba, RgbaImage};
 
+use crate::Biome;
 use crate::World;
-use crate::generate::hash01;
+use crate::generate::{hash01, smoothstep};
 
 pub(super) fn draw_tile(image: &mut RgbaImage, x: u32, y: u32, scale: u32, color: Rgba<u8>) {
     let ox = x * scale;
@@ -82,7 +83,8 @@ pub(super) fn draw_tile_hillshaded(
     let oy = y * scale;
     let tx = x as usize;
     let ty = y as usize;
-    let center_biome = world.tiles[world.idx(tx, ty)].biome;
+    let center_tile = &world.tiles[world.idx(tx, ty)];
+    let center_biome = center_tile.biome;
     let h00 = hillshade[world.idx(tx, ty)];
     let get_hs = |cx: usize, cy: usize| -> f32 {
         let cx = cx.min(world.width.saturating_sub(1));
@@ -107,15 +109,36 @@ pub(super) fn draw_tile_hillshaded(
                 + h10 * fx * (1.0 - fy)
                 + h01 * (1.0 - fx) * fy
                 + h11 * fx * fy;
-            let color = scale_rgb(base_color, 0.28 + shade * 0.72);
+            let color = scale_rgb(base_color, 0.30 + shade * 0.74);
             // Aspect tinting: lit faces warm (+R, -B), shadowed faces cool (-R, +B).
             let tint = ((shade - 0.5) * 16.0) as i16;
-            let color = Rgba([
+            let mut color = Rgba([
                 (color[0] as i16 + tint).clamp(0, 255) as u8,
                 color[1],
                 (color[2] as i16 - tint).clamp(0, 255) as u8,
                 255,
             ]);
+            if scale >= 3 {
+                let gx = (ox + px) as usize;
+                let gy = (oy + py) as usize;
+                let coarse = hash01(world.seed ^ 0x95A7_1D41, gx / 5, gy / 5);
+                let fine = hash01(world.seed ^ 0x2C67_54ED, gx / 2, gy / 2);
+                let grain = coarse * 0.72 + fine * 0.28 - 0.5;
+                let height_above_sea = (center_tile.raw_elevation - world.sea_level).max(0.0);
+                let relief = smoothstep(0.04, 0.34, height_above_sea);
+                let biome_strength = match center_biome {
+                    Biome::Alpine | Biome::Foothills => 1.18,
+                    Biome::TemperateForest
+                    | Biome::BorealForest
+                    | Biome::Rainforest
+                    | Biome::TropicalForest => 0.82,
+                    Biome::Desert | Biome::PolarDesert => 0.74,
+                    Biome::Ocean => 0.0,
+                    _ => 0.92,
+                };
+                let detail = (grain * (4.0 + relief * 4.2) * biome_strength) as i16;
+                color = offset(color, detail);
+            }
             image.put_pixel(ox + px, oy + py, color);
         }
     }
@@ -130,10 +153,11 @@ pub(super) fn compute_hillshade(world: &World, x: usize, y: usize) -> f32 {
     let get_elev = |xi: isize, yi: isize| -> f32 {
         let cx = xi.clamp(0, world.width as isize - 1) as usize;
         let cy = yi.clamp(0, world.height as isize - 1) as usize;
-        if world.tiles[world.idx(cx, cy)].biome != center_biome {
+        let neighbor = &world.tiles[world.idx(cx, cy)];
+        if neighbor.biome != center_biome {
             center_elev
         } else {
-            world.tiles[world.idx(cx, cy)].raw_elevation
+            neighbor.raw_elevation
         }
     };
     let xi = x as isize;
@@ -143,7 +167,7 @@ pub(super) fn compute_hillshade(world: &World, x: usize, y: usize) -> f32 {
     // Adaptive z_scale: mountains get dramatic relief, plains stay gentle.
     let elev = get_elev(xi, yi);
     let height_above_sea = (elev - world.sea_level).max(0.0);
-    let z_scale = 4.0 + height_above_sea * 18.0;
+    let z_scale = 5.0 + height_above_sea * 20.0;
     let nx = -dz_dx * z_scale;
     let ny = 1.0_f32;
     let nz = -dz_dy * z_scale;

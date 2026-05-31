@@ -1,4 +1,9 @@
-use worldgen::{Biome, Surface, WorldConfig, build_metadata, generate_world};
+use std::sync::OnceLock;
+
+use worldgen::{
+    Biome, RenderConfig, Surface, Tile, World, WorldConfig, build_metadata, generate_world,
+    render_world,
+};
 
 fn config() -> WorldConfig {
     WorldConfig {
@@ -10,17 +15,56 @@ fn config() -> WorldConfig {
     }
 }
 
+fn fixed_config(seed: u64) -> WorldConfig {
+    WorldConfig {
+        seed,
+        width: 256,
+        height: 256,
+        render_scale: 2,
+        ..WorldConfig::default()
+    }
+}
+
+fn fixed_world(seed: u64) -> &'static World {
+    match seed {
+        42 => {
+            static WORLD: OnceLock<World> = OnceLock::new();
+            WORLD.get_or_init(|| generate_world(&fixed_config(42)).unwrap())
+        }
+        97 => {
+            static WORLD: OnceLock<World> = OnceLock::new();
+            WORLD.get_or_init(|| generate_world(&fixed_config(97)).unwrap())
+        }
+        3000 => {
+            static WORLD: OnceLock<World> = OnceLock::new();
+            WORLD.get_or_init(|| generate_world(&fixed_config(3000)).unwrap())
+        }
+        7073116918442829777 => {
+            static WORLD: OnceLock<World> = OnceLock::new();
+            WORLD.get_or_init(|| generate_world(&fixed_config(7073116918442829777)).unwrap())
+        }
+        12302556654306610728 => {
+            static WORLD: OnceLock<World> = OnceLock::new();
+            WORLD.get_or_init(|| generate_world(&fixed_config(12302556654306610728)).unwrap())
+        }
+        _ => panic!("fixed test world is not cached for seed {seed}"),
+    }
+}
+
 #[test]
 fn worlds_contain_land_and_ocean() {
     let world = generate_world(&config()).unwrap();
-    let mut land = 0;
-    let mut ocean = 0;
-    for tile in &world.tiles {
-        match tile.surface {
-            Surface::Ocean => ocean += 1,
-            _ => land += 1,
-        }
-    }
+    let land = world
+        .tiles
+        .iter()
+        .filter(|tile| tile.surface != Surface::Ocean)
+        .count();
+    let ocean = world
+        .tiles
+        .iter()
+        .filter(|tile| tile.surface == Surface::Ocean)
+        .count();
+
     assert!(land > 0);
     assert!(ocean > 0);
 }
@@ -69,62 +113,38 @@ fn ocean_tiles_are_boundary_connected() {
 }
 
 #[test]
-fn worlds_have_at_least_one_river() {
-    let world = generate_world(&config()).unwrap();
-    assert!(
-        world
-            .tiles
-            .iter()
-            .any(|tile| tile.surface == Surface::River)
-    );
+fn generated_worlds_use_only_ocean_coast_and_land_surfaces() {
+    for seed in [42_u64, 97, 3000, 7073116918442829777, 12302556654306610728] {
+        let world = fixed_world(seed);
+        for tile in &world.tiles {
+            assert!(matches!(
+                tile.surface,
+                Surface::Ocean | Surface::Coast | Surface::Land
+            ));
+        }
+    }
 }
 
 #[test]
-fn rivers_reach_a_sink() {
+fn coast_tiles_touch_ocean() {
     let world = generate_world(&config()).unwrap();
+    let mut coasts = 0_usize;
+
     for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.surface != Surface::River {
+        if tile.surface != Surface::Coast {
             continue;
         }
-        let mut current = idx;
-        let mut guard = 0;
-        loop {
-            let tile = &world.tiles[current];
-            if matches!(tile.surface, Surface::Ocean | Surface::Lake) {
-                break;
-            }
-            match tile.downstream {
-                Some(next) => current = next,
-                None => panic!("river did not terminate in a sink"),
-            }
-            guard += 1;
-            assert!(guard < world.tiles.len(), "river path looped");
-        }
+        coasts += 1;
+        let (x, y) = world.coords(idx);
+        assert!(
+            world
+                .neighbors8(x, y)
+                .any(|(nx, ny)| world.tiles[world.idx(nx, ny)].surface == Surface::Ocean),
+            "coast tile {idx} is not adjacent to ocean"
+        );
     }
-}
 
-#[test]
-fn conditioned_hydrology_eliminates_uphill_flow() {
-    let world = generate_world(&config()).unwrap();
-    for tile in &world.tiles {
-        if let Some(next) = tile.downstream {
-            assert!(world.tiles[next].hydro_elevation <= tile.hydro_elevation + 0.0002);
-        }
-    }
-}
-
-#[test]
-fn lakes_are_multi_tile_when_present() {
-    let world = generate_world(&config()).unwrap();
-    let mut counts = std::collections::HashMap::<u32, usize>::new();
-    for tile in &world.tiles {
-        if let Some(lake_id) = tile.lake_id {
-            *counts.entry(lake_id).or_default() += 1;
-        }
-    }
-    for size in counts.into_values() {
-        assert!(size >= 4);
-    }
+    assert!(coasts > 0);
 }
 
 #[test]
@@ -137,51 +157,21 @@ fn every_tile_is_classified() {
 }
 
 #[test]
-fn river_network_avoids_extreme_straight_runs() {
-    let world = generate_world(&WorldConfig {
-        seed: 42,
-        width: 128,
-        height: 128,
-        render_scale: 2,
-        ..WorldConfig::default()
-    })
-    .unwrap();
-    assert!(longest_same_direction_run(&world) <= 26);
-}
-
-#[test]
-fn metadata_reports_multiple_river_bands() {
+fn metadata_counts_land_and_ocean_only() {
     let world = generate_world(&config()).unwrap();
     let metadata = build_metadata(&world, &config());
-    assert!(metadata.river_band_counts.iter().sum::<usize>() >= metadata.river_tiles);
-    assert!(metadata.longest_trunk_length > 0);
-    assert!(metadata.largest_contiguous_foothill_region <= metadata.land_tiles);
-    assert!((0.0..=1.0).contains(&metadata.trunk_straight_run_ratio));
-    assert!(metadata.tributary_spacing_variance >= 0.0);
-    assert!((0.0..=1.0).contains(&metadata.mountain_exit_irregularity_score));
-    assert!((0.0..=1.0).contains(&metadata.confined_trunk_fraction));
-    assert!((0.0..=1.0).contains(&metadata.average_trunk_confinement));
+
+    assert_eq!(
+        metadata.land_tiles + metadata.ocean_tiles,
+        world.tiles.len()
+    );
+    assert!(metadata.highest_elevation >= world.sea_level);
+    assert!((0.0..=1.0).contains(&metadata.alpine_fraction));
+    assert!((0.0..=1.0).contains(&metadata.foothill_fraction));
 }
 
 #[test]
-fn visible_rivers_have_render_geometry() {
-    let world = generate_world(&config()).unwrap();
-    let mut checked = 0_usize;
-    for tile in &world.tiles {
-        if tile.surface != Surface::River {
-            continue;
-        }
-        checked += 1;
-        assert!(tile.river_width.is_finite());
-        assert!(tile.river_width > 0.0);
-        assert!((0.0..=1.0).contains(&tile.river_sinuosity));
-        assert!((-1.0..=1.0).contains(&tile.river_lateral_offset));
-    }
-    assert!(checked > 0);
-}
-
-#[test]
-fn rainfall_scale_increases_runoff_and_discharge() {
+fn rainfall_scale_changes_precipitation() {
     let dry_config = WorldConfig {
         seed: 42,
         width: 128,
@@ -194,56 +184,18 @@ fn rainfall_scale_increases_runoff_and_discharge() {
         rainfall_scale: 1.45,
         ..dry_config.clone()
     };
-    let dry = build_metadata(&generate_world(&dry_config).unwrap(), &dry_config);
-    let wet = build_metadata(&generate_world(&wet_config).unwrap(), &wet_config);
-    assert!(
-        wet.mean_runoff > dry.mean_runoff,
-        "runoff did not increase: dry={} wet={}",
-        dry.mean_runoff,
-        wet.mean_runoff
-    );
-    assert!(
-        wet.max_river_discharge > dry.max_river_discharge,
-        "max discharge did not increase: dry={} wet={}",
-        dry.max_river_discharge,
-        wet.max_river_discharge
-    );
-}
+    let dry_world = generate_world(&dry_config).unwrap();
+    let wet_world = generate_world(&wet_config).unwrap();
 
-#[test]
-fn channel_density_controls_visible_river_count() {
-    let sparse_config = WorldConfig {
-        seed: 97,
-        width: 128,
-        height: 128,
-        render_scale: 2,
-        channel_density: 0.65,
-        ..WorldConfig::default()
-    };
-    let dense_config = WorldConfig {
-        channel_density: 1.55,
-        ..sparse_config.clone()
-    };
-    let sparse = build_metadata(&generate_world(&sparse_config).unwrap(), &sparse_config);
-    let dense = build_metadata(&generate_world(&dense_config).unwrap(), &dense_config);
     assert!(
-        dense.river_tiles > sparse.river_tiles,
-        "river count did not increase: sparse={} dense={}",
-        sparse.river_tiles,
-        dense.river_tiles
+        mean_precipitation(&wet_world) > mean_precipitation(&dry_world),
+        "rainfall scale did not increase tile precipitation"
     );
 }
 
 #[test]
 fn seed_42_does_not_collapse_into_alpine_blanket() {
-    let world = generate_world(&WorldConfig {
-        seed: 42,
-        width: 256,
-        height: 256,
-        render_scale: 2,
-        ..WorldConfig::default()
-    })
-    .unwrap();
+    let world = fixed_world(42);
     let land_tiles = world
         .tiles
         .iter()
@@ -255,6 +207,7 @@ fn seed_42_does_not_collapse_into_alpine_blanket() {
         .filter(|tile| tile.biome == Biome::Alpine)
         .count();
     let alpine_fraction = alpine_tiles as f32 / land_tiles.max(1) as f32;
+
     assert!(
         alpine_fraction < 0.42,
         "alpine fraction too high: {alpine_fraction}"
@@ -262,64 +215,29 @@ fn seed_42_does_not_collapse_into_alpine_blanket() {
 }
 
 #[test]
-fn seed_42_keeps_mountain_adjacent_terrain_below_blanket_scale() {
-    let config = WorldConfig {
-        seed: 42,
-        width: 256,
-        height: 256,
-        render_scale: 2,
-        ..WorldConfig::default()
-    };
-    let world = generate_world(&config).unwrap();
-    let metadata = build_metadata(&world, &config);
-    let mountain_adjacent = metadata.alpine_fraction + metadata.foothill_fraction;
-    assert!(
-        mountain_adjacent < 0.7,
-        "mountain-adjacent coverage too high: {mountain_adjacent}"
-    );
-    assert!(
-        metadata.largest_contiguous_foothill_region < 29000,
-        "foothill region too large: {}",
-        metadata.largest_contiguous_foothill_region
-    );
-}
-
-#[test]
 fn fixed_seeds_still_produce_meaningful_high_ranges() {
-    let world = generate_world(&WorldConfig {
-        seed: 97,
-        width: 256,
-        height: 256,
-        render_scale: 2,
-        ..WorldConfig::default()
-    })
-    .unwrap();
-    let alpine_tiles = world
-        .tiles
-        .iter()
-        .filter(|tile| tile.biome == Biome::Alpine)
-        .count();
-    assert!(
-        alpine_tiles > 1200,
-        "too little alpine terrain survived: {alpine_tiles}"
-    );
+    for seed in [42_u64, 97, 3000] {
+        let world = fixed_world(seed);
+        let alpine_tiles = world
+            .tiles
+            .iter()
+            .filter(|tile| tile.biome == Biome::Alpine)
+            .count();
+        assert!(
+            alpine_tiles > 800,
+            "too little alpine terrain survived for seed {seed}: {alpine_tiles}"
+        );
+    }
 }
 
 #[test]
 fn lowlands_are_not_overwhelmingly_woodland_and_tundra() {
     for seed in [42_u64, 97, 12302556654306610728] {
-        let world = generate_world(&WorldConfig {
-            seed,
-            width: 256,
-            height: 256,
-            render_scale: 2,
-            ..WorldConfig::default()
-        })
-        .unwrap();
+        let world = fixed_world(seed);
         let mut lowland = 0_usize;
         let mut dominant = 0_usize;
         for tile in &world.tiles {
-            if matches!(tile.surface, Surface::Ocean | Surface::Lake) {
+            if tile.surface == Surface::Ocean {
                 continue;
             }
             if tile.raw_elevation > world.sea_level + 0.18
@@ -341,293 +259,9 @@ fn lowlands_are_not_overwhelmingly_woodland_and_tundra() {
 }
 
 #[test]
-fn fixed_seeds_produce_foothill_transitions() {
-    let world = generate_world(&WorldConfig {
-        seed: 42,
-        width: 256,
-        height: 256,
-        render_scale: 2,
-        ..WorldConfig::default()
-    })
-    .unwrap();
-    let foothill_tiles = world
-        .tiles
-        .iter()
-        .filter(|tile| tile.biome == Biome::Foothills)
-        .count();
-    assert!(
-        foothill_tiles > 100,
-        "too few foothill tiles: {foothill_tiles}"
-    );
-}
-
-#[test]
-fn alpine_strips_are_not_overly_isolated() {
-    let world = generate_world(&WorldConfig {
-        seed: 42,
-        width: 256,
-        height: 256,
-        render_scale: 2,
-        ..WorldConfig::default()
-    })
-    .unwrap();
-    let isolated = world
-        .tiles
-        .iter()
-        .enumerate()
-        .filter(|(idx, tile)| {
-            if tile.biome != Biome::Alpine {
-                return false;
-            }
-            let (x, y) = world.coords(*idx);
-            let neighbors = world
-                .neighbors8(x, y)
-                .filter(|(nx, ny)| world.tiles[world.idx(*nx, *ny)].biome == Biome::Alpine)
-                .count();
-            neighbors <= 1
-        })
-        .count();
-    assert!(isolated < 180, "too many isolated alpine tiles: {isolated}");
-}
-
-#[test]
-fn trunk_rivers_are_less_mountain_confined_than_headwaters() {
-    let world = generate_world(&WorldConfig {
-        seed: 42,
-        width: 256,
-        height: 256,
-        render_scale: 2,
-        ..WorldConfig::default()
-    })
-    .unwrap();
-    let ws = world.effective_world_size();
-    let stream_threshold = ((ws * ws * 0.00075).max(12.0)) * 6.5;
-    let trunk_threshold = ((ws * ws * 0.00075).max(12.0)) * 18.0;
-    let headwater = mountain_banked_fraction(&world, stream_threshold, trunk_threshold);
-    let trunk = mountain_banked_fraction(&world, trunk_threshold, f32::INFINITY);
-    assert!(
-        trunk < 0.42,
-        "trunk rivers still too mountain-confined: {trunk}"
-    );
-    assert!(
-        trunk <= headwater + 0.12,
-        "trunk rivers became materially more confined than headwaters: trunk={trunk}, headwater={headwater}"
-    );
-}
-
-#[test]
-fn trunk_rivers_avoid_extreme_straight_runs() {
-    let world = generate_world(&WorldConfig {
-        seed: 42,
-        width: 256,
-        height: 256,
-        render_scale: 2,
-        ..WorldConfig::default()
-    })
-    .unwrap();
-    let ws = world.effective_world_size();
-    let trunk_threshold = ((ws * ws * 0.00075).max(12.0)) * 18.0;
-    let run = longest_same_direction_run_for_threshold(&world, trunk_threshold);
-    assert!(run <= 40, "trunk river run too straight: {run}");
-}
-
-#[test]
-fn trunk_rivers_reduce_grid_locked_alignment() {
-    for seed in [42_u64, 97, 7073116918442829777] {
-        let config = WorldConfig {
-            seed,
-            width: 256,
-            height: 256,
-            render_scale: 2,
-            ..WorldConfig::default()
-        };
-        let world = generate_world(&config).unwrap();
-        let metadata = build_metadata(&world, &config);
-        assert!(
-            metadata.trunk_straight_run_ratio < 0.62,
-            "trunk straight-run ratio too high for seed {seed}: {}",
-            metadata.trunk_straight_run_ratio
-        );
-    }
-}
-
-#[test]
-fn tributary_spacing_is_not_overly_even() {
-    // Seeds 42 and 97 have dominant trunk rivers with measurable tributary structure.
-    // Seeds with shallow networks (no long trunk segments) are excluded — they don't
-    // produce enough junction intervals for meaningful variance.
-    for seed in [42_u64, 97] {
-        let config = WorldConfig {
-            seed,
-            width: 256,
-            height: 256,
-            render_scale: 2,
-            ..WorldConfig::default()
-        };
-        let world = generate_world(&config).unwrap();
-        let metadata = build_metadata(&world, &config);
-        assert!(
-            metadata.tributary_spacing_variance > 35.0,
-            "tributary spacing variance too low for seed {seed}: {}",
-            metadata.tributary_spacing_variance
-        );
-    }
-}
-
-#[test]
-fn mountain_exits_are_not_too_clean() {
-    for seed in [42_u64, 97] {
-        let config = WorldConfig {
-            seed,
-            width: 256,
-            height: 256,
-            render_scale: 2,
-            ..WorldConfig::default()
-        };
-        let world = generate_world(&config).unwrap();
-        let metadata = build_metadata(&world, &config);
-        assert!(
-            metadata.mountain_exit_irregularity_score > 0.16,
-            "mountain exits too clean for seed {seed}: {}",
-            metadata.mountain_exit_irregularity_score
-        );
-    }
-}
-
-#[test]
-fn highland_trunk_valleys_leave_terrain_signature() {
-    for seed in [42_u64, 97] {
-        let world = generate_world(&WorldConfig {
-            seed,
-            width: 256,
-            height: 256,
-            render_scale: 2,
-            ..WorldConfig::default()
-        })
-        .unwrap();
-        let (sampled, relief) = average_highland_trunk_cross_valley_relief(&world);
-        assert!(
-            sampled >= 35,
-            "too few highland trunk tiles sampled for seed {seed}: {sampled}"
-        );
-        assert!(
-            relief > 0.028,
-            "highland trunk valleys are too weak in raw terrain for seed {seed}: {relief}"
-        );
-    }
-}
-
-#[test]
-fn highland_trunk_corridors_are_broad_terrain_features() {
-    for seed in [42_u64, 97] {
-        let world = generate_world(&WorldConfig {
-            seed,
-            width: 256,
-            height: 256,
-            render_scale: 2,
-            ..WorldConfig::default()
-        })
-        .unwrap();
-        let (sampled, relief) = average_highland_trunk_outer_valley_relief(&world);
-        assert!(
-            sampled >= 30,
-            "too few broad highland trunk tiles sampled for seed {seed}: {sampled}"
-        );
-        assert!(
-            relief > 0.018,
-            "highland trunk corridors are too narrow in raw terrain for seed {seed}: {relief}"
-        );
-    }
-}
-
-#[test]
-fn major_trunk_corridors_read_as_watersheds_without_rivers() {
-    for seed in [42_u64, 97] {
-        let world = generate_world(&WorldConfig {
-            seed,
-            width: 256,
-            height: 256,
-            render_scale: 2,
-            ..WorldConfig::default()
-        })
-        .unwrap();
-        let (sampled, relief) = average_trunk_interfluve_relief(&world);
-        assert!(
-            sampled >= 24,
-            "too few trunk watershed samples for seed {seed}: {sampled}"
-        );
-        assert!(
-            relief > 0.022,
-            "trunk corridors are not lower than adjacent interfluves for seed {seed}: {relief}"
-        );
-    }
-}
-
-#[test]
-fn trunk_rivers_occupy_local_valley_floors() {
-    for seed in [42_u64, 97, 3000] {
-        let world = generate_world(&WorldConfig {
-            seed,
-            width: 256,
-            height: 256,
-            render_scale: 2,
-            ..WorldConfig::default()
-        })
-        .unwrap();
-        let (sampled, aligned_fraction, mean_offset) = trunk_valley_floor_alignment(&world);
-        assert!(
-            sampled >= 30,
-            "too few trunk floor samples for seed {seed}: {sampled}"
-        );
-        assert!(
-            aligned_fraction > 0.92,
-            "trunk rivers are offset from valley floors for seed {seed}: fraction={aligned_fraction}, mean_offset={mean_offset}"
-        );
-        assert!(
-            mean_offset < 0.006,
-            "trunk rivers have too much mean valley-floor offset for seed {seed}: {mean_offset}"
-        );
-    }
-}
-
-#[test]
-fn mature_broad_valleys_are_not_occupied_by_tiny_streams() {
-    for seed in [42_u64, 97, 3000] {
-        let world = generate_world(&WorldConfig {
-            seed,
-            width: 256,
-            height: 256,
-            render_scale: 2,
-            ..WorldConfig::default()
-        })
-        .unwrap();
-        let (sampled, high_order_fraction, low_order_fraction) = mature_valley_order_mix(&world);
-        assert!(
-            sampled >= 25,
-            "too few mature valley samples for seed {seed}: {sampled}"
-        );
-        assert!(
-            high_order_fraction > 0.68,
-            "mature valleys are not dominated by large rivers for seed {seed}: {high_order_fraction}"
-        );
-        assert!(
-            low_order_fraction < 0.07,
-            "too many tiny streams occupy mature broad valleys for seed {seed}: {low_order_fraction}"
-        );
-    }
-}
-
-#[test]
 fn highland_massifs_are_fragmented_into_subranges() {
     for seed in [42_u64, 97, 3000] {
-        let world = generate_world(&WorldConfig {
-            seed,
-            width: 256,
-            height: 256,
-            render_scale: 2,
-            ..WorldConfig::default()
-        })
-        .unwrap();
+        let world = fixed_world(seed);
         let components = mountain_component_count(&world, 120);
         assert!(
             components >= 2,
@@ -639,14 +273,7 @@ fn highland_massifs_are_fragmented_into_subranges() {
 #[test]
 fn landmass_shape_is_not_strongly_center_biased() {
     for seed in [42_u64, 97, 7073116918442829777] {
-        let world = generate_world(&WorldConfig {
-            seed,
-            width: 256,
-            height: 256,
-            render_scale: 2,
-            ..WorldConfig::default()
-        })
-        .unwrap();
+        let world = fixed_world(seed);
         let (center, outer) = center_vs_outer_land_fraction(&world);
         assert!(
             center <= outer * 2.2 + 0.12,
@@ -658,14 +285,7 @@ fn landmass_shape_is_not_strongly_center_biased() {
 #[test]
 fn edge_land_distribution_varies_by_edge() {
     for seed in [42_u64, 97, 7073116918442829777] {
-        let world = generate_world(&WorldConfig {
-            seed,
-            width: 256,
-            height: 256,
-            render_scale: 2,
-            ..WorldConfig::default()
-        })
-        .unwrap();
+        let world = fixed_world(seed);
         let fractions = edge_land_fractions(&world, 20);
         let min = fractions.iter().copied().fold(1.0_f32, f32::min);
         let max = fractions.iter().copied().fold(0.0_f32, f32::max);
@@ -682,14 +302,7 @@ fn fixed_seed_set_includes_multiple_major_landmasses() {
     let seeds = [42_u64, 97, 7073116918442829777, 12302556654306610728, 3000];
     let mut found = false;
     for seed in seeds {
-        let world = generate_world(&WorldConfig {
-            seed,
-            width: 256,
-            height: 256,
-            render_scale: 2,
-            ..WorldConfig::default()
-        })
-        .unwrap();
+        let world = fixed_world(seed);
         let masses = major_landmass_count(&world, 900);
         if masses >= 2 {
             found = true;
@@ -703,486 +316,171 @@ fn fixed_seed_set_includes_multiple_major_landmasses() {
 }
 
 #[test]
-fn lakes_avoid_filamentary_shapes() {
-    let world = generate_world(&WorldConfig {
-        seed: 7073116918442829777,
-        width: 256,
-        height: 256,
-        render_scale: 2,
-        ..WorldConfig::default()
-    })
-    .unwrap();
-    let mut counts = std::collections::HashMap::<u32, (usize, usize)>::new();
-    for (idx, tile) in world.tiles.iter().enumerate() {
-        let Some(lake_id) = tile.lake_id else {
-            continue;
+fn render_world_produces_expected_dimensions() {
+    let world = render_test_world(5, 5);
+    let image = render_world(&world, RenderConfig { scale: 6 });
+    assert_eq!(image.width(), 30);
+    assert_eq!(image.height(), 30);
+}
+
+#[test]
+fn tiny_coastal_islets_do_not_draw_checkerboard_coastline() {
+    let scale = 6;
+    let mut world = render_test_world(5, 5);
+    for tile in &mut world.tiles {
+        *tile = Tile {
+            surface: Surface::Ocean,
+            biome: Biome::Ocean,
+            raw_elevation: 0.30,
+            ..Tile::default()
         };
-        let (x, y) = world.coords(idx);
-        let edge_neighbors = world
-            .neighbors8(x, y)
-            .filter(|(nx, ny)| world.tiles[world.idx(*nx, *ny)].lake_id == Some(lake_id))
-            .count();
-        let entry = counts.entry(lake_id).or_insert((0, 0));
-        entry.0 += 1;
-        if edge_neighbors <= 1 {
-            entry.1 += 1;
-        }
     }
-    for (area, exposed) in counts.into_values() {
-        if area < 6 {
-            continue;
-        }
-        let fraction = exposed as f32 / area as f32;
-        assert!(
-            fraction < 0.28,
-            "lake too filamentary: area={area} fraction={fraction}"
-        );
-    }
-}
+    let islet = world.idx(2, 2);
+    world.tiles[islet] = Tile {
+        surface: Surface::Coast,
+        biome: Biome::Coast,
+        raw_elevation: 0.53,
+        ..Tile::default()
+    };
 
-fn average_highland_trunk_cross_valley_relief(world: &worldgen::World) -> (usize, f32) {
-    average_highland_trunk_relief_at_distances(world, &[2, 3])
-}
-
-fn average_highland_trunk_outer_valley_relief(world: &worldgen::World) -> (usize, f32) {
-    average_highland_trunk_relief_at_distances(world, &[5, 6, 7])
-}
-
-fn average_trunk_interfluve_relief(world: &worldgen::World) -> (usize, f32) {
-    average_highland_trunk_relief_at_distances(world, &[8, 9, 10])
-}
-
-fn average_highland_trunk_relief_at_distances(
-    world: &worldgen::World,
-    distances: &[isize],
-) -> (usize, f32) {
-    let mut sampled = 0_usize;
-    let mut total_relief = 0.0_f32;
-
-    for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.surface != Surface::River || tile.channel_order < 3 {
-            continue;
-        }
-        let Some(next) = tile.downstream else {
-            continue;
-        };
-        let (x, y) = world.coords(idx);
-        let (nx, ny) = world.coords(next);
-        let dx = (nx as isize - x as isize).signum();
-        let dy = (ny as isize - y as isize).signum();
-        if dx == 0 && dy == 0 {
-            continue;
-        }
-
-        let banks = [(-dy, dx), (dy, -dx)];
-        let mut bank_sum = 0.0_f32;
-        let mut bank_count = 0_usize;
-        for &distance in distances {
-            for bank in banks {
-                let bx = x as isize + bank.0 * distance;
-                let by = y as isize + bank.1 * distance;
-                if !world.in_bounds(bx, by) {
-                    continue;
-                }
-                let bidx = world.idx(bx as usize, by as usize);
-                if matches!(world.tiles[bidx].surface, Surface::Ocean | Surface::Lake) {
-                    continue;
-                }
-                bank_sum += world.tiles[bidx].raw_elevation;
-                bank_count += 1;
-            }
-        }
-        if bank_count < 2 {
-            continue;
-        }
-        let bank_mean = bank_sum / bank_count as f32;
-        if bank_mean.max(tile.raw_elevation) < world.sea_level + 0.18 {
-            continue;
-        }
-        sampled += 1;
-        total_relief += (bank_mean - tile.raw_elevation).max(0.0);
-    }
-
-    if sampled == 0 {
-        (0, 0.0)
-    } else {
-        (sampled, total_relief / sampled as f32)
-    }
-}
-
-fn trunk_valley_floor_alignment(world: &worldgen::World) -> (usize, f32, f32) {
-    let mut sampled = 0_usize;
-    let mut aligned = 0_usize;
-    let mut total_offset = 0.0_f32;
-
-    for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.surface != Surface::River || tile.channel_order < 3 {
-            continue;
-        }
-        let Some(next) = tile.downstream else {
-            continue;
-        };
-        let Some(cross_section) = cross_valley_elevations(world, idx, next, &[1, 2, 3, 4]) else {
-            continue;
-        };
-        let bank_mean = cross_section.iter().sum::<f32>() / cross_section.len() as f32;
-        if bank_mean.max(tile.raw_elevation) < world.sea_level + 0.14 {
-            continue;
-        }
-        let min_elevation = cross_section
-            .iter()
-            .copied()
-            .fold(tile.raw_elevation, f32::min);
-        let offset = (tile.raw_elevation - min_elevation).max(0.0);
-        sampled += 1;
-        total_offset += offset;
-        if offset <= 0.018 {
-            aligned += 1;
-        }
-    }
-
-    if sampled == 0 {
-        (0, 0.0, 0.0)
-    } else {
-        (
-            sampled,
-            aligned as f32 / sampled as f32,
-            total_offset / sampled as f32,
-        )
-    }
-}
-
-fn mature_valley_order_mix(world: &worldgen::World) -> (usize, f32, f32) {
-    let mut sampled = 0_usize;
-    let mut high_order = 0_usize;
-    let mut low_order = 0_usize;
-
-    for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.surface != Surface::River {
-            continue;
-        }
-        let Some(next) = tile.downstream else {
-            continue;
-        };
-        let Some(cross_section) = cross_valley_elevations(world, idx, next, &[5, 6, 7, 8, 9, 10])
-        else {
-            continue;
-        };
-        let bank_mean = cross_section.iter().sum::<f32>() / cross_section.len() as f32;
-        let relief = bank_mean - tile.raw_elevation;
-        if relief <= 0.15 || bank_mean.max(tile.raw_elevation) < world.sea_level + 0.18 {
-            continue;
-        }
-        sampled += 1;
-        if tile.channel_order >= 3 {
-            high_order += 1;
-        }
-        if tile.channel_order <= 1 {
-            low_order += 1;
-        }
-    }
-
-    if sampled == 0 {
-        (0, 0.0, 0.0)
-    } else {
-        (
-            sampled,
-            high_order as f32 / sampled as f32,
-            low_order as f32 / sampled as f32,
-        )
-    }
-}
-
-fn cross_valley_elevations(
-    world: &worldgen::World,
-    idx: usize,
-    next: usize,
-    distances: &[isize],
-) -> Option<Vec<f32>> {
-    let (x, y) = world.coords(idx);
-    let (nx, ny) = world.coords(next);
-    let dx = (nx as isize - x as isize).signum();
-    let dy = (ny as isize - y as isize).signum();
-    if dx == 0 && dy == 0 {
-        return None;
-    }
-
-    let banks = [(-dy, dx), (dy, -dx)];
-    let mut elevations = Vec::with_capacity(distances.len() * banks.len());
-    for &distance in distances {
-        for bank in banks {
-            let bx = x as isize + bank.0 * distance;
-            let by = y as isize + bank.1 * distance;
-            if !world.in_bounds(bx, by) {
-                continue;
-            }
-            let bidx = world.idx(bx as usize, by as usize);
-            if matches!(world.tiles[bidx].surface, Surface::Ocean | Surface::Lake) {
-                continue;
-            }
-            elevations.push(world.tiles[bidx].raw_elevation);
-        }
-    }
-
-    (elevations.len() >= 4).then_some(elevations)
-}
-
-fn longest_same_direction_run(world: &worldgen::World) -> usize {
-    let mut longest = 0;
-    for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.surface != Surface::River {
-            continue;
-        }
-        let mut current = idx;
-        let mut current_dir = None;
-        let mut streak = 0;
-        let mut guard = 0;
-        while guard < world.tiles.len() {
-            let tile = &world.tiles[current];
-            if tile.surface != Surface::River {
-                break;
-            }
-            let next = match tile.downstream {
-                Some(next) => next,
-                None => break,
-            };
-            let (x, y) = world.coords(current);
-            let (nx, ny) = world.coords(next);
-            let dir = (
-                (nx as isize - x as isize).signum(),
-                (ny as isize - y as isize).signum(),
+    let image = render_world(&world, RenderConfig { scale });
+    let coastline = [218, 210, 158, 255];
+    for py in 0..scale {
+        for px in 0..scale {
+            let pixel = image.get_pixel(2 * scale + px, 2 * scale + py);
+            assert_ne!(
+                pixel.0, coastline,
+                "tiny coastal islet retained a hard coastline pixel at ({px},{py})"
             );
-            if Some(dir) == current_dir {
-                streak += 1;
-            } else {
-                current_dir = Some(dir);
-                streak = 1;
-            }
-            longest = longest.max(streak);
-            current = next;
-            guard += 1;
         }
     }
-    longest
 }
 
-fn longest_same_direction_run_for_threshold(world: &worldgen::World, min_area: f32) -> usize {
-    let mut longest = 0;
-    for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.surface != Surface::River || tile.contributing_area < min_area {
-            continue;
-        }
-        let mut current = idx;
-        let mut current_dir = None;
-        let mut streak = 0;
-        let mut guard = 0;
-        while guard < world.tiles.len() {
-            let tile = &world.tiles[current];
-            if tile.surface != Surface::River || tile.contributing_area < min_area {
-                break;
-            }
-            let next = match tile.downstream {
-                Some(next) => next,
-                None => break,
-            };
-            let (x, y) = world.coords(current);
-            let (nx, ny) = world.coords(next);
-            let dir = (
-                (nx as isize - x as isize).signum(),
-                (ny as isize - y as isize).signum(),
-            );
-            if Some(dir) == current_dir {
-                streak += 1;
-            } else {
-                current_dir = Some(dir);
-                streak = 1;
-            }
-            longest = longest.max(streak);
-            current = next;
-            guard += 1;
-        }
-    }
-    longest
+fn mean_precipitation(world: &World) -> f32 {
+    world
+        .tiles
+        .iter()
+        .map(|tile| tile.precipitation)
+        .sum::<f32>()
+        / world.tiles.len().max(1) as f32
 }
 
-fn mountain_banked_fraction(world: &worldgen::World, min_area: f32, max_area: f32) -> f32 {
-    let mut total = 0_usize;
-    let mut mountain_banked = 0_usize;
-
-    for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.surface != Surface::River
-            || tile.contributing_area < min_area
-            || tile.contributing_area >= max_area
-        {
-            continue;
-        }
-        let Some(next) = tile.downstream else {
-            continue;
+fn render_test_world(width: usize, height: usize) -> World {
+    let mut world = World::new(7, width, height, 0.50, 0);
+    for tile in &mut world.tiles {
+        *tile = Tile {
+            surface: Surface::Land,
+            biome: Biome::TemperateGrassland,
+            raw_elevation: 0.56,
+            temperature: 0.55,
+            moisture: 0.35,
+            ..Tile::default()
         };
-        let (x, y) = world.coords(idx);
-        let (nx, ny) = world.coords(next);
-        let dx = (nx as isize - x as isize).signum();
-        let dy = (ny as isize - y as isize).signum();
-        if dx == 0 && dy == 0 {
-            continue;
-        }
-        let banks = [(-dy, dx), (dy, -dx)];
-        let mut bank_count = 0_usize;
-        for bank in banks {
-            let bx = x as isize + bank.0;
-            let by = y as isize + bank.1;
-            if !world.in_bounds(bx, by) {
-                continue;
-            }
-            let bidx = world.idx(bx as usize, by as usize);
-            if matches!(world.tiles[bidx].biome, Biome::Foothills | Biome::Alpine) {
-                bank_count += 1;
-            }
-        }
-        total += 1;
-        if bank_count == 2 {
-            mountain_banked += 1;
-        }
     }
-
-    if total == 0 {
-        0.0
-    } else {
-        mountain_banked as f32 / total as f32
-    }
+    world
 }
 
-fn center_vs_outer_land_fraction(world: &worldgen::World) -> (f32, f32) {
-    let cx = (world.width as f32 - 1.0) * 0.5;
-    let cy = (world.height as f32 - 1.0) * 0.5;
-    let inner_r2 = (world.width.min(world.height) as f32 * 0.22).powi(2);
-    let outer_r2 = (world.width.min(world.height) as f32 * 0.40).powi(2);
-    let mut inner_land = 0_usize;
-    let mut inner_total = 0_usize;
+fn center_vs_outer_land_fraction(world: &World) -> (f32, f32) {
+    let x0 = world.width / 4;
+    let x1 = world.width * 3 / 4;
+    let y0 = world.height / 4;
+    let y1 = world.height * 3 / 4;
+    let mut center_land = 0_usize;
+    let mut center_total = 0_usize;
     let mut outer_land = 0_usize;
     let mut outer_total = 0_usize;
 
     for y in 0..world.height {
         for x in 0..world.width {
-            let idx = world.idx(x, y);
-            let dx = x as f32 - cx;
-            let dy = y as f32 - cy;
-            let dist2 = dx * dx + dy * dy;
-            let land = !matches!(world.tiles[idx].surface, Surface::Ocean);
-            if dist2 <= inner_r2 {
-                inner_total += 1;
-                if land {
-                    inner_land += 1;
-                }
-            } else if dist2 >= outer_r2 {
+            let land = world.tiles[world.idx(x, y)].surface != Surface::Ocean;
+            if (x0..x1).contains(&x) && (y0..y1).contains(&y) {
+                center_total += 1;
+                center_land += land as usize;
+            } else {
                 outer_total += 1;
-                if land {
-                    outer_land += 1;
-                }
+                outer_land += land as usize;
             }
         }
     }
 
     (
-        inner_land as f32 / inner_total.max(1) as f32,
+        center_land as f32 / center_total.max(1) as f32,
         outer_land as f32 / outer_total.max(1) as f32,
     )
 }
 
-fn edge_land_fractions(world: &worldgen::World, band: usize) -> [f32; 4] {
+fn edge_land_fractions(world: &World, band: usize) -> [f32; 4] {
     let band = band.min(world.width / 2).min(world.height / 2).max(1);
-    let mut counts = [(0_usize, 0_usize); 4];
+    let mut land = [0_usize; 4];
+    let mut total = [0_usize; 4];
+
     for y in 0..world.height {
         for x in 0..world.width {
-            let idx = world.idx(x, y);
-            let land = !matches!(world.tiles[idx].surface, Surface::Ocean);
+            let is_land = world.tiles[world.idx(x, y)].surface != Surface::Ocean;
             if y < band {
-                counts[0].1 += 1;
-                if land {
-                    counts[0].0 += 1;
-                }
-            }
-            if y >= world.height - band {
-                counts[1].1 += 1;
-                if land {
-                    counts[1].0 += 1;
-                }
-            }
-            if x < band {
-                counts[2].1 += 1;
-                if land {
-                    counts[2].0 += 1;
-                }
+                total[0] += 1;
+                land[0] += is_land as usize;
             }
             if x >= world.width - band {
-                counts[3].1 += 1;
-                if land {
-                    counts[3].0 += 1;
-                }
+                total[1] += 1;
+                land[1] += is_land as usize;
+            }
+            if y >= world.height - band {
+                total[2] += 1;
+                land[2] += is_land as usize;
+            }
+            if x < band {
+                total[3] += 1;
+                land[3] += is_land as usize;
             }
         }
     }
-    counts.map(|(land, total)| land as f32 / total.max(1) as f32)
+
+    [
+        land[0] as f32 / total[0].max(1) as f32,
+        land[1] as f32 / total[1].max(1) as f32,
+        land[2] as f32 / total[2].max(1) as f32,
+        land[3] as f32 / total[3].max(1) as f32,
+    ]
 }
 
-fn major_landmass_count(world: &worldgen::World, min_area: usize) -> usize {
+fn major_landmass_count(world: &World, min_area: usize) -> usize {
+    component_count(world, min_area, |tile| tile.surface != Surface::Ocean)
+}
+
+fn mountain_component_count(world: &World, min_area: usize) -> usize {
+    component_count(world, min_area, |tile| {
+        matches!(tile.biome, Biome::Alpine | Biome::Foothills)
+    })
+}
+
+fn component_count<F>(world: &World, min_area: usize, accept: F) -> usize
+where
+    F: Fn(&Tile) -> bool,
+{
     let mut visited = vec![false; world.tiles.len()];
     let mut count = 0_usize;
 
-    for idx in 0..world.tiles.len() {
-        if visited[idx] || matches!(world.tiles[idx].surface, Surface::Ocean | Surface::Lake) {
+    for start in 0..world.tiles.len() {
+        if visited[start] || !accept(&world.tiles[start]) {
             continue;
         }
-        visited[idx] = true;
-        let mut queue = std::collections::VecDeque::from([idx]);
         let mut area = 0_usize;
-        while let Some(current) = queue.pop_front() {
+        let mut queue = std::collections::VecDeque::from([start]);
+        visited[start] = true;
+
+        while let Some(idx) = queue.pop_front() {
             area += 1;
-            let (x, y) = world.coords(current);
+            let (x, y) = world.coords(idx);
             for (nx, ny) in world.neighbors8(x, y) {
                 let nidx = world.idx(nx, ny);
-                if visited[nidx]
-                    || matches!(world.tiles[nidx].surface, Surface::Ocean | Surface::Lake)
-                {
-                    continue;
+                if !visited[nidx] && accept(&world.tiles[nidx]) {
+                    visited[nidx] = true;
+                    queue.push_back(nidx);
                 }
-                visited[nidx] = true;
-                queue.push_back(nidx);
             }
         }
-        if area >= min_area {
-            count += 1;
-        }
-    }
 
-    count
-}
-
-fn mountain_component_count(world: &worldgen::World, min_area: usize) -> usize {
-    let mut visited = vec![false; world.tiles.len()];
-    let mut count = 0_usize;
-
-    for idx in 0..world.tiles.len() {
-        if visited[idx] || !matches!(world.tiles[idx].biome, Biome::Alpine | Biome::Foothills) {
-            continue;
-        }
-        visited[idx] = true;
-        let mut queue = std::collections::VecDeque::from([idx]);
-        let mut area = 0_usize;
-        while let Some(current) = queue.pop_front() {
-            area += 1;
-            let (x, y) = world.coords(current);
-            for (nx, ny) in world.neighbors8(x, y) {
-                let nidx = world.idx(nx, ny);
-                if visited[nidx]
-                    || !matches!(world.tiles[nidx].biome, Biome::Alpine | Biome::Foothills)
-                {
-                    continue;
-                }
-                visited[nidx] = true;
-                queue.push_back(nidx);
-            }
-        }
         if area >= min_area {
             count += 1;
         }

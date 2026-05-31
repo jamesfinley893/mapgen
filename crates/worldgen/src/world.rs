@@ -5,15 +5,12 @@ pub enum Surface {
     Ocean,
     Coast,
     Land,
-    Lake,
-    River,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Biome {
     Ocean,
     Coast,
-    Lake,
     PolarDesert,
     Tundra,
     BorealForest,
@@ -33,48 +30,22 @@ pub enum Biome {
 #[serde(default)]
 pub struct Tile {
     pub raw_elevation: f32,
-    pub hydro_elevation: f32,
     pub temperature: f32,
     pub moisture: f32,
-    pub contributing_area: f32,
     pub precipitation: f32,
-    pub runoff: f32,
-    pub discharge: f32,
-    pub stream_power: f32,
-    pub channel_order: u8,
-    pub river_width: f32,
-    pub river_sinuosity: f32,
-    pub river_lateral_offset: f32,
     pub surface: Surface,
     pub biome: Biome,
-    pub downstream: Option<usize>,
-    pub basin_id: Option<u32>,
-    pub lake_id: Option<u32>,
-    pub water_level: Option<f32>,
 }
 
 impl Default for Tile {
     fn default() -> Self {
         Self {
             raw_elevation: 0.0,
-            hydro_elevation: 0.0,
             temperature: 0.0,
             moisture: 0.0,
-            contributing_area: 0.0,
             precipitation: 0.0,
-            runoff: 0.0,
-            discharge: 0.0,
-            stream_power: 0.0,
-            channel_order: 0,
-            river_width: 0.0,
-            river_sinuosity: 0.0,
-            river_lateral_offset: 0.0,
             surface: Surface::Ocean,
             biome: Biome::Ocean,
-            downstream: None,
-            basin_id: None,
-            lake_id: None,
-            water_level: None,
         }
     }
 }

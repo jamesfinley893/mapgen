@@ -1,18 +1,15 @@
-mod audit;
 mod config;
 mod features;
 mod generate;
 mod metadata;
 mod render;
-mod river;
 mod world;
 
-pub use audit::{RiverAudit, audit_rivers};
 pub use config::WorldConfig;
 pub use features::{MountainFeature, mountain_feature_for_tile, permanent_snow_cover};
 pub use generate::{biome_for_tile, generate_world};
 pub use metadata::{WorldMetadata, build_metadata};
-pub use render::{RenderConfig, render_world, render_world_terrain_only};
+pub use render::{RenderConfig, render_world};
 pub use world::{Biome, Surface, Tile, World};
 
 #[cfg(test)]
@@ -38,18 +35,6 @@ mod tests {
             assert_eq!(left.surface, right.surface);
             assert_eq!(left.biome, right.biome);
             assert!((left.raw_elevation - right.raw_elevation).abs() < f32::EPSILON);
-            assert!((left.hydro_elevation - right.hydro_elevation).abs() < f32::EPSILON);
-            assert!((left.contributing_area - right.contributing_area).abs() < f32::EPSILON);
-        }
-    }
-
-    #[test]
-    fn drainage_never_routes_uphill() {
-        let world = generate_world(&test_config()).unwrap();
-        for tile in &world.tiles {
-            if let Some(next) = tile.downstream {
-                assert!(world.tiles[next].hydro_elevation <= tile.hydro_elevation + 0.0002);
-            }
         }
     }
 
@@ -81,10 +66,10 @@ mod tests {
         assert_eq!(metadata.world_size, test_config().world_size);
         assert_eq!(metadata.effective_world_size, 96.0);
         assert!(!metadata.biome_counts.is_empty());
-        assert!(
-            metadata.land_tiles + metadata.ocean_tiles + metadata.lake_tiles >= world.tiles.len()
+        assert_eq!(
+            metadata.land_tiles + metadata.ocean_tiles,
+            world.tiles.len()
         );
-        assert!(metadata.largest_basin_area > 0);
     }
 
     #[test]

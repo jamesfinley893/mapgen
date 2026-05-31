@@ -9,8 +9,6 @@ pub struct WorldConfig {
     pub temperature_bias: f32,
     pub moisture_bias: f32,
     pub rainfall_scale: f32,
-    pub runoff_scale: f32,
-    pub channel_density: f32,
     pub render_scale: u32,
     /// Tiles per world unit. Controls geographic scale independently of pixel count.
     /// 0 (default) = match min(width, height), reproducing the original single-world-unit
@@ -29,8 +27,6 @@ impl Default for WorldConfig {
             temperature_bias: 0.0,
             moisture_bias: 0.0,
             rainfall_scale: 1.0,
-            runoff_scale: 1.0,
-            channel_density: 1.0,
             render_scale: 4,
             world_size: 0,
         }
@@ -53,12 +49,6 @@ impl WorldConfig {
         }
         if !(0.25..=4.0).contains(&self.rainfall_scale) {
             return Err("rainfall_scale must be between 0.25 and 4.0".into());
-        }
-        if !(0.25..=4.0).contains(&self.runoff_scale) {
-            return Err("runoff_scale must be between 0.25 and 4.0".into());
-        }
-        if !(0.25..=4.0).contains(&self.channel_density) {
-            return Err("channel_density must be between 0.25 and 4.0".into());
         }
         if self.world_size != 0 && self.world_size < 32 {
             return Err("world_size must be 0 (auto) or at least 32".into());

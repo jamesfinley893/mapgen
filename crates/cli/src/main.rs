@@ -7,12 +7,9 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::FormatItem;
 use time::macros::format_description;
-use worldgen::{
-    RenderConfig, World, WorldConfig, build_metadata, generate_world, render_world,
-    render_world_terrain_only,
-};
+use worldgen::{RenderConfig, World, WorldConfig, build_metadata, generate_world, render_world};
 
-const TILES_SCHEMA_VERSION: u32 = 2;
+const TILES_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct TileExport {
@@ -37,9 +34,6 @@ enum Commands {
         /// Path to a tiles.json file (or a run directory containing one).
         #[arg(long)]
         input: PathBuf,
-        /// Suppress river drawing to inspect terrain carving.
-        #[arg(long, default_value_t = false)]
-        terrain_only: bool,
     },
     Generate {
         #[arg(long)]
@@ -61,10 +55,6 @@ enum Commands {
         moisture_bias: f32,
         #[arg(long, default_value_t = 1.0)]
         rainfall_scale: f32,
-        #[arg(long, default_value_t = 1.0)]
-        runoff_scale: f32,
-        #[arg(long, default_value_t = 1.0)]
-        channel_density: f32,
         /// Tiles per world unit. 0 or omit = match min(width, height) for a single world unit.
         /// Set to a fixed value (e.g. 384) to make larger maps cover more geographic area.
         #[arg(long, default_value_t = 0)]
@@ -74,9 +64,6 @@ enum Commands {
         /// Export full per-tile data as tiles.json alongside the PNG.
         #[arg(long, default_value_t = false)]
         export_tiles: bool,
-        /// Also write a terrain-only PNG with rivers suppressed.
-        #[arg(long, default_value_t = false)]
-        terrain_only: bool,
     },
 }
 
@@ -90,10 +77,7 @@ fn main() {
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Render {
-            input,
-            terrain_only,
-        } => {
+        Commands::Render { input } => {
             let tiles_path = if input.is_dir() {
                 input.join("tiles.json")
             } else {
@@ -119,16 +103,8 @@ fn run() -> Result<(), String> {
             let render_config = RenderConfig {
                 scale: render_scale,
             };
-            let image = if terrain_only {
-                render_world_terrain_only(&world, render_config)
-            } else {
-                render_world(&world, render_config)
-            };
-            let out_path = if terrain_only {
-                run_dir.join("terrain-rerendered.png")
-            } else {
-                run_dir.join("rerendered.png")
-            };
+            let image = render_world(&world, render_config);
+            let out_path = run_dir.join("rerendered.png");
             image
                 .save(&out_path)
                 .map_err(|err| format!("failed to write PNG: {err}"))?;
@@ -144,12 +120,9 @@ fn run() -> Result<(), String> {
             temperature_bias,
             moisture_bias,
             rainfall_scale,
-            runoff_scale,
-            channel_density,
             world_size,
             out_dir,
             export_tiles,
-            terrain_only,
         } => {
             let seed = select_seed(seed);
             validate_dimensions(width, height)?;
@@ -179,8 +152,6 @@ fn run() -> Result<(), String> {
                 temperature_bias,
                 moisture_bias,
                 rainfall_scale,
-                runoff_scale,
-                channel_density,
                 render_scale,
                 world_size,
             };
@@ -204,19 +175,6 @@ fn run() -> Result<(), String> {
             image
                 .save(&png_path)
                 .map_err(|err| format!("failed to write PNG: {err}"))?;
-            if terrain_only {
-                let terrain_path = run_dir.join("terrain.png");
-                let terrain_image = render_world_terrain_only(
-                    &world,
-                    RenderConfig {
-                        scale: render_scale,
-                    },
-                );
-                terrain_image
-                    .save(&terrain_path)
-                    .map_err(|err| format!("failed to write terrain PNG: {err}"))?;
-                println!("wrote {}", terrain_path.display());
-            }
             let json = serde_json::to_string_pretty(&metadata)
                 .map_err(|err| format!("failed to serialize metadata: {err}"))?;
             fs::write(&json_path, json)
@@ -276,23 +234,6 @@ fn validate_render_world(world: &World) -> Result<(), String> {
             world.height,
             world.tiles.len()
         ));
-    }
-    for (idx, tile) in world.tiles.iter().enumerate() {
-        if let Some(next) = tile.downstream
-            && next >= expected
-        {
-            return Err(format!(
-                "tiles.json tile {idx} has out-of-range downstream index {next}"
-            ));
-        }
-        if !tile.river_width.is_finite()
-            || !tile.river_sinuosity.is_finite()
-            || !tile.river_lateral_offset.is_finite()
-        {
-            return Err(format!(
-                "tiles.json tile {idx} has non-finite river geometry"
-            ));
-        }
     }
     Ok(())
 }
@@ -366,8 +307,8 @@ mod tests {
     }
 
     #[test]
-    fn current_tile_export_schema_is_version_two() {
-        assert_eq!(TILES_SCHEMA_VERSION, 2);
+    fn current_tile_export_schema_is_version_three() {
+        assert_eq!(TILES_SCHEMA_VERSION, 3);
     }
 
     #[test]
@@ -377,23 +318,5 @@ mod tests {
 
         let err = validate_render_world(&world).unwrap_err();
         assert!(err.contains("tile count mismatch"));
-    }
-
-    #[test]
-    fn validate_render_world_rejects_out_of_range_downstream_index() {
-        let mut world = World::new(7, 2, 2, 0.52, 0);
-        world.tiles[0].downstream = Some(4);
-
-        let err = validate_render_world(&world).unwrap_err();
-        assert!(err.contains("out-of-range downstream"));
-    }
-
-    #[test]
-    fn validate_render_world_rejects_non_finite_river_geometry() {
-        let mut world = World::new(7, 2, 2, 0.52, 0);
-        world.tiles[0].river_width = f32::NAN;
-
-        let err = validate_render_world(&world).unwrap_err();
-        assert!(err.contains("non-finite river geometry"));
     }
 }

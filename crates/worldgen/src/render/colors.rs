@@ -1,143 +1,36 @@
 use image::Rgba;
 
 use crate::generate::{hash01, smoothstep};
-use crate::{Biome, Surface, World, permanent_snow_cover};
+use crate::{Biome, World, permanent_snow_cover};
 
 use super::shading::{lerp_rgba, offset, sample_noise};
 
-pub(super) fn land_base_colors(world: &World, scale: u32, show_rivers: bool) -> Vec<Rgba<u8>> {
-    // Minimum channel_order considered "drawn" at this scale. Tiles below this
-    // are culled: they get terrain colour and the culling correction strips their
-    // moisture inflation. Tiles at or above get the shared flat river colour.
-    let min_river_order: u8 = if !show_rivers {
-        u8::MAX
-    } else if scale <= 1 {
-        2
-    } else {
-        1
-    };
+pub(super) fn land_base_colors(world: &World, scale: u32) -> Vec<Rgba<u8>> {
     // Keep visual noise blob size roughly constant in pixels across scales.
     let noise_cell = ((56 / scale.max(1)) as usize).clamp(10, 56);
     // Per-tile micro hash: scale down amplitude at scale=1 to avoid salt-and-pepper noise.
     let micro_amp = (scale.clamp(1, 4) as f32 / 4.0 * 12.0) as i16;
 
-    let mut colors: Vec<Rgba<u8>> = (0..world.tiles.len())
+    (0..world.tiles.len())
         .map(|idx| {
             let tile = &world.tiles[idx];
-            if tile.surface == Surface::River && tile.channel_order >= min_river_order {
-                RIVER_COLOR
-            } else {
-                tile_land_color(
-                    world,
-                    idx,
-                    tile.biome,
-                    tile.moisture,
-                    min_river_order,
-                    noise_cell,
-                    micro_amp,
-                )
-            }
+            tile_land_color(world, idx, tile.biome, tile.moisture, noise_cell, micro_amp)
         })
-        .collect();
-
-    // When rivers are culled at small scale, both the river tile and its immediate
-    // land neighbors carry climate moisture that was inflated by river proximity —
-    // the river tile got +0.16, adjacent land tiles +0.056 (from compute_nearby_water).
-    // That inflated moisture pushed them into greener biomes, leaving a visible
-    // corridor even though no blue line is drawn.
-    //
-    // Fix: subtract the river's moisture contribution, re-derive the dry biome via
-    // biome_for_tile, and recompute the full color pipeline. The tile renders as
-    // if the river never existed — the culling negates all of its effects.
-    //
-    // Non-culled river tiles (order >= min_river_order) already have water colour;
-    // the culling correction does not touch them.
-    if min_river_order > 1 {
-        // Moisture contributions from climate::compute_nearby_water:
-        //   river/lake/ocean tiles:  nearby_water = 1.0 → 1.0 × 0.16 = 0.16
-        //   adjacent land tiles:     nearby_water = 0.35 → 0.35 × 0.16 = 0.056
-        const RIVER_SELF: f32 = 0.160;
-        const RIVER_FRINGE: f32 = 0.056;
-
-        let is_culled: Vec<bool> = world
-            .tiles
-            .iter()
-            .map(|t| t.surface == Surface::River && t.channel_order < min_river_order)
-            .collect();
-
-        // Mark land tiles that neighbor any culled river (the riparian fringe).
-        let mut is_fringe = vec![false; world.tiles.len()];
-        for (idx, culled) in is_culled.iter().copied().enumerate() {
-            if !culled {
-                continue;
-            }
-            let (x, y) = world.coords(idx);
-            for (nx, ny) in world.neighbors8(x, y) {
-                let nidx = world.idx(nx, ny);
-                if matches!(world.tiles[nidx].surface, Surface::Land | Surface::Coast) {
-                    is_fringe[nidx] = true;
-                }
-            }
-        }
-
-        for idx in 0..world.tiles.len() {
-            let tile = &world.tiles[idx];
-            let contribution;
-
-            if is_culled[idx] {
-                contribution = RIVER_SELF;
-            } else if is_fringe[idx] {
-                // A fringe tile adjacent to any still-visible water (drawn river or lake)
-                // should keep its riparian coloring — only strip the effect when the
-                // river causing it is entirely absent from the display.
-                let (x, y) = world.coords(idx);
-                let near_visible = world.neighbors8(x, y).any(|(nx, ny)| {
-                    let t = &world.tiles[world.idx(nx, ny)];
-                    matches!(t.surface, Surface::Lake)
-                        || (t.surface == Surface::River && t.channel_order >= min_river_order)
-                });
-                if near_visible {
-                    continue;
-                }
-                contribution = RIVER_FRINGE;
-            } else {
-                continue;
-            }
-
-            let dry_moisture = (tile.moisture - contribution).max(0.0);
-            // tile.biome is already correct: assign_biomes uses surrounding_land_moisture
-            // for river tiles, so it reflects the actual terrain context, not the
-            // inflated river moisture. Only the colour-modulation moisture needs adjusting.
-            colors[idx] = tile_land_color(
-                world,
-                idx,
-                tile.biome,
-                dry_moisture,
-                min_river_order,
-                noise_cell,
-                micro_amp,
-            );
-        }
-    }
-
-    colors
+        .collect()
 }
-
-pub(super) const RIVER_COLOR: Rgba<u8> = Rgba([44, 88, 156, 255]);
 
 fn tile_land_color(
     world: &World,
     idx: usize,
     biome: Biome,
     moisture: f32,
-    min_river_order: u8,
     noise_cell: usize,
     micro_amp: i16,
 ) -> Rgba<u8> {
     let tile = &world.tiles[idx];
     let (x, y) = world.coords(idx);
     let mut color = biome_color_climatic(biome, tile.temperature, moisture);
-    if !matches!(biome, Biome::Ocean | Biome::Lake) {
+    if biome != Biome::Ocean {
         let height_above_sea = (tile.raw_elevation - world.sea_level).max(0.0);
         if matches!(biome, Biome::Alpine) {
             let alpine_t = ((height_above_sea - 0.36) / 0.08).clamp(0.0, 1.0);
@@ -158,94 +51,17 @@ fn tile_land_color(
         let micro = (variation * micro_amp as f32) as i16 - micro_amp / 2;
         let macro_v = ((regional - 0.5) * 10.0) as i16;
         color = offset(color, elev_shade + micro + macro_v);
-
-        // Riparian corridor: dry biomes near drawn rivers or lakes get a subtle green push
-        // representing water-side vegetation. Two-ring gradient — stronger close, subtle far.
-        if matches!(
-            biome,
-            Biome::Steppe
-                | Biome::TemperateGrassland
-                | Biome::Savanna
-                | Biome::Desert
-                | Biome::PolarDesert
-                | Biome::Tundra
-                | Biome::Foothills
-                | Biome::Woodland
-        ) {
-            let is_near_water = |nx: isize, ny: isize| -> bool {
-                if !world.in_bounds(nx, ny) {
-                    return false;
-                }
-                let t = &world.tiles[world.idx(nx as usize, ny as usize)];
-                matches!(t.surface, Surface::Lake)
-                    || (t.surface == Surface::River && t.channel_order >= min_river_order)
-            };
-            let near1 = world
-                .neighbors8(x, y)
-                .any(|(nx, ny)| is_near_water(nx as isize, ny as isize));
-            let near2 = if near1 {
-                false
-            } else {
-                let ix = x as isize;
-                let iy = y as isize;
-                [
-                    (-2, -2),
-                    (-1, -2),
-                    (0, -2),
-                    (1, -2),
-                    (2, -2),
-                    (-2, -1),
-                    (2, -1),
-                    (-2, 0),
-                    (2, 0),
-                    (-2, 1),
-                    (2, 1),
-                    (-2, 2),
-                    (-1, 2),
-                    (0, 2),
-                    (1, 2),
-                    (2, 2),
-                ]
-                .iter()
-                .any(|(dx, dy)| is_near_water(ix + dx, iy + dy))
-            };
-            if near1 {
-                color = Rgba([
-                    (color[0] as i16 - 4).clamp(0, 255) as u8,
-                    (color[1] as i16 + 7).clamp(0, 255) as u8,
-                    (color[2] as i16 - 3).clamp(0, 255) as u8,
-                    255,
-                ]);
-            } else if near2 {
-                color = Rgba([
-                    color[0],
-                    (color[1] as i16 + 2).clamp(0, 255) as u8,
-                    color[2],
-                    255,
-                ]);
-            }
-        }
     }
     color
 }
 
 // One pass of weighted neighbour blending at biome boundaries.
-// River tiles are skipped — their water colour must stay intact.
-// Land tiles at river banks blend with the water colour, creating a natural
-// bank tint without a separate rendering pass.
-pub(super) fn soften_biome_edges(
-    world: &World,
-    colors: &[Rgba<u8>],
-    show_rivers: bool,
-) -> Vec<Rgba<u8>> {
+pub(super) fn soften_biome_edges(world: &World, colors: &[Rgba<u8>]) -> Vec<Rgba<u8>> {
     let mut out = colors.to_vec();
     for idx in 0..world.tiles.len() {
         let tile = &world.tiles[idx];
         let my_biome = tile.biome;
-        // River tiles: keep their water colour pure.
-        if matches!(my_biome, Biome::Ocean | Biome::Lake)
-            || (show_rivers && tile.surface == Surface::River)
-        {
+        if my_biome == Biome::Ocean {
             continue;
         }
         let (x, y) = world.coords(idx);
@@ -256,10 +72,7 @@ pub(super) fn soften_biome_edges(
         for (nx, ny) in world.neighbors8(x, y) {
             let nidx = world.idx(nx, ny);
             let nb = world.tiles[nidx].biome;
-            // River neighbours are always treated as a distinct "biome" so the land
-            // tile at the bank blends a little water colour in — a natural bank tint.
-            let nb_is_river = show_rivers && world.tiles[nidx].surface == Surface::River;
-            if !nb_is_river && (nb == my_biome || matches!(nb, Biome::Ocean | Biome::Lake)) {
+            if nb == my_biome || nb == Biome::Ocean {
                 continue;
             }
             r += colors[nidx][0] as f32;
@@ -272,19 +85,11 @@ pub(super) fn soften_biome_edges(
     out
 }
 
-pub(super) fn apply_snow_overlay(
-    world: &World,
-    colors: &[Rgba<u8>],
-    show_rivers: bool,
-) -> Vec<Rgba<u8>> {
+pub(super) fn apply_snow_overlay(world: &World, colors: &[Rgba<u8>]) -> Vec<Rgba<u8>> {
     colors
         .iter()
         .enumerate()
         .map(|(idx, &color)| {
-            // Rivers are flowing water; they don't accumulate permanent snow.
-            if show_rivers && world.tiles[idx].surface == Surface::River {
-                return color;
-            }
             let snow = permanent_snow_cover(world, idx);
             if snow > 0.0 {
                 lerp_rgba(color, Rgba([240, 244, 248, 255]), snow)
@@ -376,7 +181,6 @@ fn biome_color(biome: Biome) -> Rgba<u8> {
     match biome {
         Biome::Ocean => Rgba([38, 84, 148, 255]),
         Biome::Coast => Rgba([204, 198, 148, 255]),
-        Biome::Lake => Rgba([62, 148, 204, 255]),
         Biome::PolarDesert => Rgba([212, 220, 218, 255]),
         Biome::Tundra => Rgba([148, 168, 126, 255]),
         Biome::BorealForest => Rgba([64, 112, 68, 255]),

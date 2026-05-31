@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
-use crate::World;
+use crate::{Surface, World};
 
-pub(in crate::generate) fn classify_ocean(world: &World) -> Vec<bool> {
+pub(super) fn classify_ocean(world: &World) -> Vec<bool> {
     let mut ocean = vec![false; world.tiles.len()];
     let mut queue = VecDeque::new();
 
@@ -28,6 +28,33 @@ pub(in crate::generate) fn classify_ocean(world: &World) -> Vec<bool> {
     }
 
     ocean
+}
+
+pub(super) fn apply_ocean_surfaces(world: &mut World, ocean: &[bool]) {
+    let mut surfaces = vec![Surface::Land; world.tiles.len()];
+
+    for (idx, is_ocean) in ocean.iter().copied().enumerate().take(world.tiles.len()) {
+        if is_ocean {
+            surfaces[idx] = Surface::Ocean;
+        }
+    }
+
+    for idx in 0..world.tiles.len() {
+        if surfaces[idx] != Surface::Land {
+            continue;
+        }
+        let (x, y) = world.coords(idx);
+        if world
+            .neighbors8(x, y)
+            .any(|(nx, ny)| surfaces[world.idx(nx, ny)] == Surface::Ocean)
+        {
+            surfaces[idx] = Surface::Coast;
+        }
+    }
+
+    for (tile, surface) in world.tiles.iter_mut().zip(surfaces.into_iter()) {
+        tile.surface = surface;
+    }
 }
 
 fn seed_ocean_boundary(
