@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use noise::OpenSimplex;
 
-use crate::{World, WorldConfig};
+use crate::{LEGACY_WORLD_SIZE, World, WorldConfig};
 
 use super::terrain::TerrainFields;
 use super::util::{hash01, latitude_factor, normalize, octave_noise, smoothstep};
@@ -57,25 +57,29 @@ fn sample_climate_fields(
         continentality: inputs.regional_continentality.to_vec(),
     };
     let wind_tilt = prevailing_wind_angle(world.seed);
+    let ws = world.effective_world_size() as f64;
+    let legacy = LEGACY_WORLD_SIZE as f64;
 
     for y in 0..world.height {
         for x in 0..world.width {
             let idx = world.idx(x, y);
+            let xf = x as f64 / ws;
+            let yf = y as f64 / ws;
             let elevation = terrain.elevation[idx];
             let lat = latitude_factor(y, world.height);
             let wind = wind_at_latitude(wind_tilt, lat);
             let climate_noise = octave_noise(
                 inputs.climate,
-                x as f64 * 0.008,
-                y as f64 * 0.008,
+                xf * legacy * 0.008,
+                yf * legacy * 0.008,
                 3,
                 0.5,
                 2.0,
             );
             let seasonal_noise = octave_noise(
                 inputs.climate,
-                x as f64 * 0.004 - 19.0,
-                y as f64 * 0.004 + 31.0,
+                xf * legacy * 0.004 - 19.0,
+                yf * legacy * 0.004 + 31.0,
                 2,
                 0.5,
                 2.0,
@@ -133,6 +137,7 @@ fn compute_nearby_water(world: &World, ocean: &[bool]) -> Vec<f32> {
 fn compute_regional_continentality(world: &World, ocean: &[bool]) -> Vec<f32> {
     let mut field = vec![0.0_f32; world.tile_count()];
     let max_extent = (world.width.max(world.height) as f32 * 0.36).max(1.0);
+    let fetch_steps = scaled_steps(world, 18);
     for idx in 0..world.tiles.len() {
         if ocean[idx] {
             continue;
@@ -146,16 +151,17 @@ fn compute_regional_continentality(world: &World, ocean: &[bool]) -> Vec<f32> {
             (0, -1, 0.85),
             (0, 1, 0.85),
         ] {
-            for step in 1..=18 {
-                let nx = x as isize + dx * step;
-                let ny = y as isize + dy * step;
+            for step in 1..=fetch_steps {
+                let step_i = step as isize;
+                let nx = x as isize + dx * step_i;
+                let ny = y as isize + dy * step_i;
                 if !world.in_bounds(nx, ny) {
                     break;
                 }
                 let nidx = world.idx(nx as usize, ny as usize);
                 if ocean[nidx] {
                     ocean_hits += weight;
-                    weighted_distance += (step as f32 / 18.0) * weight;
+                    weighted_distance += (step as f32 / fetch_steps as f32) * weight;
                     break;
                 }
             }
@@ -218,6 +224,10 @@ fn moisture_value(
     if fields.ocean[idx] {
         return 1.0;
     }
+    let ws = world.effective_world_size() as f64;
+    let legacy = LEGACY_WORLD_SIZE as f64;
+    let xf = x as f64 / ws;
+    let yf = y as f64 / ws;
 
     let ocean_influence = 1.0
         - (fields.distance_to_ocean[idx] as f32 / (world.width.max(world.height) as f32 * 0.45))
@@ -233,16 +243,16 @@ fn moisture_value(
             .clamp(0.0, 1.0);
     let noise = octave_noise(
         fields.climate,
-        x as f64 * 0.014 + 7.0,
-        y as f64 * 0.014 - 9.0,
+        xf * legacy * 0.014 + 7.0,
+        yf * legacy * 0.014 - 9.0,
         4,
         0.55,
         2.0,
     );
     let monsoon = octave_noise(
         fields.climate,
-        x as f64 * 0.006 - 41.0,
-        y as f64 * 0.006 + 17.0,
+        xf * legacy * 0.006 - 41.0,
+        yf * legacy * 0.006 + 17.0,
         3,
         0.55,
         2.0,
@@ -293,8 +303,9 @@ fn rain_shadow(
     let mut moisture = 0.0_f32;
     let mut barrier = 0.0_f32;
     let mut found_ocean = false;
+    let upwind_steps = scaled_steps(world, 16);
 
-    for step in 1_usize..=16 {
+    for step in 1_usize..=upwind_steps {
         let nx = (x as f32 + upwind.0 * step as f32).round() as isize;
         let ny = (y as f32 + upwind.1 * step as f32).round() as isize;
         if !world.in_bounds(nx, ny) {
@@ -303,7 +314,7 @@ fn rain_shadow(
         let nidx = world.idx(nx as usize, ny as usize);
         if ocean[nidx] {
             // Moisture decays with distance from coast so far-inland tiles still dry out.
-            let proximity = 1.0 - (step as f32 - 1.0) / 16.0;
+            let proximity = 1.0 - (step as f32 - 1.0) / upwind_steps as f32;
             moisture += 0.12 * proximity.max(0.03);
             found_ocean = true;
             break;
@@ -313,7 +324,7 @@ fn rain_shadow(
 
     if !found_ocean {
         // Leeward scan: minor contribution from the downwind direction.
-        for step in 1_usize..=8 {
+        for step in 1_usize..=scaled_steps(world, 8) {
             let nx = (x as f32 + wind.0 * step as f32).round() as isize;
             let ny = (y as f32 + wind.1 * step as f32).round() as isize;
             if !world.in_bounds(nx, ny) {
@@ -328,4 +339,10 @@ fn rain_shadow(
     }
 
     (moisture - barrier * 0.60).clamp(0.0, 1.0)
+}
+
+fn scaled_steps(world: &World, base: usize) -> usize {
+    (base as f32 * world.high_detail_scale())
+        .round()
+        .max(base as f32) as usize
 }

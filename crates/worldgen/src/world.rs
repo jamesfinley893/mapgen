@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::config::LEGACY_WORLD_SIZE;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Surface {
     Ocean,
@@ -38,10 +40,24 @@ pub enum MountainFeature {
     Summit,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Landform {
+    Water,
+    Shore,
+    #[default]
+    Plain,
+    Hill,
+    Valley,
+    Ridge,
+    Peak,
+    Basin,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Tile {
     pub raw_elevation: f32,
+    pub elevation_shade: f32,
     pub slope: f32,
     pub relief: f32,
     pub runoff: f32,
@@ -65,12 +81,17 @@ pub struct Tile {
     pub surface: Surface,
     pub biome: Biome,
     pub mountain_feature: MountainFeature,
+    pub landform: Landform,
+    pub terrain_texture: f32,
+    pub ecotone_strength: f32,
+    pub shore_influence: f32,
 }
 
 impl Default for Tile {
     fn default() -> Self {
         Self {
             raw_elevation: 0.0,
+            elevation_shade: 0.5,
             slope: 0.0,
             relief: 0.0,
             runoff: 0.0,
@@ -94,6 +115,10 @@ impl Default for Tile {
             surface: Surface::Ocean,
             biome: Biome::Ocean,
             mountain_feature: MountainFeature::None,
+            landform: Landform::Plain,
+            terrain_texture: 0.5,
+            ecotone_strength: 0.0,
+            shore_influence: 0.0,
         }
     }
 }
@@ -120,13 +145,23 @@ impl World {
         }
     }
 
-    /// Tiles per world unit. Resolves the 0 sentinel to min(width, height).
+    /// Tiles per world unit. Resolves the 0 sentinel to min(width, height),
+    /// which preserves the legacy single-world-unit behavior for explicit opt-in.
     pub fn effective_world_size(&self) -> f32 {
         if self.world_size == 0 {
             self.width.min(self.height) as f32
         } else {
             self.world_size as f32
         }
+    }
+
+    pub fn high_detail_scale(&self) -> f32 {
+        (self.effective_world_size() / LEGACY_WORLD_SIZE as f32).max(1.0)
+    }
+
+    pub fn high_detail_cell_area(&self) -> f32 {
+        let scale = self.high_detail_scale();
+        1.0 / (scale * scale)
     }
 
     pub fn tile_count(&self) -> usize {

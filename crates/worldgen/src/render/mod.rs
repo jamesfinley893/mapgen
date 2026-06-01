@@ -1,423 +1,464 @@
-use crate::generate::{smoothstep, value_noise};
-mod biome_style;
-use coast::draw_coastline;
-use colors::{apply_snow_overlay_in_place, land_base_colors, soften_biome_edges};
 use image::{Rgba, RgbaImage};
-use rivers::draw_rivers;
-use shading::{build_land_vertices, compute_hillshade, draw_tile_hillshaded, lerp_rgba, offset};
 
-mod coast;
-mod colors;
-mod rivers;
-mod shading;
+use crate::generate::smoothstep;
+use crate::{Biome, Landform, MountainFeature, Surface, Tile, World};
 
-use crate::{Biome, Surface, World};
+mod biome_style;
 
-#[derive(Debug, Clone, Copy)]
-pub struct RenderConfig {
-    pub scale: u32,
-}
+use biome_style::coastal_hinterland_biome;
 
-pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
-    let scale = config.scale.max(1);
-    let width = world.width as u32 * scale;
-    let height = world.height as u32 * scale;
-    let mut image = RgbaImage::new(width, height);
-    let hillshade = build_hillshade(world);
-    let land_colors = build_land_colors(world, scale);
-    let land_vertices = build_land_vertices(world, &hillshade, &land_colors);
-    let ocean_vertices = build_ocean_vertices(world);
+pub fn render_world(world: &World) -> RgbaImage {
+    let mut image = RgbaImage::new(world.width as u32, world.height as u32);
 
-    draw_base_layer(
-        &mut image,
-        world,
-        scale,
-        &land_vertices,
-        &ocean_vertices,
-        &hillshade,
-    );
-    draw_land_features(&mut image, world, scale);
+    for y in 0..world.height {
+        for x in 0..world.width {
+            let idx = world.idx(x, y);
+            image.put_pixel(x as u32, y as u32, tile_color(world, idx));
+        }
+    }
 
     image
 }
 
-fn build_hillshade(world: &World) -> Vec<f32> {
-    let mut hillshade = (0..world.tiles.len())
-        .map(|idx| {
-            if is_water_layer(world.tiles[idx].biome) {
-                return 0.0;
-            }
-            let (x, y) = world.coords(idx);
-            compute_hillshade(world, x, y)
-        })
-        .collect::<Vec<_>>();
-    smooth_hillshade_in_place(world, &mut hillshade, 1);
-    hillshade
-}
-
-fn smooth_hillshade_in_place(world: &World, hillshade: &mut Vec<f32>, passes: usize) {
-    let mut scratch = vec![0.0_f32; hillshade.len()];
-
-    for _ in 0..passes {
-        for idx in 0..world.tiles.len() {
-            if is_water_layer(world.tiles[idx].biome) {
-                scratch[idx] = 0.0;
-                continue;
-            }
-
-            let (x, y) = world.coords(idx);
-            let mut sum = hillshade[idx] * 5.0;
-            let mut weight = 5.0_f32;
-            for (nx, ny) in world.neighbors8(x, y) {
-                let nidx = world.idx(nx, ny);
-                if is_water_layer(world.tiles[nidx].biome) {
-                    continue;
-                }
-                sum += hillshade[nidx];
-                weight += 1.0;
-            }
-
-            scratch[idx] = sum / weight;
-        }
-
-        std::mem::swap(hillshade, &mut scratch);
-    }
-}
-
-fn is_water_layer(biome: Biome) -> bool {
-    matches!(biome, Biome::Ocean | Biome::Freshwater)
-}
-
-fn build_land_colors(world: &World, scale: u32) -> Vec<Rgba<u8>> {
-    // Pre-compute land base colors, soften biome-boundary edges, then apply snow.
-    // Snow must come after softening so partially-snowed tiles don't bleed white
-    // into neighboring biomes through the blend pass.
-    let land_colors = land_base_colors(world, scale);
-    let mut land_colors = soften_biome_edges(world, &land_colors);
-    apply_snow_overlay_in_place(world, &mut land_colors);
-    land_colors
-}
-
-fn draw_base_layer(
-    image: &mut RgbaImage,
-    world: &World,
-    scale: u32,
-    land_vertices: &shading::LandVertexGrid,
-    ocean_vertices: &OceanVertexGrid,
-    hillshade: &[f32],
-) {
-    for (idx, tile) in world.tiles.iter().enumerate() {
-        let (x, y) = world.coords(idx);
-
-        if matches!(tile.biome, Biome::Ocean) {
-            draw_ocean_tile(image, world, ocean_vertices, x, y, scale);
-        } else if matches!(tile.biome, Biome::Freshwater) {
-            draw_freshwater_tile(image, world, idx, x, y, scale);
-        } else {
-            draw_tile_hillshaded(image, land_vertices, world, hillshade, x as u32, y as u32, scale);
-        }
-    }
-}
-
-fn draw_ocean_tile(
-    image: &mut RgbaImage,
-    world: &World,
-    ocean_vertices: &OceanVertexGrid,
-    x: usize,
-    y: usize,
-    scale: u32,
-) {
-    let ox = x as u32 * scale;
-    let oy = y as u32 * scale;
-    let v00 = ocean_vertices.get(x, y);
-    let v10 = ocean_vertices.get(x + 1, y);
-    let v01 = ocean_vertices.get(x, y + 1);
-    let v11 = ocean_vertices.get(x + 1, y + 1);
-    let s = scale as f32;
-
-    for py in 0..scale {
-        for px in 0..scale {
-            let fx = (px as f32 + 0.5) / s;
-            let fy = (py as f32 + 0.5) / s;
-            let depth = v00.depth * (1.0 - fx) * (1.0 - fy)
-                + v10.depth * fx * (1.0 - fy)
-                + v01.depth * (1.0 - fx) * fy
-                + v11.depth * fx * fy;
-            let temperature = v00.temperature * (1.0 - fx) * (1.0 - fy)
-                + v10.temperature * fx * (1.0 - fy)
-                + v01.temperature * (1.0 - fx) * fy
-                + v11.temperature * fx * fy;
-            let gx = (ox + px) as usize;
-            let gy = (oy + py) as usize;
-            image.put_pixel(
-                ox + px,
-                oy + py,
-                ocean_textured_color(world.seed, depth, temperature, gx, gy),
-            );
-        }
-    }
-}
-
-fn draw_freshwater_tile(
-    image: &mut RgbaImage,
-    world: &World,
-    idx: usize,
-    x: usize,
-    y: usize,
-    scale: u32,
-) {
-    let ox = x as u32 * scale;
-    let oy = y as u32 * scale;
+fn tile_color(world: &World, idx: usize) -> Rgba<u8> {
     let tile = &world.tiles[idx];
-    // Teal depth ramp matching the river palette. Tiles touching the shore render
-    // shallower as a simple depth cue; open-water tiles render at full depth.
-    let shallow = Rgba([86, 144, 156, 255]);
-    let deep = Rgba([34, 84, 108, 255]);
-    let depth_t = smoothstep(0.05, 0.80, tile.lake_depth.clamp(0.0, 1.0));
-    let depth_t = if freshwater_is_shore(world, x, y) {
-        depth_t * 0.45
+
+    if tile.surface == Surface::Ocean || tile.biome == Biome::Ocean {
+        return ocean_color(world, tile);
+    }
+
+    let base = if tile.biome == Biome::Freshwater || tile.lake_depth > 0.0 {
+        freshwater_color(tile)
     } else {
-        depth_t
-    };
-    let base = lerp_rgba(shallow, deep, depth_t);
-
-    for py in 0..scale {
-        for px in 0..scale {
-            let gx = (ox + px) as usize;
-            let gy = (oy + py) as usize;
-            let ripple = value_noise(world.seed ^ 0x3E7F_91C2, gx, gy, 7) - 0.5;
-            image.put_pixel(ox + px, oy + py, offset(base, (ripple * 5.0) as i16));
-        }
-    }
-}
-
-fn freshwater_is_shore(world: &World, x: usize, y: usize) -> bool {
-    world.neighbors8(x, y).any(|(nx, ny)| {
-        !matches!(world.tiles[world.idx(nx, ny)].biome, Biome::Freshwater)
-    })
-}
-
-#[derive(Clone, Copy)]
-struct OceanVertex {
-    depth: f32,
-    temperature: f32,
-}
-
-struct OceanVertexGrid {
-    width: usize,
-    vertices: Vec<OceanVertex>,
-}
-
-impl OceanVertexGrid {
-    fn get(&self, x: usize, y: usize) -> OceanVertex {
-        self.vertices[y * self.width + x]
-    }
-}
-
-fn build_ocean_vertices(world: &World) -> OceanVertexGrid {
-    let width = world.width + 1;
-    let height = world.height + 1;
-    let mut vertices = Vec::with_capacity(width * height);
-
-    for y in 0..height {
-        for x in 0..width {
-            vertices.push(ocean_vertex_at(world, x as isize, y as isize));
-        }
-    }
-
-    OceanVertexGrid { width, vertices }
-}
-
-fn ocean_vertex_at(world: &World, x: isize, y: isize) -> OceanVertex {
-    let mut ocean_depth = 0.0_f32;
-    let mut ocean_temperature = 0.0_f32;
-    let mut ocean_count = 0.0_f32;
-    let mut ambient_temperature = 0.0_f32;
-    let mut ambient_count = 0.0_f32;
-
-    for dy in [-1_isize, 0] {
-        for dx in [-1_isize, 0] {
-            let tx = x + dx;
-            let ty = y + dy;
-            if !world.in_bounds(tx, ty) {
-                continue;
-            }
-            let tile = &world.tiles[world.idx(tx as usize, ty as usize)];
-            ambient_temperature += tile.temperature;
-            ambient_count += 1.0;
-            if tile.surface == Surface::Ocean || tile.biome == Biome::Ocean {
-                ocean_depth += ocean_tile_depth(world, tile.raw_elevation);
-                ocean_temperature += tile.temperature;
-                ocean_count += 1.0;
-            }
-        }
-    }
-
-    if ambient_count <= f32::EPSILON {
-        return OceanVertex {
-            depth: 0.0,
-            temperature: 0.5,
-        };
-    }
-
-    let fallback_depth = if ocean_count > 0.0 {
-        ocean_depth / ocean_count
-    } else {
-        0.0
-    };
-    let fallback_temperature = if ocean_count > 0.0 {
-        ocean_temperature / ocean_count
-    } else {
-        ambient_temperature / ambient_count
+        land_color(world, tile)
     };
 
-    let mut depth = 0.0_f32;
-    let mut temperature = 0.0_f32;
-    let mut weight = 0.0_f32;
-    for dy in [-1_isize, 0] {
-        for dx in [-1_isize, 0] {
-            let tx = x + dx;
-            let ty = y + dy;
-            if !world.in_bounds(tx, ty) {
-                continue;
-            }
-            let tile = &world.tiles[world.idx(tx as usize, ty as usize)];
-            if tile.surface == Surface::Ocean || tile.biome == Biome::Ocean {
-                depth += ocean_tile_depth(world, tile.raw_elevation);
-                temperature += tile.temperature;
-            } else {
-                depth += land_adjacent_shelf_depth(world, fallback_depth, tile.raw_elevation);
-                temperature += fallback_temperature;
-            }
-            weight += 1.0;
-        }
-    }
-
-    OceanVertex {
-        depth: depth / weight,
-        temperature: temperature / weight,
+    if is_channel(tile) {
+        blend(base, channel_color(tile), channel_alpha(tile))
+    } else {
+        base
     }
 }
 
-fn ocean_tile_depth(world: &World, raw_elevation: f32) -> f32 {
-    (world.sea_level - raw_elevation).max(0.0)
+fn is_channel(tile: &Tile) -> bool {
+    tile.surface != Surface::Ocean
+        && tile.lake_depth <= 0.0
+        && (tile.river_order > 0 || tile.river > 0.18 || tile.spill_discharge > 0.04)
 }
 
-fn land_adjacent_shelf_depth(world: &World, fallback_depth: f32, land_elevation: f32) -> f32 {
-    let land_height = (land_elevation - world.sea_level).max(0.0);
-    let steep_shore = smoothstep(0.035, 0.22, land_height);
-
-    (0.016 + steep_shore * 0.018 + fallback_depth.min(0.12) * 0.12).clamp(0.012, 0.046)
-}
-
-fn ocean_color_for_depth(depth: f32) -> Rgba<u8> {
+fn ocean_color(world: &World, tile: &Tile) -> Rgba<u8> {
+    let depth = (world.sea_level - tile.raw_elevation).max(0.0);
     let shelf_t = (1.0 - smoothstep(0.0, 0.048, depth)).clamp(0.0, 1.0);
     let deep_t = smoothstep(0.06, 0.26, depth).clamp(0.0, 1.0);
     let shelf_color = Rgba([58, 132, 182, 255]);
     let ocean_color = Rgba([38, 84, 148, 255]);
     let abyss_color = Rgba([18, 46, 102, 255]);
-    lerp_rgba(
+    let mut color = lerp_rgba(
         lerp_rgba(ocean_color, shelf_color, shelf_t),
         abyss_color,
         deep_t,
-    )
-}
+    );
 
-fn ocean_textured_color(seed: u64, depth: f32, temperature: f32, x: usize, y: usize) -> Rgba<u8> {
-    let mut color = ocean_color_for_depth(depth);
-    let broad = value_noise(seed ^ 0x4F3C_2A19, x, y, 18) - 0.5;
-    let ripple = value_noise(seed ^ 0x8B2F_67D1, x + y / 3, y + x / 5, 6) - 0.5;
-    let shallow = 1.0 - smoothstep(0.018, 0.14, depth);
-    let deep = smoothstep(0.10, 0.30, depth);
-    let texture = broad * 3.6 + ripple * (2.4 + shallow * 2.2);
-    color = offset(color, (texture * (1.0 - deep * 0.42)) as i16);
-
-    if shallow > 0.0 {
-        let caustic = value_noise(seed ^ 0x2D9A_5EF3, x + y / 2, y + x / 2, 5);
-        let glint = smoothstep(0.56, 0.92, caustic) * shallow * 0.20;
-        color = lerp_rgba(color, Rgba([126, 190, 202, 255]), shallow * 0.055);
-        color = offset(color, (glint * 10.0) as i16);
+    let warm = smoothstep(0.66, 0.86, tile.temperature);
+    let shallow = smoothstep(0.006, 0.030, depth) * (1.0 - smoothstep(0.055, 0.145, depth));
+    if warm > 0.0 && shallow > 0.0 {
+        color = lerp_rgba(color, Rgba([84, 178, 188, 255]), warm * shallow * 0.36);
     }
 
-    let reef = tropical_shelf_strength(seed, depth, temperature, x, y);
-    if reef > 0.0 {
-        let lagoon = Rgba([84, 178, 188, 255]);
-        let sand = Rgba([124, 194, 190, 255]);
-        let patch = smoothstep(0.50, 0.92, value_noise(seed ^ 0xA61D_43B9, x, y, 9));
-        color = lerp_rgba(color, lerp_rgba(lagoon, sand, patch * 0.34), reef * 0.34);
-        color = offset(color, (reef * patch * 8.0) as i16);
+    let cold = 1.0 - smoothstep(0.08, 0.24, tile.temperature);
+    let ice_shelf = 1.0 - smoothstep(0.05, 0.24, depth);
+    if cold > 0.0 && ice_shelf > 0.0 {
+        color = lerp_rgba(color, Rgba([206, 224, 224, 255]), cold * ice_shelf * 0.38);
     }
 
-    let ice = polar_ice_strength(seed, depth, temperature, x, y);
-    if ice > 0.0 {
-        let floe = value_noise(seed ^ 0x6B91_E8D4, x + y / 4, y + x / 6, 7);
-        let ice_color = Rgba([206, 224, 224, 255]);
-        color = lerp_rgba(
-            color,
-            ice_color,
-            ice * (0.26 + smoothstep(0.42, 0.90, floe) * 0.16),
-        );
-        color = offset(color, (ice * smoothstep(0.68, 0.94, floe) * 8.0) as i16);
+    let shore = tile.shore_influence.clamp(0.0, 1.0);
+    if shore > 0.0 {
+        color = lerp_rgba(color, Rgba([78, 156, 190, 255]), shore * 0.26);
     }
 
     color
 }
 
-fn tropical_shelf_strength(seed: u64, depth: f32, temperature: f32, x: usize, y: usize) -> f32 {
-    let warm = smoothstep(0.66, 0.86, temperature);
-    if warm <= 0.0 {
-        return 0.0;
+fn freshwater_color(tile: &Tile) -> Rgba<u8> {
+    let shallow = Rgba([86, 144, 156, 255]);
+    let deep = Rgba([34, 84, 108, 255]);
+    let depth_t = smoothstep(0.05, 0.80, tile.lake_depth.clamp(0.0, 1.0));
+    let mut color = lerp_rgba(shallow, deep, depth_t);
+    let shore = tile.shore_influence.clamp(0.0, 1.0);
+    if shore > 0.0 {
+        color = lerp_rgba(color, Rgba([96, 166, 170, 255]), shore * 0.30);
     }
-
-    let shelf = smoothstep(0.006, 0.030, depth) * (1.0 - smoothstep(0.055, 0.145, depth));
-    if shelf <= 0.0 {
-        return 0.0;
-    }
-
-    let broken_reef = smoothstep(0.34, 0.84, value_noise(seed ^ 0x3AC7_29D1, x, y, 15));
-
-    (warm * shelf * (0.52 + broken_reef * 0.48)).clamp(0.0, 1.0)
+    color
 }
 
-fn polar_ice_strength(seed: u64, depth: f32, temperature: f32, x: usize, y: usize) -> f32 {
-    let cold = 1.0 - smoothstep(0.08, 0.24, temperature);
-    if cold <= 0.0 {
-        return 0.0;
-    }
+fn land_color(world: &World, tile: &Tile) -> Rgba<u8> {
+    let height_above_sea = (tile.raw_elevation - world.sea_level).max(0.0);
+    let rugged = (tile.relief + tile.slope * 0.75).clamp(0.0, 1.0);
+    let shade = if tile.elevation_shade.is_finite() {
+        tile.elevation_shade.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
 
-    let shelf = 1.0 - smoothstep(0.05, 0.24, depth);
-    if shelf <= 0.0 {
-        return 0.0;
-    }
-
-    let broken_pack = smoothstep(0.38, 0.82, value_noise(seed ^ 0x31AF_C402, x, y, 13));
-    (cold * (0.24 + shelf * 0.76) * (0.50 + broken_pack * 0.50)).clamp(0.0, 1.0)
-}
-
-fn draw_land_features(image: &mut RgbaImage, world: &World, scale: u32) {
-    for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.biome == Biome::Coast {
-            draw_coastline(image, world, idx, scale);
+    let mut color = if tile.biome == Biome::Alpine {
+        alpine_color(height_above_sea, rugged)
+    } else if tile.surface == Surface::Coast || tile.biome == Biome::Coast {
+        coast_color(tile)
+    } else {
+        let visual_biome = visual_land_biome(tile);
+        let mut color = biome_color_climatic(visual_biome, tile.temperature, tile.moisture);
+        let tint_strength = smoothstep(0.04, 0.30, height_above_sea) * 0.28;
+        if tint_strength > 0.0 {
+            color = lerp_rgba(color, elevation_tint(height_above_sea), tint_strength);
         }
+        color
+    };
+
+    color = apply_landform_style(
+        color,
+        tile.landform,
+        height_above_sea,
+        rugged,
+        tile.moisture,
+    );
+    color = apply_ecotone_tone(color, tile);
+    color = offset(color, (height_above_sea * 22.0).min(18.0) as i16);
+    color = scale_rgb(color, shade_factor(tile.biome, shade));
+    color = apply_mountain_feature(color, tile.mountain_feature, shade, rugged);
+    color = apply_terrain_texture(color, tile, rugged);
+    color = apply_shore_style(color, tile);
+
+    let snow = tile_snow_cover(world, tile);
+    if snow > 0.0 {
+        color = lerp_rgba(color, Rgba([240, 244, 248, 255]), snow);
     }
-    draw_rivers(image, world, scale);
+
+    // A wet simulated tile should read wetter even without cross-pixel overlays.
+    if tile.moisture > 0.55 && !matches!(tile.biome, Biome::Alpine | Biome::Foothills) {
+        let wet = smoothstep(0.55, 0.92, tile.moisture) * 0.10;
+        color = lerp_rgba(color, Rgba([74, 132, 82, 255]), wet);
+    }
+
+    color
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn apply_landform_style(
+    color: Rgba<u8>,
+    landform: Landform,
+    height_above_sea: f32,
+    rugged: f32,
+    moisture: f32,
+) -> Rgba<u8> {
+    match landform {
+        Landform::Water | Landform::Plain => color,
+        Landform::Shore => lerp_rgba(color, Rgba([220, 205, 142, 255]), 0.18),
+        Landform::Hill => {
+            let strength = (0.08 + rugged * 0.12 + height_above_sea * 0.08).clamp(0.08, 0.22);
+            lerp_rgba(color, Rgba([168, 152, 102, 255]), strength)
+        }
+        Landform::Valley => {
+            let strength = (0.11 + moisture * 0.08).clamp(0.11, 0.20);
+            offset(lerp_rgba(color, Rgba([70, 128, 88, 255]), strength), -3)
+        }
+        Landform::Ridge => {
+            let strength = (0.16 + rugged * 0.10).clamp(0.16, 0.28);
+            offset(lerp_rgba(color, Rgba([150, 142, 122, 255]), strength), 5)
+        }
+        Landform::Peak => {
+            let strength = (0.24 + rugged * 0.14).clamp(0.24, 0.38);
+            offset(lerp_rgba(color, Rgba([190, 190, 182, 255]), strength), 8)
+        }
+        Landform::Basin => offset(lerp_rgba(color, Rgba([158, 146, 88, 255]), 0.14), -4),
+    }
+}
 
-    #[test]
-    fn ocean_temperature_effects_skip_ineligible_water() {
-        assert_eq!(tropical_shelf_strength(7, 0.04, 0.50, 4, 9), 0.0);
-        assert_eq!(tropical_shelf_strength(7, 0.20, 0.90, 4, 9), 0.0);
-        assert_eq!(polar_ice_strength(7, 0.04, 0.50, 4, 9), 0.0);
-        assert_eq!(polar_ice_strength(7, 0.30, 0.02, 4, 9), 0.0);
+fn apply_ecotone_tone(color: Rgba<u8>, tile: &Tile) -> Rgba<u8> {
+    let ecotone = tile.ecotone_strength.clamp(0.0, 1.0);
+    if ecotone <= 0.0 {
+        return color;
     }
 
-    #[test]
-    fn ocean_temperature_effects_still_apply_when_eligible() {
-        assert!(tropical_shelf_strength(7, 0.04, 0.90, 4, 9) > 0.0);
-        assert!(polar_ice_strength(7, 0.04, 0.02, 4, 9) > 0.0);
+    let tint = ecotone_tint(tile.temperature, tile.moisture);
+    let toned = lerp_rgba(color, tint, ecotone * 0.12);
+    offset(toned, (ecotone * 4.0) as i16)
+}
+
+fn ecotone_tint(temperature: f32, moisture: f32) -> Rgba<u8> {
+    let warm = smoothstep(0.46, 0.82, temperature);
+    let wet = smoothstep(0.42, 0.78, moisture);
+    let dry = 1.0 - smoothstep(0.18, 0.48, moisture);
+    let green = lerp_rgba(Rgba([150, 154, 96, 255]), Rgba([70, 136, 82, 255]), wet);
+    let warm_dry = lerp_rgba(green, Rgba([194, 174, 92, 255]), warm * dry * 0.72);
+    lerp_rgba(
+        warm_dry,
+        Rgba([126, 152, 112, 255]),
+        (1.0 - warm) * wet * 0.35,
+    )
+}
+
+fn apply_terrain_texture(color: Rgba<u8>, tile: &Tile, rugged: f32) -> Rgba<u8> {
+    let texture = tile.terrain_texture.clamp(0.0, 1.0) - 0.5;
+    if texture.abs() <= 0.001 {
+        return color;
     }
+
+    let landform_gain = match tile.landform {
+        Landform::Peak | Landform::Ridge => 0.16,
+        Landform::Hill | Landform::Valley => 0.13,
+        Landform::Basin | Landform::Shore => 0.10,
+        Landform::Plain => 0.08,
+        Landform::Water => 0.0,
+    };
+    let factor = 1.0 + texture * (0.14 + rugged * 0.10 + landform_gain);
+    scale_rgb(color, factor.clamp(0.78, 1.24))
+}
+
+fn apply_shore_style(color: Rgba<u8>, tile: &Tile) -> Rgba<u8> {
+    let shore = tile.shore_influence.clamp(0.0, 1.0);
+    if shore <= 0.0 {
+        return color;
+    }
+
+    let channel = smoothstep(0.035, 0.72, tile.river.max(tile.spill_discharge * 0.85));
+    let tint = if channel > 0.05 && tile.surface == Surface::Land {
+        Rgba([76, 130, 96, 255])
+    } else {
+        Rgba([220, 204, 138, 255])
+    };
+    let strength = if channel > 0.05 {
+        shore * (0.08 + channel * 0.10)
+    } else {
+        shore * 0.18
+    };
+    lerp_rgba(color, tint, strength.clamp(0.0, 0.24))
+}
+
+fn visual_land_biome(tile: &Tile) -> Biome {
+    if tile.biome == Biome::Coast {
+        coastal_hinterland_biome(tile.temperature, tile.moisture)
+    } else {
+        tile.biome
+    }
+}
+
+fn alpine_color(height_above_sea: f32, rugged: f32) -> Rgba<u8> {
+    let alpine_t = smoothstep(0.24, 0.70, height_above_sea);
+    lerp_rgba(
+        lerp_rgba(Rgba([82, 84, 84, 255]), Rgba([108, 106, 100, 255]), rugged),
+        lerp_rgba(
+            Rgba([166, 166, 160, 255]),
+            Rgba([186, 186, 180, 255]),
+            rugged,
+        ),
+        (alpine_t * 0.86 + rugged * 0.14).clamp(0.0, 1.0),
+    )
+}
+
+fn coast_color(tile: &Tile) -> Rgba<u8> {
+    let hinterland = biome_color_climatic(
+        coastal_hinterland_biome(tile.temperature, tile.moisture),
+        tile.temperature,
+        tile.moisture,
+    );
+    let rugged = smoothstep(0.026, 0.115, tile.relief + tile.slope * 0.75);
+    let shore = lerp_rgba(
+        Rgba([218, 205, 154, 255]),
+        Rgba([154, 150, 132, 255]),
+        rugged,
+    );
+    lerp_rgba(shore, hinterland, 0.34 + rugged * 0.22)
+}
+
+fn shade_factor(biome: Biome, shade: f32) -> f32 {
+    match biome {
+        Biome::Alpine => 0.56 + shade * 0.70,
+        Biome::Foothills => 0.58 + shade * 0.66,
+        _ => 0.66 + shade * 0.56,
+    }
+}
+
+fn apply_mountain_feature(
+    color: Rgba<u8>,
+    feature: MountainFeature,
+    shade: f32,
+    rugged: f32,
+) -> Rgba<u8> {
+    match feature {
+        MountainFeature::Summit => offset(color, (14.0 + shade * 12.0) as i16),
+        MountainFeature::Ridge => offset(color, (6.0 + rugged * 10.0 + shade * 5.0) as i16),
+        MountainFeature::AlpineSlope => offset(color, (rugged * 5.0) as i16),
+        MountainFeature::Foothill => offset(color, (rugged * 3.0) as i16),
+        MountainFeature::None => color,
+    }
+}
+
+fn tile_snow_cover(world: &World, tile: &Tile) -> f32 {
+    let height_above_sea = (tile.raw_elevation - world.sea_level).max(0.0);
+
+    let (snow_line, melt_band, max_cover) = match tile.biome {
+        Biome::Alpine => {
+            let (line_offset, max_cover) = match tile.mountain_feature {
+                MountainFeature::Summit => (0.04, 0.58),
+                MountainFeature::Ridge => (0.08, 0.34),
+                MountainFeature::AlpineSlope
+                | MountainFeature::None
+                | MountainFeature::Foothill => (0.10, 0.16),
+            };
+            let snow_line = (world.sea_level + 0.28 + tile.temperature * 0.20 + line_offset)
+                .min(world.sea_level + 0.56);
+            (snow_line, 0.12, max_cover)
+        }
+        Biome::Foothills => {
+            if tile.temperature > 0.28 || height_above_sea < 0.34 {
+                return 0.0;
+            }
+            let snow_line =
+                (world.sea_level + 0.34 + tile.temperature * 0.14).min(world.sea_level + 0.54);
+            (snow_line, 0.12, 0.12)
+        }
+        Biome::Tundra | Biome::PolarDesert => {
+            if tile.temperature > 0.16 || height_above_sea < 0.28 {
+                return 0.0;
+            }
+            let snow_line =
+                (world.sea_level + 0.32 + tile.temperature * 0.16).min(world.sea_level + 0.52);
+            (snow_line, 0.14, 0.42)
+        }
+        _ => return 0.0,
+    };
+
+    ((tile.raw_elevation - snow_line) / melt_band).clamp(0.0, max_cover)
+}
+
+fn channel_color(tile: &Tile) -> Rgba<u8> {
+    let flow = tile.river.max(tile.spill_discharge * 0.85).clamp(0.0, 1.0);
+    let order = if tile.river_order > 0 {
+        ((tile.river_order.min(4) as f32 - 1.0) / 3.0).clamp(0.0, 1.0)
+    } else {
+        smoothstep(0.05, 0.50, flow)
+    };
+    let depth = (order * 0.45 + tile.river_depth.clamp(0.0, 1.0) * 0.40 + tile.river_width * 0.15)
+        .clamp(0.0, 1.0);
+    lerp_rgba(Rgba([76, 138, 152, 255]), Rgba([28, 76, 104, 255]), depth)
+}
+
+fn channel_alpha(tile: &Tile) -> f32 {
+    let flow = tile.river.max(tile.spill_discharge * 0.85).clamp(0.0, 1.0);
+    let order = if tile.river_order > 0 {
+        ((tile.river_order.min(4) as f32 - 1.0) / 3.0).clamp(0.0, 1.0)
+    } else {
+        smoothstep(0.05, 0.50, flow)
+    };
+    (0.48 + flow * 0.16 + order * 0.16 + tile.river_depth * 0.12 + tile.river_width * 0.08)
+        .clamp(0.0, 0.92)
+}
+
+fn biome_color_climatic(biome: Biome, temperature: f32, moisture: f32) -> Rgba<u8> {
+    let base = biome_color(biome);
+    match biome {
+        Biome::Steppe | Biome::TemperateGrassland => {
+            let dryness = (1.0 - (moisture.clamp(0.15, 0.45) - 0.15) / 0.30).max(0.0);
+            add_rgb(
+                base,
+                (dryness * 12.0) as i16,
+                (dryness * 2.0) as i16,
+                -(dryness * 10.0) as i16,
+            )
+        }
+        Biome::Desert => {
+            let heat = (temperature - 0.4).clamp(0.0, 0.45) / 0.45;
+            add_rgb(base, (heat * 10.0) as i16, 0, -(heat * 10.0) as i16)
+        }
+        Biome::Savanna => {
+            let dry = (1.0 - (moisture.clamp(0.2, 0.4) - 0.2) / 0.2).max(0.0);
+            let dr = (dry * 8.0) as i16;
+            add_rgb(base, dr, dr / 2, -dr)
+        }
+        Biome::BorealForest => {
+            let cold = (1.0 - (temperature.clamp(0.12, 0.32) - 0.12) / 0.20).max(0.0);
+            let d = (cold * 7.0) as i16;
+            add_rgb(base, -d, -d, -d)
+        }
+        Biome::Tundra => {
+            let wet = (moisture.clamp(0.3, 0.7) - 0.3) / 0.4;
+            let g = (wet * 8.0) as i16;
+            add_rgb(base, -g / 2, g, 0)
+        }
+        Biome::Wetland => {
+            let wet = moisture.clamp(0.45, 0.90);
+            let dark = ((wet - 0.45) / 0.45 * 10.0) as i16;
+            add_rgb(base, -dark / 2, dark / 2, -dark)
+        }
+        _ => base,
+    }
+}
+
+fn biome_color(biome: Biome) -> Rgba<u8> {
+    match biome {
+        Biome::Ocean => Rgba([38, 84, 148, 255]),
+        Biome::Coast => Rgba([204, 198, 148, 255]),
+        Biome::PolarDesert => Rgba([212, 220, 218, 255]),
+        Biome::Tundra => Rgba([148, 168, 126, 255]),
+        Biome::BorealForest => Rgba([64, 112, 68, 255]),
+        Biome::TemperateGrassland => Rgba([158, 184, 90, 255]),
+        Biome::TemperateForest => Rgba([80, 138, 76, 255]),
+        Biome::Woodland => Rgba([106, 150, 78, 255]),
+        Biome::Wetland => Rgba([92, 128, 78, 255]),
+        Biome::Freshwater => Rgba([58, 128, 148, 255]),
+        Biome::Foothills => Rgba([160, 148, 110, 255]),
+        Biome::Steppe => Rgba([176, 168, 96, 255]),
+        Biome::Desert => Rgba([218, 196, 126, 255]),
+        Biome::Savanna => Rgba([186, 180, 76, 255]),
+        Biome::TropicalForest => Rgba([56, 148, 70, 255]),
+        Biome::Rainforest => Rgba([34, 112, 52, 255]),
+        Biome::Alpine => Rgba([144, 146, 142, 255]),
+    }
+}
+
+fn elevation_tint(height_above_sea: f32) -> Rgba<u8> {
+    if height_above_sea < 0.20 {
+        let s = (height_above_sea - 0.06).max(0.0) / 0.14;
+        lerp_rgba(Rgba([144, 138, 90, 255]), Rgba([148, 122, 82, 255]), s)
+    } else if height_above_sea < 0.34 {
+        let s = (height_above_sea - 0.20) / 0.14;
+        lerp_rgba(Rgba([148, 122, 82, 255]), Rgba([132, 116, 98, 255]), s)
+    } else {
+        Rgba([132, 116, 98, 255])
+    }
+}
+
+fn lerp_rgba(a: Rgba<u8>, b: Rgba<u8>, t: f32) -> Rgba<u8> {
+    let t = t.clamp(0.0, 1.0);
+    Rgba([
+        (a[0] as f32 + (b[0] as f32 - a[0] as f32) * t).round() as u8,
+        (a[1] as f32 + (b[1] as f32 - a[1] as f32) * t).round() as u8,
+        (a[2] as f32 + (b[2] as f32 - a[2] as f32) * t).round() as u8,
+        (a[3] as f32 + (b[3] as f32 - a[3] as f32) * t).round() as u8,
+    ])
+}
+
+fn blend(base: Rgba<u8>, overlay: Rgba<u8>, alpha: f32) -> Rgba<u8> {
+    lerp_rgba(base, overlay, alpha)
+}
+
+fn scale_rgb(color: Rgba<u8>, factor: f32) -> Rgba<u8> {
+    Rgba([
+        (color[0] as f32 * factor).clamp(0.0, 255.0) as u8,
+        (color[1] as f32 * factor).clamp(0.0, 255.0) as u8,
+        (color[2] as f32 * factor).clamp(0.0, 255.0) as u8,
+        color[3],
+    ])
+}
+
+fn offset(color: Rgba<u8>, delta: i16) -> Rgba<u8> {
+    add_rgb(color, delta, delta, delta)
+}
+
+fn add_rgb(color: Rgba<u8>, dr: i16, dg: i16, db: i16) -> Rgba<u8> {
+    Rgba([
+        (color[0] as i16 + dr).clamp(0, 255) as u8,
+        (color[1] as i16 + dg).clamp(0, 255) as u8,
+        (color[2] as i16 + db).clamp(0, 255) as u8,
+        color[3],
+    ])
 }

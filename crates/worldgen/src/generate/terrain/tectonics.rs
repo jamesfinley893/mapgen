@@ -6,15 +6,15 @@ use super::continents::sample_continental_fields;
 use super::{ContinentalConfig, OrogenSample, Plate};
 use crate::generate::util::{hash01, normalize, octave_noise, ridge_noise, smoothstep};
 
+const MIN_PLATE_COUNT: usize = 12;
+const MAX_PLATE_COUNT: usize = 140;
+const PLATES_PER_REFERENCE_SPAN: f32 = 15.0;
+
 pub(super) fn generate_plates(world: &World) -> Vec<Plate> {
     let ws = world.effective_world_size();
     let world_units_x = world.width as f32 / ws;
     let world_units_y = world.height as f32 / ws;
-    let world_area = world_units_x * world_units_y;
-    // Base count for a 1×1 world; scale linearly with geographic area.
-    let base = (ws * ws / 12000.0).round() as usize;
-    let approx = (base as f32 * world_area).round() as usize;
-    let plate_count = approx.clamp(12, 140);
+    let plate_count = target_plate_count(world);
     let mut plates = Vec::with_capacity(plate_count);
     for i in 0..plate_count {
         let xf = hash01(world.seed.wrapping_add(17), i * 13 + 1, 0) * world_units_x;
@@ -28,6 +28,18 @@ pub(super) fn generate_plates(world: &World) -> Vec<Plate> {
         });
     }
     plates
+}
+
+fn target_plate_count(world: &World) -> usize {
+    let ws = world.effective_world_size().max(1.0);
+    let world_units_x = world.width as f32 / ws;
+    let world_units_y = world.height as f32 / ws;
+    let world_area = (world_units_x * world_units_y).max(1.0);
+    let span_scale = world_area.sqrt();
+    let seed_variation = 0.90 + hash01(world.seed ^ 0x715E_DA7A_9A11_4001, 0, 0) * 0.20;
+    let approx = (PLATES_PER_REFERENCE_SPAN * span_scale * seed_variation).round() as usize;
+
+    approx.clamp(MIN_PLATE_COUNT, MAX_PLATE_COUNT)
 }
 
 pub(super) fn sample_tectonic_elevation(
@@ -221,4 +233,25 @@ fn sample_uplift_field(plates: &[Plate], xf: f32, yf: f32) -> f32 {
     let orogeny = smoothstep(0.40, 0.90, convergence * 0.9 + shear * 0.18);
 
     boundary * orogeny
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plate_count_scales_with_world_extent_not_raw_tile_count() {
+        let base = World::new(1, 384, 384, 0.52, 384);
+        let high_resolution_same_extent = World::new(1, 1536, 1536, 0.52, 1536);
+        let larger_extent = World::new(1, 1536, 1536, 0.52, 384);
+
+        let base_count = target_plate_count(&base);
+        let same_extent_count = target_plate_count(&high_resolution_same_extent);
+        let larger_extent_count = target_plate_count(&larger_extent);
+
+        assert!((MIN_PLATE_COUNT..=20).contains(&base_count));
+        assert_eq!(same_extent_count, base_count);
+        assert!(larger_extent_count >= base_count * 3);
+        assert!(larger_extent_count < MAX_PLATE_COUNT);
+    }
 }

@@ -116,9 +116,11 @@ fn riparian_influence(
 
     let (x, y) = world.coords(idx);
     let mut influence = riparian_water_signal(hydrology, idx);
+    let density = world.high_detail_scale();
+    let radius = scaled_radius(world, 3);
 
-    for dy in -3_isize..=3 {
-        for dx in -3_isize..=3 {
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
             if dx == 0 && dy == 0 {
                 continue;
             }
@@ -131,7 +133,9 @@ fn riparian_influence(
             if surfaces[nidx] == Surface::Ocean {
                 continue;
             }
-            let dist2 = (dx * dx + dy * dy) as f32;
+            let pdx = dx as f32 / density;
+            let pdy = dy as f32 / density;
+            let dist2 = pdx * pdx + pdy * pdy;
             let falloff = (1.0 / (1.0 + dist2 * 0.72)).clamp(0.0, 0.72);
             influence = influence.max(riparian_water_signal(hydrology, nidx) * falloff);
         }
@@ -267,18 +271,19 @@ fn transition_weight(value: f32, thresholds: &[f32], width: f32) -> f32 {
 fn mountain_support(world: &World, terrain: &TerrainFields, idx: usize) -> f32 {
     let high_threshold = world.sea_level + 0.24;
     let alpine_threshold = world.sea_level + 0.34;
+    let density = world.high_detail_scale();
     weighted_neighbor_support(
         world,
         terrain,
         idx,
         NeighborSupportSpec {
-            radius: 2,
+            radius: scaled_radius(world, 2),
             full_threshold: alpine_threshold,
             partial_threshold: high_threshold,
             partial_weight: 0.55,
         },
         |dx, dy| {
-            let dist = dx.abs().max(dy.abs()) as f32;
+            let dist = dx.abs().max(dy.abs()) as f32 / density;
             if dist <= 1.0 { 1.0 } else { 0.45 }
         },
     )
@@ -287,18 +292,19 @@ fn mountain_support(world: &World, terrain: &TerrainFields, idx: usize) -> f32 {
 fn mountain_proximity(world: &World, terrain: &TerrainFields, idx: usize) -> f32 {
     let alpine_threshold = world.sea_level + 0.38;
     let ridge_threshold = world.sea_level + 0.32;
+    let density = world.high_detail_scale();
     weighted_neighbor_support(
         world,
         terrain,
         idx,
         NeighborSupportSpec {
-            radius: 4,
+            radius: scaled_radius(world, 4),
             full_threshold: alpine_threshold,
             partial_threshold: ridge_threshold,
             partial_weight: 0.45,
         },
         |dx, dy| {
-            let dist = ((dx * dx + dy * dy) as f32).sqrt();
+            let dist = ((dx * dx + dy * dy) as f32).sqrt() / density;
             (1.0 / (1.0 + dist)).clamp(0.12, 0.7)
         },
     )
@@ -342,6 +348,12 @@ fn weighted_neighbor_support(
     } else {
         (support / total).clamp(0.0, 1.0)
     }
+}
+
+fn scaled_radius(world: &World, base: isize) -> isize {
+    (base as f32 * world.high_detail_scale())
+        .round()
+        .max(base as f32) as isize
 }
 
 pub fn biome_for_tile(

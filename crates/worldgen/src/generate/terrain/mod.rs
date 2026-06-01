@@ -5,6 +5,7 @@ mod tectonics;
 
 use crate::{Surface, World};
 
+use super::GenerationProfile;
 use super::climate::ClimateFields;
 use super::hydrology::{self, HydrologyFields};
 use super::util::{latitude_factor, octave_noise, ridge_noise, smoothstep};
@@ -104,19 +105,36 @@ pub(super) fn generate_terrain_fields(
     world: &World,
     base: &OpenSimplex,
     ridge: &OpenSimplex,
+    profile: &mut GenerationProfile,
 ) -> TerrainFields {
-    let fields = sample_orogen_fields(world, base, ridge);
+    let fields = profile.time("terrain: tectonic sampling", || {
+        sample_orogen_fields(world, base, ridge)
+    });
     let mut elevation = fields.initial_terrain();
 
-    relax_terrain(world, &fields, &mut elevation);
-    apply_tectonic_equilibrium(world, ridge, &fields, &mut elevation);
-    apply_landform_detail(world, ridge, &fields, &mut elevation);
-    apply_orographic_denudation(world, &mut elevation);
-    apply_talus_relaxation(world, &mut elevation);
-    apply_range_dissection(world, ridge, &fields, &mut elevation);
+    profile.time("terrain: relaxation", || {
+        relax_terrain(world, &fields, &mut elevation);
+    });
+    profile.time("terrain: equilibrium", || {
+        apply_tectonic_equilibrium(world, ridge, &fields, &mut elevation);
+    });
+    profile.time("terrain: detail", || {
+        apply_landform_detail(world, ridge, &fields, &mut elevation);
+    });
+    profile.time("terrain: denudation", || {
+        apply_orographic_denudation(world, &mut elevation);
+    });
+    profile.time("terrain: talus relaxation", || {
+        apply_talus_relaxation(world, &mut elevation);
+    });
+    profile.time("terrain: range dissection", || {
+        apply_range_dissection(world, ridge, &fields, &mut elevation);
+    });
 
     let mut terrain = TerrainFields::from_elevation(elevation);
-    refresh_derived_fields(world, &mut terrain);
+    profile.time("terrain: derived fields", || {
+        refresh_derived_fields(world, &mut terrain);
+    });
     terrain
 }
 
@@ -257,6 +275,7 @@ fn apply_fluvial_incision(
 }
 
 pub(super) fn refresh_derived_fields(world: &World, terrain: &mut TerrainFields) {
+    let density = world.high_detail_scale();
     for idx in 0..world.tile_count() {
         let current = terrain.elevation[idx];
         let mut min_elev = current;
@@ -270,8 +289,8 @@ pub(super) fn refresh_derived_fields(world: &World, terrain: &mut TerrainFields)
             max_delta = max_delta.max((current - neighbor).abs());
         }
 
-        terrain.slope[idx] = max_delta.clamp(0.0, 1.0);
-        terrain.relief[idx] = (max_elev - min_elev).clamp(0.0, 1.0);
+        terrain.slope[idx] = (max_delta * density).clamp(0.0, 1.0);
+        terrain.relief[idx] = ((max_elev - min_elev) * density).clamp(0.0, 1.0);
     }
 }
 
@@ -495,8 +514,7 @@ fn apply_range_dissection(
 
             let uplift_signal = fields.axial_uplift[idx] + fields.shoulder_uplift[idx] * 0.65;
             let uplift = smoothstep(0.10, 0.58, uplift_signal);
-            let dissect_mask =
-                smoothstep(0.16, 0.46, height_above_sea) * (0.55 + uplift * 0.45);
+            let dissect_mask = smoothstep(0.16, 0.46, height_above_sea) * (0.55 + uplift * 0.45);
             if dissect_mask <= 0.0 {
                 continue;
             }
@@ -507,7 +525,8 @@ fn apply_range_dissection(
             // (ranges near 0) is carved into valleys.
             let ranges = ridge_noise(ridge, xf * 6.8 + 113.0, yf * 6.8 - 67.0, 4);
             let range_signal = ranges - 0.63;
-            let delta = (range_signal.max(0.0) * 0.16 + range_signal.min(0.0) * 0.78) * dissect_mask;
+            let delta =
+                (range_signal.max(0.0) * 0.16 + range_signal.min(0.0) * 0.78) * dissect_mask;
 
             terrain[idx] = (current + delta).max(world.sea_level + 0.001);
         }

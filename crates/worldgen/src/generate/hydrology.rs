@@ -1,4 +1,4 @@
-use crate::{Surface, World};
+use crate::{LEGACY_WORLD_SIZE, Surface, World};
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
@@ -239,6 +239,7 @@ fn compute_local_runoff(
     ocean: &[bool],
 ) -> Vec<f32> {
     let mut runoff = vec![0.0_f32; world.tile_count()];
+    let cell_area = world.high_detail_cell_area();
 
     for idx in 0..world.tile_count() {
         if ocean[idx] {
@@ -258,7 +259,7 @@ fn compute_local_runoff(
         let runoff_efficiency =
             0.14 + saturation * 0.52 + slope_wash * 0.18 + relief_wash * 0.11 + cold_storage;
 
-        runoff[idx] = (climate.precipitation[idx] * runoff_efficiency).clamp(0.0, 1.0);
+        runoff[idx] = (climate.precipitation[idx] * runoff_efficiency * cell_area).clamp(0.0, 1.0);
     }
 
     runoff
@@ -316,12 +317,15 @@ fn compute_drainage_regions(
 }
 
 fn regional_budget_tile_size(world: &World) -> usize {
+    let density = world.high_detail_scale();
     let span = world
         .effective_world_size()
         .round()
         .max(world.width.min(world.height).max(1) as f32) as usize;
+    let min_region = (6.0 * density).round().max(6.0) as usize;
+    let max_region = (48.0 * density).round().max(48.0) as usize;
     (span / 8)
-        .clamp(6, 48)
+        .clamp(min_region, max_region)
         .min(world.width.max(world.height).max(1))
 }
 
@@ -346,6 +350,7 @@ fn compute_regional_water_budget(
     }
 
     let mut accum = vec![Accum::default(); regions.region_count];
+    let cell_area = world.high_detail_cell_area();
 
     for idx in 0..world.tile_count() {
         if ocean[idx] {
@@ -388,7 +393,7 @@ fn compute_regional_water_budget(
         let bucket = &mut accum[region];
         bucket.land_tiles += 1;
         bucket.raw_runoff += raw_runoff[idx].max(0.0);
-        bucket.sustained_supply += sustained_supply;
+        bucket.sustained_supply += sustained_supply * cell_area;
         bucket.moisture += moisture;
         bucket.precipitation += precipitation;
         bucket.temperature += temperature;
@@ -435,7 +440,8 @@ fn compute_regional_water_budget(
         };
         runoff_multiplier_by_region[region] = runoff_multiplier;
 
-        let supply_per_tile = bucket.sustained_supply / area;
+        let physical_area = (area * cell_area).max(1.0);
+        let supply_per_tile = bucket.sustained_supply / physical_area;
         let persistence =
             smoothstep(0.10, 0.72, wetness).max(smoothstep(0.012, 0.24, supply_per_tile) * 0.86);
         let channel_fraction = (0.010 + persistence * 0.245 + wetness * 0.030).clamp(0.010, 0.31);
@@ -508,7 +514,7 @@ fn compute_filled_elevation(world: &World, terrain: &TerrainFields, ocean: &[boo
             }
             visited[nidx] = true;
 
-            let spill = cell.elevation + 0.0001;
+            let spill = cell.elevation + 0.0001 / world.high_detail_scale();
             filled[nidx] = if ocean[nidx] {
                 world.sea_level.min(terrain.elevation[nidx])
             } else {
@@ -530,6 +536,7 @@ fn compute_flow_targets(
     filled_elevation: &[f32],
 ) -> Vec<FlowTarget> {
     let mut targets = vec![FlowTarget::Sink; world.tile_count()];
+    let gradient_scale = world.high_detail_scale();
 
     for idx in 0..world.tile_count() {
         if ocean[idx] {
@@ -558,7 +565,7 @@ fn compute_flow_targets(
 
             if ocean[nidx] {
                 let drop = (current - world.sea_level).max(0.0) + 0.006;
-                let score = drop / distance;
+                let score = drop / distance * gradient_scale;
                 if score > best_score {
                     best_score = score;
                     best = FlowTarget::Ocean { direction };
@@ -572,7 +579,7 @@ fn compute_flow_targets(
                 continue;
             }
 
-            let gradient = drop / distance;
+            let gradient = drop / distance * gradient_scale;
             best_land_gradient = best_land_gradient.max(gradient);
         }
 
@@ -599,7 +606,7 @@ fn compute_flow_targets(
                 continue;
             }
 
-            let gradient = drop / distance;
+            let gradient = drop / distance * gradient_scale;
             let low_gradient = 1.0 - smoothstep(0.00018, 0.006, gradient);
             let near_best = near_best_downhill_candidate(best_land_gradient, gradient);
             let route_bias = low_gradient_route_bias(world, x, y, dx, dy, direction, gradient);
@@ -641,7 +648,11 @@ fn low_gradient_route_bias(
     direction: i8,
     gradient: f32,
 ) -> f32 {
-    let scale = (world.width.max(world.height) / 18).clamp(7, 31);
+    let density = world.high_detail_scale();
+    let base_scale = (world.effective_world_size() / 18.0).round().max(1.0) as usize;
+    let min_scale = (7.0 * density).round().max(7.0) as usize;
+    let max_scale = (31.0 * density).round().max(31.0) as usize;
+    let scale = base_scale.clamp(min_scale, max_scale);
     let vx = value_noise(world.seed ^ 0x6CA1_33B5_7E91_22A7, x, y, scale) * 2.0 - 1.0;
     let vy = value_noise(world.seed ^ 0xB28D_F413_09AC_4E7B, x, y, scale) * 2.0 - 1.0;
     let distance = if dx != 0 && dy != 0 {
@@ -717,7 +728,7 @@ fn compute_secondary_flow_targets(
                 continue;
             }
 
-            let gradient = drop / distance;
+            let gradient = drop / distance * world.high_detail_scale();
             let near_best = near_best_downhill_candidate(primary_gradient, gradient);
             if near_best <= 0.0 {
                 continue;
@@ -746,7 +757,7 @@ fn compute_secondary_flow_targets(
 
 fn flow_target_gradient(world: &World, filled_elevation: &[f32], idx: usize, target: usize) -> f32 {
     let drop = (filled_elevation[idx] - filled_elevation[target]).max(0.00001);
-    drop / distance_between_indices(world, idx, target)
+    drop / distance_between_indices(world, idx, target) * world.high_detail_scale()
 }
 
 fn compute_lake_depth(
@@ -794,6 +805,7 @@ fn assign_lake_bodies(world: &World, lake_depth: &mut [f32]) -> Vec<u32> {
     let mut water_body_id = vec![0_u32; world.tile_count()];
     let mut visited = vec![false; world.tile_count()];
     let mut next_id = 1_u32;
+    let min_body_tiles = scaled_area_tiles(world, 3);
 
     for idx in 0..world.tile_count() {
         if visited[idx] || lake_depth[idx] <= 0.0 {
@@ -817,10 +829,10 @@ fn assign_lake_bodies(world: &World, lake_depth: &mut [f32]) -> Vec<u32> {
             }
         }
 
-        // Drop 1-2 tile depressions outright: at this resolution they are
-        // terrain-noise dimples, not lakes. Their runoff routes over the filled
-        // elevation instead of ponding as a stray pixel of water.
-        if body.len() < 3 {
+        // Drop sub-minimum depressions outright: at the current tile density they
+        // are terrain-noise dimples, not lakes. Their runoff routes over the
+        // filled elevation instead of ponding as stray pixels of water.
+        if body.len() < min_body_tiles {
             for body_idx in body {
                 lake_depth[body_idx] = 0.0;
             }
@@ -937,11 +949,12 @@ fn compute_lake_overflow(
         }
 
         let area = body_tiles[body_id].len() as f32;
+        let physical_area = area * world.high_detail_cell_area();
         let inflow = lake_inflow_by_body.get(body_id).copied().unwrap_or(0.0);
         let temperature = body_temperature[body_id] / area.max(1.0);
         let moisture = body_moisture[body_id] / area.max(1.0);
-        let evaporative_loss =
-            area * (0.0025 + temperature * 0.0060 + (1.0 - moisture).clamp(0.0, 1.0) * 0.0075);
+        let evaporative_loss = physical_area
+            * (0.0025 + temperature * 0.0060 + (1.0 - moisture).clamp(0.0, 1.0) * 0.0075);
         let storage_ratio = if evaporative_loss <= 0.0 {
             1.0
         } else {
@@ -1014,7 +1027,10 @@ fn propagate_spill_discharge(
     let mut seen = vec![false; world.tile_count()];
     let mut idx = start_idx;
 
-    for _ in 0..world.tile_count().min(2048) {
+    let limit = world
+        .tile_count()
+        .min((2048.0 * world.high_detail_scale()).round() as usize);
+    for _ in 0..limit {
         if seen[idx] || ocean[idx] {
             break;
         }
@@ -1347,11 +1363,13 @@ fn expand_lowland_channel_corridors(
             continue;
         }
 
-        let radius = (0.84
+        let radius = ((0.84
             + smoothstep(0.46, 1.0, river_width[idx]) * 1.34
             + smoothstep(0.14, 0.80, river_depth[idx]) * 0.42
             + corridor_signal * 0.52)
-            .clamp(0.84, 2.65);
+            .clamp(0.84, 2.65)
+            * world.high_detail_scale())
+        .clamp(0.84, 2.65 * world.high_detail_scale());
         let reach = radius.ceil() as isize;
         let (x, y) = world.coords(idx);
 
@@ -1687,9 +1705,11 @@ fn flow_slope(
     match targets[idx] {
         FlowTarget::Land { idx: target, .. } => {
             let drop = (filled_elevation[idx] - filled_elevation[target]).max(0.00004);
-            drop / distance_between_indices(world, idx, target)
+            drop / distance_between_indices(world, idx, target) * world.high_detail_scale()
         }
-        FlowTarget::Ocean { .. } => (filled_elevation[idx] - world.sea_level).max(0.00004),
+        FlowTarget::Ocean { .. } => {
+            (filled_elevation[idx] - world.sea_level).max(0.00004) * world.high_detail_scale()
+        }
         FlowTarget::Sink => terrain.slope[idx].max(0.00004),
     }
 }
@@ -1705,7 +1725,12 @@ fn distance_between_indices(world: &World, a: usize, b: usize) -> f32 {
 }
 
 fn river_thresholds(world: &World) -> RiverThresholds {
-    let scale = (world.tile_count() as f32).sqrt().max(1.0);
+    let ws = world.effective_world_size().max(1.0);
+    let world_units_x = world.width as f32 / ws;
+    let world_units_y = world.height as f32 / ws;
+    let world_area = (world_units_x * world_units_y).max(1.0 / ws.max(1.0));
+    let reference_density = ws.min(LEGACY_WORLD_SIZE as f32);
+    let scale = (reference_density * world_area.sqrt()).max(1.0);
     let stream = (scale * 0.045).max(0.35);
     let tributary = (scale * 0.120).max(stream * 1.9);
     let major = (scale * 0.360).max(tributary * 2.3);
@@ -1717,6 +1742,12 @@ fn river_thresholds(world: &World) -> RiverThresholds {
         major,
         bankfull,
     }
+}
+
+fn scaled_area_tiles(world: &World, base_tiles: usize) -> usize {
+    (base_tiles as f32 * world.high_detail_scale().powi(2))
+        .round()
+        .max(base_tiles as f32) as usize
 }
 
 fn normalize_discharge(discharge: f32, thresholds: &RiverThresholds) -> f32 {

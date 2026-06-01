@@ -4,12 +4,16 @@ use std::path::{Path, PathBuf};
 use clap::{Args, Parser, Subcommand};
 use rand::random;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use time::OffsetDateTime;
 use time::format_description::FormatItem;
 use time::macros::format_description;
-use worldgen::{RenderConfig, World, WorldConfig, build_metadata, generate_world, render_world};
+use worldgen::{
+    DEFAULT_WORLD_SIZE, GenerationProfile, World, WorldConfig, build_metadata, generate_world,
+    generate_world_with_profile, render_world,
+};
 
-const TILES_SCHEMA_VERSION: u32 = 11;
+const TILES_SCHEMA_VERSION: u32 = 13;
 
 #[derive(Serialize, Deserialize)]
 struct TileExport {
@@ -45,13 +49,12 @@ struct RenderArgs {
 struct GenerateArgs {
     #[arg(long)]
     seed: Option<u64>,
-    #[arg(long, default_value_t = 384)]
+    #[arg(long, default_value_t = DEFAULT_WORLD_SIZE as usize)]
     width: usize,
-    #[arg(long, default_value_t = 384)]
+    #[arg(long, default_value_t = DEFAULT_WORLD_SIZE as usize)]
     height: usize,
-    /// World scale multiplier. Expands tile dimensions N× while keeping pixels/tile
-    /// constant at the 384-base default (~4 px/tile). --scale 2 generates a 768×768
-    /// world, not just a zoomed-in 384×384.
+    /// World scale multiplier. Expands tile dimensions N× while preserving tile density.
+    /// With defaults, --scale 2 generates a 1536x1536 world.
     #[arg(long)]
     scale: Option<u32>,
     #[arg(long, default_value_t = 0.52)]
@@ -62,10 +65,13 @@ struct GenerateArgs {
     moisture_bias: f32,
     #[arg(long, default_value_t = 1.0)]
     rainfall_scale: f32,
-    /// Tiles per world unit. 0 or omit = match min(width, height) for a single world unit.
-    /// Set to a fixed value (e.g. 384) to make larger maps cover more geographic area.
-    #[arg(long, default_value_t = 0)]
+    /// Tiles per world unit. Default generates a 768x768 one-world-unit map.
+    /// Set 0 to fit the whole output into one world unit.
+    #[arg(long, default_value_t = DEFAULT_WORLD_SIZE)]
     world_size: u32,
+    /// Print per-stage generation and output timings.
+    #[arg(long, default_value_t = false)]
+    profile_generation: bool,
     #[arg(long, default_value = "output")]
     out_dir: PathBuf,
     /// Export full per-tile data as tiles.json alongside the PNG.
@@ -107,12 +113,7 @@ fn run_render(args: RenderArgs) -> Result<(), String> {
 
     let world = export.world;
     validate_render_world(&world)?;
-    let image = render_world(
-        &world,
-        RenderConfig {
-            scale: render_scale_for_dimensions(world.width, world.height),
-        },
-    );
+    let image = render_world(&world);
     let out_path = run_dir.join("rerendered.png");
     image
         .save(&out_path)
@@ -125,9 +126,6 @@ fn run_generate(args: GenerateArgs) -> Result<(), String> {
     let seed = select_seed(args.seed);
     validate_dimensions(args.width, args.height)?;
 
-    // pixels/tile is always derived from the base (unscaled) dimensions so that
-    // --scale never changes visual density, only world size.
-    let render_scale = render_scale_for_dimensions(args.width, args.height);
     let (width, height, world_size) =
         scaled_dimensions(args.width, args.height, args.scale, args.world_size);
     let config = WorldConfig {
@@ -138,13 +136,22 @@ fn run_generate(args: GenerateArgs) -> Result<(), String> {
         temperature_bias: args.temperature_bias,
         moisture_bias: args.moisture_bias,
         rainfall_scale: args.rainfall_scale,
-        render_scale,
         world_size,
     };
     config.validate()?;
 
-    let world = generate_world(&config)?;
-    write_generation_outputs(&args.out_dir, seed, world, &config, args.export_tiles)
+    let (world, generation_profile) = if args.profile_generation {
+        let (world, profile) = generate_world_with_profile(&config)?;
+        (world, Some(profile))
+    } else {
+        (generate_world(&config)?, None)
+    };
+    let output_profile =
+        write_generation_outputs(&args.out_dir, seed, world, &config, args.export_tiles)?;
+    if let Some(profile) = generation_profile.as_ref() {
+        print_generation_profile(profile, &output_profile);
+    }
+    Ok(())
 }
 
 fn tiles_path_from_input(input: &Path) -> PathBuf {
@@ -153,10 +160,6 @@ fn tiles_path_from_input(input: &Path) -> PathBuf {
     } else {
         input.to_path_buf()
     }
-}
-
-fn render_scale_for_dimensions(width: usize, height: usize) -> u32 {
-    (1536_u32 / width.max(height) as u32).clamp(1, 32)
 }
 
 fn scaled_dimensions(
@@ -169,14 +172,7 @@ fn scaled_dimensions(
         Some(s) if s > 1 => {
             let scaled_width = width.saturating_mul(s as usize).min(4096);
             let scaled_height = height.saturating_mul(s as usize).min(4096);
-            // If world_size was not set explicitly, fix it to the base tile count
-            // so each tile covers the same geographic area at any scale factor.
-            let scaled_world_size = if world_size == 0 {
-                width.min(height) as u32
-            } else {
-                world_size
-            };
-            (scaled_width, scaled_height, scaled_world_size)
+            (scaled_width, scaled_height, world_size)
         }
         _ => (width, height, world_size),
     }
@@ -188,36 +184,40 @@ fn write_generation_outputs(
     world: World,
     config: &WorldConfig,
     export_tiles: bool,
-) -> Result<(), String> {
-    let image = render_world(
-        &world,
-        RenderConfig {
-            scale: config.render_scale,
-        },
-    );
-    let metadata = build_metadata(&world, config);
+) -> Result<Vec<OutputStageTiming>, String> {
+    let mut profile = OutputProfile::default();
+    let image = profile.time("render", || render_world(&world));
+    let metadata = profile.time("metadata", || build_metadata(&world, config));
     let run_dir = build_run_output_dir(out_dir, seed, OffsetDateTime::now_utc())?;
     let png_path = run_dir.join("map.png");
     let json_path = run_dir.join("metadata.json");
 
-    fs::create_dir_all(&run_dir)
+    profile
+        .time("create output dir", || fs::create_dir_all(&run_dir))
         .map_err(|err| format!("failed to create output directory: {err}"))?;
 
-    image
-        .save(&png_path)
+    profile
+        .time("write png", || image.save(&png_path))
         .map_err(|err| format!("failed to write PNG: {err}"))?;
-    let json = serde_json::to_string_pretty(&metadata)
+    let json = profile
+        .time("serialize metadata", || {
+            serde_json::to_string_pretty(&metadata)
+        })
         .map_err(|err| format!("failed to serialize metadata: {err}"))?;
-    fs::write(&json_path, json).map_err(|err| format!("failed to write metadata: {err}"))?;
+    profile
+        .time("write metadata", || fs::write(&json_path, json))
+        .map_err(|err| format!("failed to write metadata: {err}"))?;
     if export_tiles {
         let tiles_path = run_dir.join("tiles.json");
         let export = TileExport {
             schema_version: TILES_SCHEMA_VERSION,
             world,
         };
-        let tiles_json = serde_json::to_string(&export)
+        let tiles_json = profile
+            .time("serialize tiles", || serde_json::to_string(&export))
             .map_err(|err| format!("failed to serialize tiles: {err}"))?;
-        fs::write(&tiles_path, tiles_json)
+        profile
+            .time("write tiles", || fs::write(&tiles_path, tiles_json))
             .map_err(|err| format!("failed to write tiles: {err}"))?;
         println!("wrote {}", tiles_path.display());
     }
@@ -226,7 +226,56 @@ fn write_generation_outputs(
     println!("wrote {}", run_dir.display());
     println!("wrote {}", png_path.display());
     println!("wrote {}", json_path.display());
-    Ok(())
+    Ok(profile.stages)
+}
+
+#[derive(Default)]
+struct OutputProfile {
+    stages: Vec<OutputStageTiming>,
+}
+
+#[derive(Clone, Copy)]
+struct OutputStageTiming {
+    name: &'static str,
+    duration: Duration,
+}
+
+impl OutputProfile {
+    fn time<T>(&mut self, name: &'static str, f: impl FnOnce() -> T) -> T {
+        let start = std::time::Instant::now();
+        let value = f();
+        self.stages.push(OutputStageTiming {
+            name,
+            duration: start.elapsed(),
+        });
+        value
+    }
+}
+
+fn print_generation_profile(generation: &GenerationProfile, output: &[OutputStageTiming]) {
+    println!("generation profile:");
+    for stage in generation.stages() {
+        println!("  {:<28} {}", stage.name, format_duration(stage.duration));
+    }
+    for stage in output {
+        println!("  {:<28} {}", stage.name, format_duration(stage.duration));
+    }
+
+    let output_total = output.iter().map(|stage| stage.duration).sum::<Duration>();
+    println!(
+        "  {:<28} {}",
+        "total",
+        format_duration(generation.total_duration() + output_total)
+    );
+}
+
+fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs_f64();
+    if seconds >= 1.0 {
+        format!("{seconds:.2}s")
+    } else {
+        format!("{:.1}ms", seconds * 1000.0)
+    }
 }
 
 fn select_seed(seed: Option<u64>) -> u64 {
@@ -320,17 +369,40 @@ mod tests {
     }
 
     #[test]
-    fn render_scale_tracks_base_dimensions() {
-        assert_eq!(render_scale_for_dimensions(384, 384), 4);
-        assert_eq!(render_scale_for_dimensions(4096, 128), 1);
-        assert_eq!(render_scale_for_dimensions(32, 32), 32);
+    fn generate_defaults_to_high_resolution_one_to_one_output() {
+        let cli = Cli::try_parse_from(["mapgen", "generate"]).unwrap();
+        let Commands::Generate(args) = cli.command else {
+            panic!("expected generate command");
+        };
+
+        assert_eq!(args.width, 768);
+        assert_eq!(args.height, 768);
+        assert_eq!(args.world_size, DEFAULT_WORLD_SIZE);
+        assert!(!args.profile_generation);
     }
 
     #[test]
-    fn scaled_dimensions_preserve_geographic_scale_defaults() {
-        assert_eq!(scaled_dimensions(384, 192, None, 0), (384, 192, 0));
-        assert_eq!(scaled_dimensions(384, 192, Some(2), 0), (768, 384, 192));
-        assert_eq!(scaled_dimensions(384, 192, Some(2), 512), (768, 384, 512));
+    fn generate_accepts_generation_profile_flag() {
+        let cli = Cli::try_parse_from(["mapgen", "generate", "--profile-generation"]).unwrap();
+        let Commands::Generate(args) = cli.command else {
+            panic!("expected generate command");
+        };
+
+        assert!(args.profile_generation);
+    }
+
+    #[test]
+    fn scaled_dimensions_preserve_default_tile_density() {
+        assert_eq!(
+            scaled_dimensions(768, 384, None, DEFAULT_WORLD_SIZE),
+            (768, 384, DEFAULT_WORLD_SIZE)
+        );
+        assert_eq!(
+            scaled_dimensions(768, 384, Some(2), DEFAULT_WORLD_SIZE),
+            (1536, 768, DEFAULT_WORLD_SIZE)
+        );
+        assert_eq!(scaled_dimensions(768, 384, Some(2), 0), (1536, 768, 0));
+        assert_eq!(scaled_dimensions(768, 384, Some(2), 384), (1536, 768, 384));
     }
 
     #[test]
@@ -345,8 +417,35 @@ mod tests {
     }
 
     #[test]
-    fn current_tile_export_schema_is_version_eleven() {
-        assert_eq!(TILES_SCHEMA_VERSION, 11);
+    fn legacy_tile_export_missing_presentation_fields_uses_neutral_defaults() {
+        let json = r#"{
+            "schema_version": 12,
+            "seed": 7,
+            "width": 1,
+            "height": 1,
+            "sea_level": 0.52,
+            "world_size": 0,
+            "tiles": [
+                {
+                    "raw_elevation": 0.56,
+                    "surface": "Land",
+                    "biome": "TemperateGrassland"
+                }
+            ]
+        }"#;
+
+        let export: TileExport = serde_json::from_str(json).unwrap();
+        let tile = &export.world.tiles[0];
+
+        assert_eq!(tile.landform, worldgen::Landform::Plain);
+        assert_eq!(tile.terrain_texture, 0.5);
+        assert_eq!(tile.ecotone_strength, 0.0);
+        assert_eq!(tile.shore_influence, 0.0);
+    }
+
+    #[test]
+    fn current_tile_export_schema_is_version_thirteen() {
+        assert_eq!(TILES_SCHEMA_VERSION, 13);
     }
 
     #[test]

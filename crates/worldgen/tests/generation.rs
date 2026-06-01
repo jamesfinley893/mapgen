@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 use worldgen::{
-    Biome, MountainFeature, RenderConfig, Surface, Tile, World, WorldConfig, build_metadata,
+    Biome, Landform, MountainFeature, Surface, Tile, World, WorldConfig, build_metadata,
     generate_world, mountain_feature_for_tile, render_world,
 };
 
@@ -10,7 +10,7 @@ fn config() -> WorldConfig {
         seed: 99,
         width: 128,
         height: 128,
-        render_scale: 2,
+        world_size: 128,
         ..WorldConfig::default()
     }
 }
@@ -20,7 +20,7 @@ fn fixed_config(seed: u64) -> WorldConfig {
         seed,
         width: 256,
         height: 256,
-        render_scale: 2,
+        world_size: 256,
         ..WorldConfig::default()
     }
 }
@@ -221,6 +221,11 @@ fn exported_tiles_include_bounded_geology_context() {
     let world = generate_world(&config()).unwrap();
 
     for (idx, tile) in world.tiles.iter().enumerate() {
+        assert!(
+            tile.elevation_shade.is_finite() && (0.0..=1.0).contains(&tile.elevation_shade),
+            "tile {idx} elevation shade out of range: {}",
+            tile.elevation_shade
+        );
         assert!(tile.slope.is_finite(), "tile {idx} slope is not finite");
         assert!(tile.relief.is_finite(), "tile {idx} relief is not finite");
         assert!(
@@ -336,7 +341,130 @@ fn exported_tiles_include_bounded_geology_context() {
             tile.mountain_feature,
             mountain_feature_for_tile(&world, idx)
         );
+        assert!(
+            tile.terrain_texture.is_finite() && (0.0..=1.0).contains(&tile.terrain_texture),
+            "tile {idx} terrain texture out of range: {}",
+            tile.terrain_texture
+        );
+        assert!(
+            tile.ecotone_strength.is_finite() && (0.0..=1.0).contains(&tile.ecotone_strength),
+            "tile {idx} ecotone strength out of range: {}",
+            tile.ecotone_strength
+        );
+        assert!(
+            tile.shore_influence.is_finite() && (0.0..=1.0).contains(&tile.shore_influence),
+            "tile {idx} shore influence out of range: {}",
+            tile.shore_influence
+        );
+        if tile.surface == Surface::Ocean {
+            assert_eq!(tile.landform, Landform::Water);
+        }
     }
+}
+
+#[test]
+fn generated_worlds_export_nontrivial_presentation_fields() {
+    let world = fixed_world(42);
+    let land_tiles = world
+        .tiles
+        .iter()
+        .filter(|tile| tile.surface != Surface::Ocean)
+        .count();
+    let textured = world
+        .tiles
+        .iter()
+        .filter(|tile| tile.surface != Surface::Ocean && (tile.terrain_texture - 0.5).abs() > 0.01)
+        .count();
+    let ecotones = world
+        .tiles
+        .iter()
+        .filter(|tile| tile.ecotone_strength > 0.05)
+        .count();
+    let shores = world
+        .tiles
+        .iter()
+        .filter(|tile| tile.shore_influence > 0.15)
+        .count();
+
+    assert!(
+        textured > land_tiles / 4,
+        "too few land tiles carry texture: {textured}/{land_tiles}"
+    );
+    assert!(
+        ecotones > land_tiles / 30,
+        "too few tiles expose ecotone strength: {ecotones}/{land_tiles}"
+    );
+    assert!(shores > 0, "no shore influence was exported");
+    assert!(
+        world.tiles.iter().any(|tile| matches!(
+            tile.landform,
+            Landform::Hill | Landform::Valley | Landform::Ridge | Landform::Peak
+        )),
+        "generated world did not classify any readable landforms"
+    );
+}
+
+#[test]
+fn coast_tiles_export_stronger_shore_influence_than_inland_tiles() {
+    let world = fixed_world(42);
+    let mut coast_sum = 0.0_f32;
+    let mut coast_count = 0_usize;
+    let mut inland_sum = 0.0_f32;
+    let mut inland_count = 0_usize;
+
+    for tile in &world.tiles {
+        match tile.surface {
+            Surface::Coast => {
+                coast_sum += tile.shore_influence;
+                coast_count += 1;
+            }
+            Surface::Land
+                if tile.ocean_distance > 12 && tile.lake_depth <= 0.0 && tile.river < 0.08 =>
+            {
+                inland_sum += tile.shore_influence;
+                inland_count += 1;
+            }
+            _ => {}
+        }
+    }
+
+    let coast_mean = coast_sum / coast_count.max(1) as f32;
+    let inland_mean = inland_sum / inland_count.max(1) as f32;
+    assert!(coast_count > 0);
+    assert!(inland_count > 0);
+    assert!(
+        coast_mean > inland_mean + 0.35,
+        "coast tiles should carry a much stronger shore signal: coast={coast_mean} inland={inland_mean}"
+    );
+}
+
+#[test]
+fn mountain_features_export_readable_landforms() {
+    let world = fixed_world(42);
+    let mut summits = 0_usize;
+    let mut summit_peaks = 0_usize;
+    let mut ridges = 0_usize;
+    let mut ridge_landforms = 0_usize;
+
+    for tile in &world.tiles {
+        match tile.mountain_feature {
+            MountainFeature::Summit => {
+                summits += 1;
+                summit_peaks += usize::from(tile.landform == Landform::Peak);
+            }
+            MountainFeature::Ridge => {
+                ridges += 1;
+                ridge_landforms +=
+                    usize::from(matches!(tile.landform, Landform::Ridge | Landform::Peak));
+            }
+            _ => {}
+        }
+    }
+
+    assert!(summits > 0, "fixed seed has no summit features");
+    assert_eq!(summits, summit_peaks);
+    assert!(ridges > 0, "fixed seed has no ridge features");
+    assert_eq!(ridges, ridge_landforms);
 }
 
 #[test]
@@ -767,7 +895,7 @@ fn rainfall_scale_changes_precipitation() {
         seed: 42,
         width: 128,
         height: 128,
-        render_scale: 2,
+        world_size: 128,
         rainfall_scale: 0.65,
         ..WorldConfig::default()
     };
@@ -934,2362 +1062,208 @@ fn fixed_seed_set_includes_multiple_major_landmasses() {
 }
 
 #[test]
-fn render_world_produces_expected_dimensions() {
-    let world = render_test_world(5, 5);
-    let image = render_world(&world, RenderConfig { scale: 6 });
-    assert_eq!(image.width(), 30);
-    assert_eq!(image.height(), 30);
-}
-
-#[test]
-fn ocean_depth_rendering_interpolates_with_neighbor_depth() {
-    let scale = 8;
-    let mut world = World::new(7, 2, 2, 0.50, 0);
-    for y in 0..world.height {
-        for x in 0..world.width {
-            let raw_elevation = if x == 0 { 0.49 } else { 0.20 };
-            let idx = world.idx(x, y);
-            world.tiles[idx] = warm_ocean_tile(raw_elevation);
-        }
-    }
-
-    let image = render_world(&world, RenderConfig { scale });
-    let shallow_side = image.get_pixel(1, scale / 2).0;
-    let deep_side = image.get_pixel(scale - 1, scale / 2).0;
-    assert!(
-        luma(shallow_side) > luma(deep_side) + 14.0,
-        "ocean depth stayed too flat inside a tile: shallow={shallow_side:?} deep={deep_side:?}"
-    );
-}
-
-#[test]
-fn diagonal_land_contact_softens_adjacent_ocean_corner() {
-    let scale = 18;
-    let mut base_world = World::new(7, 3, 3, 0.50, 0);
-    for tile in &mut base_world.tiles {
-        *tile = warm_ocean_tile(0.34);
-    }
-
-    let mut shore_world = base_world.clone();
-    let diagonal_land = shore_world.idx(0, 0);
-    shore_world.tiles[diagonal_land] = Tile {
-        surface: Surface::Coast,
-        biome: Biome::Coast,
-        raw_elevation: 0.525,
-        temperature: 0.52,
-        moisture: 0.40,
-        ..Tile::default()
+#[ignore = "expensive default high-detail smoke test for release profiling"]
+fn default_high_detail_world_has_sane_surface_and_biome_balance() {
+    let config = WorldConfig {
+        seed: 42,
+        ..WorldConfig::default()
     };
+    let world = generate_world(&config).unwrap();
+    let metadata = build_metadata(&world, &config);
+    let tile_count = world.tile_count();
 
-    let base = render_world(&base_world, RenderConfig { scale });
-    let shore = render_world(&shore_world, RenderConfig { scale });
-    let diagonal_corner = (scale, scale);
-    let tile_center = (scale + scale / 2, scale + scale / 2);
-    let corner_delta = luma(shore.get_pixel(diagonal_corner.0, diagonal_corner.1).0)
-        - luma(base.get_pixel(diagonal_corner.0, diagonal_corner.1).0);
-    let center_delta = luma(shore.get_pixel(tile_center.0, tile_center.1).0)
-        - luma(base.get_pixel(tile_center.0, tile_center.1).0);
+    assert_eq!(metadata.width, 768);
+    assert_eq!(metadata.height, 768);
+    assert_eq!(metadata.effective_world_size, 768.0);
+    assert!(metadata.land_tiles > tile_count / 10);
+    assert!(metadata.ocean_tiles > tile_count / 10);
+    assert!(metadata.river_tiles > world.width / 2);
 
+    let dominant_non_ocean = metadata
+        .biome_counts
+        .iter()
+        .filter(|(biome, _)| *biome != Biome::Ocean)
+        .map(|(_, count)| *count)
+        .max()
+        .unwrap_or(0);
     assert!(
-        corner_delta > 4.0,
-        "diagonal land contact did not brighten the adjacent ocean corner: delta={corner_delta}"
-    );
-    assert!(
-        corner_delta > center_delta + 3.0,
-        "diagonal shelf influence should stay strongest near the shared corner: corner={corner_delta} center={center_delta}"
-    );
-}
-
-#[test]
-fn shallow_ocean_texture_is_coherent_not_block_filled() {
-    let scale = 12;
-    let mut world = World::new(7, 2, 2, 0.50, 0);
-    for tile in &mut world.tiles {
-        *tile = warm_ocean_tile(0.47);
-    }
-
-    let image = render_world(&world, RenderConfig { scale });
-    let mut colors = std::collections::HashSet::new();
-    for py in 3..7 {
-        for px in 3..7 {
-            let pixel = image.get_pixel(px, py).0;
-            colors.insert((pixel[0], pixel[1], pixel[2]));
-        }
-    }
-
-    assert!(
-        colors.len() > 1,
-        "shallow ocean texture still forms block-filled patches: {} colors",
-        colors.len()
+        dominant_non_ocean < metadata.land_tiles * 3 / 4,
+        "large map is dominated by a single non-ocean biome"
     );
 }
 
 #[test]
-fn cold_shallow_ocean_renders_broken_ice_tint() {
-    let scale = 12;
-    let mut warm_world = World::new(7, 2, 2, 0.50, 0);
-    for tile in &mut warm_world.tiles {
-        *tile = warm_ocean_tile(0.47);
-    }
+fn render_world_produces_one_pixel_per_tile() {
+    let world = render_test_world(5, 4);
+    let image = render_world(&world);
 
-    let mut cold_world = warm_world.clone();
-    for tile in &mut cold_world.tiles {
-        tile.temperature = 0.0;
-    }
-
-    let warm = render_world(&warm_world, RenderConfig { scale });
-    let cold = render_world(&cold_world, RenderConfig { scale });
-    let mut warm_luma = 0.0_f32;
-    let mut cold_luma = 0.0_f32;
-    let mut samples = 0.0_f32;
-    for py in 2..10 {
-        for px in 2..10 {
-            warm_luma += luma(warm.get_pixel(px, py).0);
-            cold_luma += luma(cold.get_pixel(px, py).0);
-            samples += 1.0;
-        }
-    }
-    warm_luma /= samples;
-    cold_luma /= samples;
-
-    assert!(
-        cold_luma > warm_luma + 10.0,
-        "cold shallow ocean did not pick up a visible ice tint: warm={warm_luma} cold={cold_luma}"
-    );
+    assert_eq!(image.width(), 5);
+    assert_eq!(image.height(), 4);
 }
 
 #[test]
-fn tropical_shallow_ocean_renders_lagoon_tint() {
-    let scale = 12;
-    let mut temperate_world = World::new(7, 2, 2, 0.50, 0);
-    for tile in &mut temperate_world.tiles {
-        *tile = warm_ocean_tile(0.47);
-        tile.temperature = 0.50;
-    }
-
-    let mut tropical_world = temperate_world.clone();
-    for tile in &mut tropical_world.tiles {
-        tile.temperature = 0.90;
-    }
-
-    let temperate = render_world(&temperate_world, RenderConfig { scale });
-    let tropical = render_world(&tropical_world, RenderConfig { scale });
-    let mut temperate_green = 0.0_f32;
-    let mut tropical_green = 0.0_f32;
-    let mut temperate_chroma = 0.0_f32;
-    let mut tropical_chroma = 0.0_f32;
-    let mut samples = 0.0_f32;
-    for py in 2..10 {
-        for px in 2..10 {
-            let temperate_pixel = temperate.get_pixel(px, py).0;
-            let tropical_pixel = tropical.get_pixel(px, py).0;
-            temperate_green += temperate_pixel[1] as f32;
-            tropical_green += tropical_pixel[1] as f32;
-            temperate_chroma += green_minus_red(temperate_pixel);
-            tropical_chroma += green_minus_red(tropical_pixel);
-            samples += 1.0;
-        }
-    }
-    temperate_green /= samples;
-    tropical_green /= samples;
-    temperate_chroma /= samples;
-    tropical_chroma /= samples;
-
-    assert!(
-        tropical_green > temperate_green + 9.0,
-        "tropical shallow ocean did not brighten toward lagoon water: temperate={temperate_green} tropical={tropical_green}"
-    );
-    assert!(
-        tropical_chroma > temperate_chroma + 6.0,
-        "tropical shallow ocean did not shift green/cyan enough: temperate={temperate_chroma} tropical={tropical_chroma}"
-    );
-}
-
-#[test]
-fn land_adjacent_tropical_shelf_keeps_lagoon_tint() {
-    let scale = 16;
-    let mut temperate_world = World::new(7, 3, 2, 0.50, 0);
-    for y in 0..temperate_world.height {
-        for x in 0..temperate_world.width {
-            let idx = temperate_world.idx(x, y);
-            temperate_world.tiles[idx] = if x == 2 {
-                Tile {
-                    surface: Surface::Land,
-                    biome: Biome::TemperateGrassland,
-                    raw_elevation: 0.56,
-                    temperature: 0.50,
-                    moisture: 0.35,
-                    ..Tile::default()
-                }
-            } else {
-                let mut tile = warm_ocean_tile(0.47);
-                tile.temperature = 0.50;
-                tile
-            };
-        }
-    }
-
-    let mut tropical_world = temperate_world.clone();
-    for tile in &mut tropical_world.tiles {
-        tile.temperature = 0.90;
-    }
-
-    let temperate = render_world(&temperate_world, RenderConfig { scale });
-    let tropical = render_world(&tropical_world, RenderConfig { scale });
-    let sample = (2 * scale - 2, scale / 2);
-    let temperate_pixel = temperate.get_pixel(sample.0, sample.1).0;
-    let tropical_pixel = tropical.get_pixel(sample.0, sample.1).0;
-
-    assert!(
-        tropical_pixel[1] as f32 > temperate_pixel[1] as f32 + 6.0
-            && green_minus_red(tropical_pixel) > green_minus_red(temperate_pixel) + 3.5,
-        "land-adjacent tropical shelf lost lagoon tint: temperate={temperate_pixel:?} tropical={tropical_pixel:?}"
-    );
-}
-
-#[test]
-fn land_color_rendering_interpolates_with_neighbor_biome_color() {
-    let scale = 8;
-    let mut world = render_test_world(4, 2);
-    for y in 0..world.height {
-        for x in 0..world.width {
-            let idx = world.idx(x, y);
-            let biome = if x < 2 {
-                Biome::Desert
-            } else {
-                Biome::Rainforest
-            };
-            world.tiles[idx] = Tile {
-                surface: Surface::Land,
-                biome,
-                raw_elevation: 0.56,
-                temperature: if x < 2 { 0.82 } else { 0.76 },
-                moisture: if x < 2 { 0.10 } else { 0.86 },
-                ..Tile::default()
-            };
-        }
-    }
-
-    let image = render_world(&world, RenderConfig { scale });
-    let desert_side = image.get_pixel(scale + 1, scale / 2).0;
-    let rainforest_side = image.get_pixel(2 * scale - 1, scale / 2).0;
-    assert!(
-        desert_side[0] > rainforest_side[0] + 28,
-        "land color stayed too flat inside a tile: desert={desert_side:?} rainforest={rainforest_side:?}"
-    );
-}
-
-#[test]
-fn diagonal_land_color_influences_shared_render_vertex() {
-    let scale = 18;
-    let mut base_world = render_test_world(3, 3);
-    for tile in &mut base_world.tiles {
-        *tile = Tile {
-            surface: Surface::Land,
-            biome: Biome::TemperateGrassland,
-            raw_elevation: 0.56,
-            temperature: 0.54,
-            moisture: 0.34,
-            ..Tile::default()
-        };
-    }
-
-    let mut mixed_world = base_world.clone();
-    let diagonal = mixed_world.idx(0, 0);
-    mixed_world.tiles[diagonal] = Tile {
+fn render_world_maps_each_tile_to_exactly_one_pixel() {
+    let base_world = render_test_world(3, 3);
+    let mut changed_world = base_world.clone();
+    let center = changed_world.idx(1, 1);
+    changed_world.tiles[center] = Tile {
         surface: Surface::Land,
         biome: Biome::Rainforest,
-        raw_elevation: 0.56,
+        raw_elevation: 0.62,
+        elevation_shade: 0.86,
         temperature: 0.82,
-        moisture: 0.86,
+        moisture: 0.90,
         ..Tile::default()
     };
 
-    let base = render_world(&base_world, RenderConfig { scale });
-    let mixed = render_world(&mixed_world, RenderConfig { scale });
-    let corner = (scale, scale);
-    let center = (scale + scale / 2, scale + scale / 2);
-    let corner_delta = color_delta(
-        base.get_pixel(corner.0, corner.1).0,
-        mixed.get_pixel(corner.0, corner.1).0,
-    );
-    let center_delta = color_delta(
-        base.get_pixel(center.0, center.1).0,
-        mixed.get_pixel(center.0, center.1).0,
-    );
-    let base_corner = base.get_pixel(corner.0, corner.1).0;
-    let mixed_corner = mixed.get_pixel(corner.0, corner.1).0;
-
-    assert!(
-        corner_delta > 9.0,
-        "diagonal biome did not influence the shared land render vertex: delta={corner_delta}"
-    );
-    assert!(
-        corner_delta > center_delta + 5.0,
-        "diagonal vertex influence should stay strongest near the corner: corner={corner_delta} center={center_delta}"
-    );
-    assert!(
-        green_minus_red(mixed_corner) > green_minus_red(base_corner) + 4.0,
-        "diagonal rainforest did not pull the corner toward canopy color: base={base_corner:?} mixed={mixed_corner:?}"
-    );
-}
-
-#[test]
-fn biome_edge_rendering_blends_land_cover_texture_before_boundary() {
-    let scale = 18;
-    let mut world = render_test_world(5, 3);
-    for y in 0..world.height {
-        for x in 0..world.width {
-            let idx = world.idx(x, y);
-            let biome = if x < 2 {
-                Biome::TemperateGrassland
-            } else {
-                Biome::Rainforest
-            };
-            world.tiles[idx] = Tile {
-                surface: Surface::Land,
-                biome,
-                raw_elevation: 0.56,
-                temperature: if x < 2 { 0.54 } else { 0.78 },
-                moisture: if x < 2 { 0.34 } else { 0.82 },
-                ..Tile::default()
-            };
-        }
-    }
-
-    let image = render_world(&world, RenderConfig { scale });
-    let y = scale + scale / 2;
-    let deep_grass = image.get_pixel(scale + 2, y).0;
-    let edge_grass = image.get_pixel(2 * scale - 2, y).0;
-    let edge_forest = image.get_pixel(2 * scale + 1, y).0;
-    let deep_forest = image.get_pixel(3 * scale + scale / 2, y).0;
-    let interior_delta = color_delta(deep_grass, deep_forest);
-    let edge_delta = color_delta(edge_grass, edge_forest);
-
-    assert!(
-        edge_delta < interior_delta * 0.72,
-        "land-cover texture still flips too abruptly at the biome edge: edge={edge_delta} interior={interior_delta}"
-    );
-    assert!(
-        green_minus_red(edge_grass) > green_minus_red(deep_grass) + 8.0,
-        "neighbor canopy texture did not begin inside the grassland edge: deep={deep_grass:?} edge={edge_grass:?}"
-    );
-}
-
-#[test]
-fn forest_rendering_has_canopy_hue_texture() {
-    let scale = 12;
-    let mut world = render_test_world(3, 3);
-    for tile in &mut world.tiles {
-        *tile = Tile {
-            surface: Surface::Land,
-            biome: Biome::TemperateForest,
-            raw_elevation: 0.56,
-            temperature: 0.55,
-            moisture: 0.58,
-            ..Tile::default()
-        };
-    }
-
-    let image = render_world(&world, RenderConfig { scale });
-    let mut min_chroma = f32::MAX;
-    let mut max_chroma = f32::MIN;
-    for py in 0..scale {
-        for px in 0..scale {
-            let pixel = image.get_pixel(scale + px, scale + py).0;
-            let chroma = green_minus_red(pixel);
-            min_chroma = min_chroma.min(chroma);
-            max_chroma = max_chroma.max(chroma);
-        }
-    }
-
-    assert!(
-        max_chroma - min_chroma > 4.0,
-        "forest canopy lacks hue texture: min={min_chroma} max={max_chroma}"
-    );
-}
-
-#[test]
-fn boreal_forest_rendering_has_conifer_shadow_texture() {
-    let scale = 16;
-    let mut world = render_test_world(3, 3);
-    for tile in &mut world.tiles {
-        *tile = Tile {
-            surface: Surface::Land,
-            biome: Biome::BorealForest,
-            raw_elevation: 0.58,
-            temperature: 0.18,
-            moisture: 0.50,
-            ..Tile::default()
-        };
-    }
-
-    let image = render_world(&world, RenderConfig { scale });
-    let mut min_chroma = f32::MAX;
-    let mut max_chroma = f32::MIN;
-    let mut min_luma = f32::MAX;
-    let mut max_luma = f32::MIN;
-    for py in 0..scale {
-        for px in 0..scale {
-            let pixel = image.get_pixel(scale + px, scale + py).0;
-            let chroma = green_minus_red(pixel);
-            min_chroma = min_chroma.min(chroma);
-            max_chroma = max_chroma.max(chroma);
-            let luma = luma(pixel);
-            min_luma = min_luma.min(luma);
-            max_luma = max_luma.max(luma);
-        }
-    }
-
-    assert!(
-        max_chroma - min_chroma > 5.0,
-        "boreal forest lacks conifer hue texture: min={min_chroma} max={max_chroma}"
-    );
-    assert!(
-        max_luma - min_luma > 6.0,
-        "boreal forest lacks cool canopy shadow contrast: min={min_luma} max={max_luma}"
-    );
-}
-
-#[test]
-fn rainforest_rendering_has_dense_wet_canopy_texture() {
-    let scale = 16;
-    let mut world = render_test_world(3, 3);
-    for tile in &mut world.tiles {
-        *tile = Tile {
-            surface: Surface::Land,
-            biome: Biome::Rainforest,
-            raw_elevation: 0.56,
-            temperature: 0.82,
-            moisture: 0.82,
-            ..Tile::default()
-        };
-    }
-
-    let image = render_world(&world, RenderConfig { scale });
-    let mut min_wet_green = f32::MAX;
-    let mut max_wet_green = f32::MIN;
-    let mut min_luma = f32::MAX;
-    let mut max_luma = f32::MIN;
-    for py in 0..scale {
-        for px in 0..scale {
-            let pixel = image.get_pixel(scale + px, scale + py).0;
-            let wet_green = pixel[1] as f32 * 0.75 + pixel[2] as f32 * 0.20 - pixel[0] as f32;
-            min_wet_green = min_wet_green.min(wet_green);
-            max_wet_green = max_wet_green.max(wet_green);
-            let luma = luma(pixel);
-            min_luma = min_luma.min(luma);
-            max_luma = max_luma.max(luma);
-        }
-    }
-
-    assert!(
-        max_wet_green - min_wet_green > 8.0,
-        "rainforest lacks dense wet canopy chroma variation: min={min_wet_green} max={max_wet_green}"
-    );
-    assert!(
-        max_luma - min_luma > 6.0,
-        "rainforest lacks deep understory and wet highlight contrast: min={min_luma} max={max_luma}"
-    );
-}
-
-#[test]
-fn woodland_rendering_has_open_canopy_mosaic_texture() {
-    let scale = 16;
-    let mut world = render_test_world(3, 3);
-    for tile in &mut world.tiles {
-        *tile = Tile {
-            surface: Surface::Land,
-            biome: Biome::Woodland,
-            raw_elevation: 0.56,
-            temperature: 0.52,
-            moisture: 0.42,
-            ..Tile::default()
-        };
-    }
-
-    let image = render_world(&world, RenderConfig { scale });
-    let mut min_chroma = f32::MAX;
-    let mut max_chroma = f32::MIN;
-    let mut min_luma = f32::MAX;
-    let mut max_luma = f32::MIN;
-    for py in 0..scale {
-        for px in 0..scale {
-            let pixel = image.get_pixel(scale + px, scale + py).0;
-            let chroma = green_minus_red(pixel);
-            min_chroma = min_chroma.min(chroma);
-            max_chroma = max_chroma.max(chroma);
-            let luma = luma(pixel);
-            min_luma = min_luma.min(luma);
-            max_luma = max_luma.max(luma);
-        }
-    }
-
-    assert!(
-        max_chroma - min_chroma > 6.0,
-        "woodland lacks broken canopy hue texture: min={min_chroma} max={max_chroma}"
-    );
-    assert!(
-        max_luma - min_luma > 5.0,
-        "woodland lacks open ground and canopy contrast: min={min_luma} max={max_luma}"
-    );
-}
-
-#[test]
-fn desert_rendering_has_wind_streak_texture() {
-    let scale = 18;
-    let mut world = render_test_world(3, 3);
-    for tile in &mut world.tiles {
-        *tile = Tile {
-            surface: Surface::Land,
-            biome: Biome::Desert,
-            raw_elevation: 0.58,
-            temperature: 0.86,
-            moisture: 0.08,
-            ..Tile::default()
-        };
-    }
-
-    let image = render_world(&world, RenderConfig { scale });
-    let mut min_warmth = f32::MAX;
-    let mut max_warmth = f32::MIN;
-    for py in 0..scale {
-        for px in 0..scale {
-            let pixel = image.get_pixel(scale + px, scale + py).0;
-            let warmth = pixel[0] as f32 + pixel[1] as f32 * 0.65 - pixel[2] as f32 * 0.45;
-            min_warmth = min_warmth.min(warmth);
-            max_warmth = max_warmth.max(warmth);
-        }
-    }
-
-    assert!(
-        max_warmth - min_warmth > 11.0,
-        "desert lacks wind-streak dune texture: min={min_warmth} max={max_warmth}"
-    );
-}
-
-#[test]
-fn steppe_rendering_has_wind_combed_tussock_texture() {
-    let scale = 18;
-    let mut world = render_test_world(3, 3);
-    for tile in &mut world.tiles {
-        *tile = Tile {
-            surface: Surface::Land,
-            biome: Biome::Steppe,
-            raw_elevation: 0.56,
-            temperature: 0.48,
-            moisture: 0.22,
-            ..Tile::default()
-        };
-    }
-
-    let image = render_world(&world, RenderConfig { scale });
-    let mut min_warmth = f32::MAX;
-    let mut max_warmth = f32::MIN;
-    let mut min_luma = f32::MAX;
-    let mut max_luma = f32::MIN;
-    for py in 0..scale {
-        for px in 0..scale {
-            let pixel = image.get_pixel(scale + px, scale + py).0;
-            let warmth = pixel[0] as f32 + pixel[1] as f32 * 0.45 - pixel[2] as f32 * 0.65;
-            min_warmth = min_warmth.min(warmth);
-            max_warmth = max_warmth.max(warmth);
-            let luma = luma(pixel);
-            min_luma = min_luma.min(luma);
-            max_luma = max_luma.max(luma);
-        }
-    }
-
-    assert!(
-        max_warmth - min_warmth > 8.0,
-        "steppe lacks warm dry-grass and bare-soil variation: min={min_warmth} max={max_warmth}"
-    );
-    assert!(
-        max_luma - min_luma > 6.0,
-        "steppe lacks wind-combed tussock contrast: min={min_luma} max={max_luma}"
-    );
-}
-
-#[test]
-fn savanna_rendering_has_scattered_scrub_texture() {
-    let scale = 18;
-    let mut world = render_test_world(3, 3);
-    for tile in &mut world.tiles {
-        *tile = Tile {
-            surface: Surface::Land,
-            biome: Biome::Savanna,
-            raw_elevation: 0.56,
-            temperature: 0.72,
-            moisture: 0.34,
-            ..Tile::default()
-        };
-    }
-
-    let image = render_world(&world, RenderConfig { scale });
-    let mut min_chroma = f32::MAX;
-    let mut max_chroma = f32::MIN;
-    let mut min_luma = f32::MAX;
-    let mut max_luma = f32::MIN;
-    for py in 0..scale {
-        for px in 0..scale {
-            let pixel = image.get_pixel(scale + px, scale + py).0;
-            let chroma = green_minus_red(pixel);
-            min_chroma = min_chroma.min(chroma);
-            max_chroma = max_chroma.max(chroma);
-            let luma = luma(pixel);
-            min_luma = min_luma.min(luma);
-            max_luma = max_luma.max(luma);
-        }
-    }
-
-    assert!(
-        max_chroma - min_chroma > 5.5,
-        "savanna lacks green scrub variation: min={min_chroma} max={max_chroma}"
-    );
-    assert!(
-        max_luma - min_luma > 8.0,
-        "savanna lacks open grass and scrub contrast: min={min_luma} max={max_luma}"
-    );
-}
-
-#[test]
-fn tundra_rendering_has_frost_and_lichen_texture() {
-    let scale = 16;
-    let mut world = render_test_world(3, 3);
-    for tile in &mut world.tiles {
-        *tile = Tile {
-            surface: Surface::Land,
-            biome: Biome::Tundra,
-            raw_elevation: 0.58,
-            temperature: 0.10,
-            moisture: 0.54,
-            ..Tile::default()
-        };
-    }
-
-    let image = render_world(&world, RenderConfig { scale });
-    let mut min_cold_lichen = f32::MAX;
-    let mut max_cold_lichen = f32::MIN;
-    let mut min_luma = f32::MAX;
-    let mut max_luma = f32::MIN;
-    for py in 0..scale {
-        for px in 0..scale {
-            let pixel = image.get_pixel(scale + px, scale + py).0;
-            let cold_lichen = pixel[1] as f32 * 0.65 + pixel[2] as f32 * 0.45 - pixel[0] as f32;
-            min_cold_lichen = min_cold_lichen.min(cold_lichen);
-            max_cold_lichen = max_cold_lichen.max(cold_lichen);
-            let luma = luma(pixel);
-            min_luma = min_luma.min(luma);
-            max_luma = max_luma.max(luma);
-        }
-    }
-
-    assert!(
-        max_cold_lichen - min_cold_lichen > 8.0,
-        "tundra lacks frost and lichen chroma variation: min={min_cold_lichen} max={max_cold_lichen}"
-    );
-    assert!(
-        max_luma - min_luma > 7.0,
-        "tundra lacks wind-scoured frost contrast: min={min_luma} max={max_luma}"
-    );
-}
-
-#[test]
-fn wetland_rendering_has_pooled_water_texture() {
-    let scale = 16;
-    let mut world = render_test_world(3, 3);
-    for tile in &mut world.tiles {
-        *tile = Tile {
-            surface: Surface::Land,
-            biome: Biome::Wetland,
-            raw_elevation: 0.54,
-            slope: 0.006,
-            relief: 0.012,
-            temperature: 0.55,
-            moisture: 0.72,
-            ..Tile::default()
-        };
-    }
-
-    let image = render_world(&world, RenderConfig { scale });
-    let mut min_blue_green = f32::MAX;
-    let mut max_blue_green = f32::MIN;
-    for py in 0..scale {
-        for px in 0..scale {
-            let pixel = image.get_pixel(scale + px, scale + py).0;
-            let blue_green = pixel[2] as f32 + pixel[1] as f32 * 0.4 - pixel[0] as f32;
-            min_blue_green = min_blue_green.min(blue_green);
-            max_blue_green = max_blue_green.max(blue_green);
-        }
-    }
-
-    assert!(
-        max_blue_green - min_blue_green > 5.0,
-        "wetland lacks pooled water texture: min={min_blue_green} max={max_blue_green}"
-    );
-}
-
-#[test]
-fn freshwater_rendering_uses_inland_water_texture() {
-    let scale = 16;
-    let mut world = render_test_world(3, 3);
-    for tile in &mut world.tiles {
-        *tile = Tile {
-            surface: Surface::Land,
-            biome: Biome::Freshwater,
-            raw_elevation: 0.53,
-            slope: 0.004,
-            relief: 0.008,
-            temperature: 0.55,
-            moisture: 0.72,
-            ..Tile::default()
-        };
-    }
-
-    let image = render_world(&world, RenderConfig { scale });
-    let mut colors = std::collections::HashSet::new();
-    let mut min_green_red = f32::MAX;
-    let mut max_blue_red = f32::MIN;
-    let mut max_saturation = f32::MIN;
-    for py in 0..scale {
-        for px in 0..scale {
-            let pixel = image.get_pixel(scale + px, scale + py).0;
-            colors.insert((pixel[0], pixel[1], pixel[2]));
-            min_green_red = min_green_red.min(pixel[1] as f32 - pixel[0] as f32);
-            max_blue_red = max_blue_red.max(pixel[2] as f32 - pixel[0] as f32);
-            max_saturation = max_saturation.max(color_saturation(pixel));
-        }
-    }
-
-    assert!(
-        colors.len() > 1,
-        "freshwater texture is flat-filled: {} colors",
-        colors.len()
-    );
-    assert!(
-        min_green_red > 26.0,
-        "freshwater should keep a muted inland green water signal: min={min_green_red}"
-    );
-    assert!(
-        max_blue_red < 54.0 && max_saturation < 72.0,
-        "freshwater should not use saturated ocean-blue color: blue_red={max_blue_red} saturation={max_saturation}"
-    );
-}
-
-#[test]
-fn isolated_freshwater_renders_with_soft_shoreline() {
-    let scale = 20;
-    let mut world = render_test_world(3, 3);
-    let center = world.idx(1, 1);
-    world.tiles[center] = Tile {
-        surface: Surface::Land,
-        biome: Biome::Freshwater,
-        raw_elevation: 0.53,
-        slope: 0.004,
-        relief: 0.008,
-        temperature: 0.55,
-        moisture: 0.72,
-        ..Tile::default()
-    };
-
-    let image = render_world(&world, RenderConfig { scale });
-    let edge = image.get_pixel(scale + 1, scale + scale / 2).0;
-    let center = image.get_pixel(scale + scale / 2, scale + scale / 2).0;
-    let shoreline_delta = color_delta(edge, center);
-
-    assert!(
-        shoreline_delta > 28.0,
-        "isolated freshwater tile has a blocky shore: delta={shoreline_delta}"
-    );
-}
-
-#[test]
-fn diagonal_freshwater_land_contact_feathers_corner() {
-    let scale = 20;
-    let mut world = render_test_world(3, 3);
-    for tile in &mut world.tiles {
-        *tile = Tile {
-            surface: Surface::Land,
-            biome: Biome::Freshwater,
-            raw_elevation: 0.53,
-            slope: 0.004,
-            relief: 0.008,
-            temperature: 0.55,
-            moisture: 0.72,
-            ..Tile::default()
-        };
-    }
-    let diagonal_land = world.idx(0, 0);
-    world.tiles[diagonal_land] = Tile {
-        surface: Surface::Land,
-        biome: Biome::TemperateGrassland,
-        raw_elevation: 0.56,
-        temperature: 0.55,
-        moisture: 0.35,
-        ..Tile::default()
-    };
-
-    let image = render_world(&world, RenderConfig { scale });
-    let corner = image.get_pixel(scale, scale).0;
-    let center = image.get_pixel(scale + scale / 2, scale + scale / 2).0;
-    let feather_delta = color_delta(corner, center);
-
-    assert!(
-        feather_delta > 20.0,
-        "diagonal land contact did not feather the freshwater corner: delta={feather_delta}"
-    );
-}
-
-#[test]
-fn freshwater_color_does_not_bleed_into_neighbor_land() {
-    let scale = 18;
-    let base_world = render_test_world(3, 3);
-    let mut pond_world = base_world.clone();
-    let pond = pond_world.idx(1, 1);
-    pond_world.tiles[pond] = Tile {
-        surface: Surface::Land,
-        biome: Biome::Freshwater,
-        raw_elevation: 0.53,
-        slope: 0.004,
-        relief: 0.008,
-        temperature: 0.55,
-        moisture: 0.72,
-        ..Tile::default()
-    };
-
-    let base = render_world(&base_world, RenderConfig { scale });
-    let pond_image = render_world(&pond_world, RenderConfig { scale });
-    let land_edge = (scale - 1, scale + scale / 2);
-    let pond_center = (scale + scale / 2, scale + scale / 2);
-    let land_delta = color_delta(
-        base.get_pixel(land_edge.0, land_edge.1).0,
-        pond_image.get_pixel(land_edge.0, land_edge.1).0,
-    );
-    let pond_delta = color_delta(
-        base.get_pixel(pond_center.0, pond_center.1).0,
-        pond_image.get_pixel(pond_center.0, pond_center.1).0,
-    );
-
-    assert!(
-        land_delta < 6.0,
-        "freshwater color bled into adjacent land: delta={land_delta}"
-    );
-    assert!(
-        pond_delta > 45.0,
-        "freshwater center should remain visually distinct: delta={pond_delta}"
-    );
-}
-
-#[test]
-fn freshwater_elevation_does_not_cast_land_hillshade_shadow() {
-    let scale = 18;
-    let base_world = render_test_world(3, 3);
-    let mut pond_world = base_world.clone();
-    let pond = pond_world.idx(1, 1);
-    pond_world.tiles[pond] = Tile {
-        surface: Surface::Land,
-        biome: Biome::Freshwater,
-        raw_elevation: 0.18,
-        slope: 0.004,
-        relief: 0.008,
-        temperature: 0.55,
-        moisture: 0.72,
-        ..Tile::default()
-    };
-
-    let base = render_world(&base_world, RenderConfig { scale });
-    let pond_image = render_world(&pond_world, RenderConfig { scale });
-    let adjacent_land = (scale - 1, scale + scale / 2);
-    let land_delta = color_delta(
-        base.get_pixel(adjacent_land.0, adjacent_land.1).0,
-        pond_image.get_pixel(adjacent_land.0, adjacent_land.1).0,
-    );
-
-    assert!(
-        land_delta < 6.0,
-        "freshwater elevation cast an artificial land shadow: delta={land_delta}"
-    );
-}
-
-#[test]
-fn mountain_summit_rendering_adds_crest_highlight() {
-    let scale = 12;
-    let mut slope_world = alpine_render_test_world();
-    let center = slope_world.idx(1, 1);
-    slope_world.tiles[center].mountain_feature = MountainFeature::AlpineSlope;
-
-    let mut summit_world = slope_world.clone();
-    summit_world.tiles[center].mountain_feature = MountainFeature::Summit;
-
-    let slope = render_world(&slope_world, RenderConfig { scale });
-    let summit = render_world(&summit_world, RenderConfig { scale });
-    let px = scale + scale / 2;
-    let py = scale + scale / 2;
-    let slope_luma = luma(slope.get_pixel(px, py).0);
-    let summit_luma = luma(summit.get_pixel(px, py).0);
-
-    assert!(
-        summit_luma > slope_luma + 7.0,
-        "summit feature did not add enough crest highlight: summit={summit_luma} slope={slope_luma}"
-    );
-}
-
-#[test]
-fn alpine_ridge_rendering_adds_craggy_band_contrast() {
-    let scale = 18;
-    let mut slope_world = render_test_world(3, 3);
-    for y in 0..slope_world.height {
-        for x in 0..slope_world.width {
-            let idx = slope_world.idx(x, y);
-            slope_world.tiles[idx] = Tile {
-                surface: Surface::Land,
-                biome: Biome::Alpine,
-                raw_elevation: 0.88 - ((x.abs_diff(1) + y.abs_diff(1)) as f32 * 0.012),
-                slope: 0.080,
-                relief: 0.120,
-                temperature: 0.34,
-                moisture: 0.22,
-                mountain_feature: MountainFeature::AlpineSlope,
-                ..Tile::default()
-            };
-        }
-    }
-
-    let mut ridge_world = slope_world.clone();
-    let center = ridge_world.idx(1, 1);
-    ridge_world.tiles[center].mountain_feature = MountainFeature::Ridge;
-
-    let slope = render_world(&slope_world, RenderConfig { scale });
-    let ridge = render_world(&ridge_world, RenderConfig { scale });
-    let mut slope_min = f32::MAX;
-    let mut slope_max = f32::MIN;
-    let mut ridge_min = f32::MAX;
-    let mut ridge_max = f32::MIN;
-
-    for py in 0..scale {
-        for px in 0..scale {
-            let x = scale + px;
-            let y = scale + py;
-            let slope_luma = luma(slope.get_pixel(x, y).0);
-            let ridge_luma = luma(ridge.get_pixel(x, y).0);
-            slope_min = slope_min.min(slope_luma);
-            slope_max = slope_max.max(slope_luma);
-            ridge_min = ridge_min.min(ridge_luma);
-            ridge_max = ridge_max.max(ridge_luma);
-        }
-    }
-
-    let slope_range = slope_max - slope_min;
-    let ridge_range = ridge_max - ridge_min;
-    assert!(
-        ridge_range > slope_range + 7.0,
-        "ridge feature did not add enough crag contrast: ridge={ridge_range} slope={slope_range}"
-    );
-    assert!(
-        ridge_max > slope_max + 8.0,
-        "ridge crest bands did not brighten alpine rock enough: ridge_max={ridge_max} slope_max={slope_max}"
-    );
-}
-
-#[test]
-fn alpine_ridge_rendering_adds_directional_spine_highlight() {
-    let scale = 20;
-    let mut slope_world = render_test_world(3, 3);
-    for y in 0..slope_world.height {
-        for x in 0..slope_world.width {
-            let idx = slope_world.idx(x, y);
-            let eastward_drop = (x as f32 - 1.0) * 0.060;
-            let cross_slope = y.abs_diff(1) as f32 * 0.006;
-            slope_world.tiles[idx] = Tile {
-                surface: Surface::Land,
-                biome: Biome::Alpine,
-                raw_elevation: 0.90 - eastward_drop - cross_slope,
-                slope: 0.085,
-                relief: 0.130,
-                temperature: 0.42,
-                moisture: 0.22,
-                mountain_feature: MountainFeature::AlpineSlope,
-                ..Tile::default()
-            };
-        }
-    }
-
-    let mut ridge_world = slope_world.clone();
-    let center = ridge_world.idx(1, 1);
-    ridge_world.tiles[center].mountain_feature = MountainFeature::Ridge;
-
-    let slope = render_world(&slope_world, RenderConfig { scale });
-    let ridge = render_world(&ridge_world, RenderConfig { scale });
-    let mut slope_spine = 0.0_f32;
-    let mut slope_shoulder = 0.0_f32;
-    let mut ridge_spine = 0.0_f32;
-    let mut ridge_shoulder = 0.0_f32;
-    let mut samples = 0.0_f32;
-
-    for py in scale / 4..scale * 3 / 4 {
-        for px in scale / 2 - 1..=scale / 2 + 1 {
-            let x = scale + px;
-            let y = scale + py;
-            slope_spine += luma(slope.get_pixel(x, y).0);
-            ridge_spine += luma(ridge.get_pixel(x, y).0);
-            samples += 1.0;
-        }
-        for px in scale * 4 / 5 - 1..=scale * 4 / 5 + 1 {
-            let x = scale + px;
-            let y = scale + py;
-            slope_shoulder += luma(slope.get_pixel(x, y).0);
-            ridge_shoulder += luma(ridge.get_pixel(x, y).0);
-        }
-    }
-
-    slope_spine /= samples;
-    slope_shoulder /= samples;
-    ridge_spine /= samples;
-    ridge_shoulder /= samples;
-    let slope_contrast = slope_spine - slope_shoulder;
-    let ridge_contrast = ridge_spine - ridge_shoulder;
-    assert!(
-        ridge_contrast > slope_contrast + 6.0,
-        "ridge spine did not separate from the shoulder: ridge={ridge_contrast} slope={slope_contrast}"
-    );
-    assert!(
-        ridge_spine > slope_spine + 8.0,
-        "ridge spine did not brighten over the same alpine slope pixels: ridge={ridge_spine} slope={slope_spine}"
-    );
-}
-
-#[test]
-fn foothill_rendering_adds_stony_talus_below_alpine() {
-    let scale = 18;
-    let mut base_world = render_test_world(3, 3);
-    for tile in &mut base_world.tiles {
-        *tile = Tile {
-            surface: Surface::Land,
-            biome: Biome::Foothills,
-            raw_elevation: 0.70,
-            slope: 0.050,
-            relief: 0.075,
-            temperature: 0.42,
-            moisture: 0.34,
-            mountain_feature: MountainFeature::Foothill,
-            ..Tile::default()
-        };
-    }
-
-    let mut talus_world = base_world.clone();
-    let alpine = talus_world.idx(0, 1);
-    talus_world.tiles[alpine] = Tile {
-        surface: Surface::Land,
-        biome: Biome::Alpine,
-        raw_elevation: 0.92,
-        slope: 0.110,
-        relief: 0.150,
-        temperature: 0.32,
-        moisture: 0.22,
-        mountain_feature: MountainFeature::Ridge,
-        ..Tile::default()
-    };
-
-    let base = render_world(&base_world, RenderConfig { scale });
-    let talus = render_world(&talus_world, RenderConfig { scale });
-    let mut mean_delta = 0.0_f32;
-    let mut base_saturation = 0.0_f32;
-    let mut talus_saturation = 0.0_f32;
-    let mut samples = 0.0_f32;
-
-    for py in scale / 3..scale * 2 / 3 {
-        for px in scale / 2..scale - 2 {
-            let x = scale + px;
-            let y = scale + py;
-            let base_pixel = base.get_pixel(x, y).0;
-            let talus_pixel = talus.get_pixel(x, y).0;
-            mean_delta += color_delta(base_pixel, talus_pixel);
-            base_saturation += color_saturation(base_pixel);
-            talus_saturation += color_saturation(talus_pixel);
-            samples += 1.0;
-        }
-    }
-
-    mean_delta /= samples;
-    base_saturation /= samples;
-    talus_saturation /= samples;
-    assert!(
-        mean_delta > 8.0,
-        "alpine-adjacent foothills did not gain a visible talus apron: delta={mean_delta}"
-    );
-    assert!(
-        talus_saturation < base_saturation - 3.0,
-        "talus apron did not mute foothill color toward stone: talus_sat={talus_saturation} base_sat={base_saturation}"
-    );
-}
-
-#[test]
-fn foothill_rendering_blends_grassy_slopes_and_exposed_stone() {
-    let scale = 16;
-    let mut world = render_test_world(3, 3);
-    for tile in &mut world.tiles {
-        *tile = Tile {
-            surface: Surface::Land,
-            biome: Biome::Foothills,
-            raw_elevation: 0.68,
-            slope: 0.035,
-            relief: 0.050,
-            temperature: 0.48,
-            moisture: 0.38,
-            mountain_feature: MountainFeature::None,
-            ..Tile::default()
-        };
-    }
-
-    let image = render_world(&world, RenderConfig { scale });
-    let mut min_grassy = f32::MAX;
-    let mut max_grassy = f32::MIN;
-    let mut min_stony = f32::MAX;
-    let mut max_stony = f32::MIN;
-    for py in 0..scale {
-        for px in 0..scale {
-            let pixel = image.get_pixel(scale + px, scale + py).0;
-            let grassy = pixel[1] as f32 - pixel[0] as f32 * 0.55 - pixel[2] as f32 * 0.20;
-            let stony = pixel[2] as f32 + pixel[0] as f32 * 0.25 - pixel[1] as f32 * 0.55;
-            min_grassy = min_grassy.min(grassy);
-            max_grassy = max_grassy.max(grassy);
-            min_stony = min_stony.min(stony);
-            max_stony = max_stony.max(stony);
-        }
-    }
-
-    assert!(
-        max_grassy - min_grassy > 5.0,
-        "foothills lack grassy slope variation: min={min_grassy} max={max_grassy}"
-    );
-    assert!(
-        max_stony - min_stony > 4.5,
-        "foothills lack exposed stone variation: min={min_stony} max={max_stony}"
-    );
-}
-
-#[test]
-fn cold_high_alpine_rendering_applies_snow_overlay() {
-    let scale = 12;
-    let cold_world = alpine_render_test_world();
-    let mut warm_world = cold_world.clone();
-    for tile in &mut warm_world.tiles {
-        tile.temperature = 0.62;
-    }
-
-    let cold = render_world(&cold_world, RenderConfig { scale });
-    let warm = render_world(&warm_world, RenderConfig { scale });
-    let px = scale + scale / 2;
-    let py = scale + scale / 2;
-    let cold_pixel = cold.get_pixel(px, py).0;
-    let warm_pixel = warm.get_pixel(px, py).0;
-
-    assert!(
-        luma(cold_pixel) > luma(warm_pixel) + 10.0 && cold_pixel[2] > warm_pixel[2] + 8,
-        "cold alpine did not receive visible snow overlay: cold={cold_pixel:?} warm={warm_pixel:?}"
-    );
-}
-
-#[test]
-fn cold_alpine_summit_rendering_adds_broken_snowfields() {
-    let scale = 18;
-    let mut cold_world = alpine_render_test_world();
-    for tile in &mut cold_world.tiles {
-        tile.raw_elevation = 0.96;
-        tile.temperature = 0.02;
-        tile.slope = 0.090;
-        tile.relief = 0.140;
-        tile.mountain_feature = MountainFeature::Summit;
-    }
-
-    let mut warm_world = cold_world.clone();
-    for tile in &mut warm_world.tiles {
-        tile.temperature = 0.42;
-    }
-
-    let cold = render_world(&cold_world, RenderConfig { scale });
-    let warm = render_world(&warm_world, RenderConfig { scale });
-    let mut cold_min = f32::MAX;
-    let mut cold_max = f32::MIN;
-    let mut warm_min = f32::MAX;
-    let mut warm_max = f32::MIN;
-
-    for py in 0..scale {
-        for px in 0..scale {
-            let x = scale + px;
-            let y = scale + py;
-            let cold_luma = luma(cold.get_pixel(x, y).0);
-            let warm_luma = luma(warm.get_pixel(x, y).0);
-            cold_min = cold_min.min(cold_luma);
-            cold_max = cold_max.max(cold_luma);
-            warm_min = warm_min.min(warm_luma);
-            warm_max = warm_max.max(warm_luma);
-        }
-    }
-
-    let cold_range = cold_max - cold_min;
-    let warm_range = warm_max - warm_min;
-    assert!(
-        cold_max > warm_max + 18.0,
-        "cold summit did not gain bright broken snow caps: cold_max={cold_max} warm_max={warm_max}"
-    );
-    assert!(
-        cold_range > warm_range + 6.0,
-        "summit snowfields are too uniform: cold_range={cold_range} warm_range={warm_range}"
-    );
-}
-
-#[test]
-fn major_river_rendering_feathers_wet_banks_around_channel() {
-    let scale = 10;
-    let mut river_world = render_test_world(3, 3);
-    let base_world = river_world.clone();
-
-    for x in 0..2 {
-        let idx = river_world.idx(x, 1);
-        river_world.tiles[idx].river = 1.0;
-        river_world.tiles[idx].flow_direction = 2;
-    }
-    let mouth = river_world.idx(2, 1);
-    river_world.tiles[mouth].river = 1.0;
-
-    let base = render_world(&base_world, RenderConfig { scale });
-    let river = render_world(&river_world, RenderConfig { scale });
-    let core = (scale + scale / 2, scale + scale / 2);
-    let shoulder = (core.0, core.1 + 4);
-    let core_delta = color_delta(
-        base.get_pixel(core.0, core.1).0,
-        river.get_pixel(core.0, core.1).0,
-    );
-    let shoulder_delta = color_delta(
-        base.get_pixel(shoulder.0, shoulder.1).0,
-        river.get_pixel(shoulder.0, shoulder.1).0,
-    );
-
-    assert!(
-        shoulder_delta > 5.0,
-        "river bank feather did not reach outside the water core: delta={shoulder_delta}"
-    );
-    assert!(
-        core_delta > shoulder_delta + 8.0,
-        "river water core should remain stronger than the bank: core={core_delta} shoulder={shoulder_delta}"
-    );
-}
-
-#[test]
-fn minor_stream_rendering_adds_thin_tributary_channels() {
-    let scale = 18;
-    let mut minor_world = render_test_world(4, 3);
-    let base_world = minor_world.clone();
-
-    for x in 0..3 {
-        let idx = minor_world.idx(x, 1);
-        minor_world.tiles[idx].river = 0.42;
-        minor_world.tiles[idx].flow_direction = 2;
-    }
-
-    let mut major_world = base_world.clone();
-    for x in 0..3 {
-        let idx = major_world.idx(x, 1);
-        major_world.tiles[idx].river = 0.82;
-        major_world.tiles[idx].flow_direction = 2;
-    }
-
-    let base = render_world(&base_world, RenderConfig { scale });
-    let minor = render_world(&minor_world, RenderConfig { scale });
-    let major = render_world(&major_world, RenderConfig { scale });
-    let core = (scale + scale / 2, scale + scale / 2);
-    let minor_delta = color_delta(
-        base.get_pixel(core.0, core.1).0,
-        minor.get_pixel(core.0, core.1).0,
-    );
-    let major_delta = color_delta(
-        base.get_pixel(core.0, core.1).0,
-        major.get_pixel(core.0, core.1).0,
-    );
-
-    assert!(
-        minor_delta > 4.0,
-        "minor stream was not visible enough: delta={minor_delta}"
-    );
-    assert!(
-        major_delta > minor_delta + 8.0,
-        "minor stream should remain subtler than major river: minor={minor_delta} major={major_delta}"
-    );
-}
-
-#[test]
-fn minor_stream_rendering_reaches_coastal_ocean() {
-    let scale = 16;
-    let mut base_world = render_test_world(4, 3);
-    let coast = base_world.idx(1, 1);
-    base_world.tiles[coast] = Tile {
-        surface: Surface::Coast,
-        biome: Biome::Coast,
-        raw_elevation: 0.525,
-        ..Tile::default()
-    };
-    let ocean = base_world.idx(2, 1);
-    base_world.tiles[ocean] = warm_ocean_tile(0.42);
-
-    let mut minor_world = base_world.clone();
-    minor_world.tiles[coast].river = 0.42;
-    minor_world.tiles[coast].flow_direction = 2;
-
-    let mut major_world = base_world.clone();
-    major_world.tiles[coast].river = 0.86;
-    major_world.tiles[coast].flow_direction = 2;
-
-    let base = render_world(&base_world, RenderConfig { scale });
-    let minor = render_world(&minor_world, RenderConfig { scale });
-    let major = render_world(&major_world, RenderConfig { scale });
-    let mouth = (2 * scale + scale / 2, scale + scale / 2);
-    let minor_delta = color_delta(
-        base.get_pixel(mouth.0, mouth.1).0,
-        minor.get_pixel(mouth.0, mouth.1).0,
-    );
-    let major_delta = color_delta(
-        base.get_pixel(mouth.0, mouth.1).0,
-        major.get_pixel(mouth.0, mouth.1).0,
-    );
-
-    assert!(
-        minor_delta > 3.0,
-        "minor coastal stream did not reach adjacent ocean: delta={minor_delta}"
-    );
-    assert!(
-        major_delta > minor_delta + 5.0,
-        "minor coastal stream should stay subtler than a major estuary: minor={minor_delta} major={major_delta}"
-    );
-}
-
-#[test]
-fn lake_outlet_rendering_connects_lake_edge_to_channel() {
-    let scale = 18;
-    let mut base_world = render_test_world(4, 3);
-    let lake = base_world.idx(1, 1);
-    base_world.tiles[lake] = Tile {
-        surface: Surface::Land,
-        biome: Biome::Freshwater,
-        raw_elevation: 0.57,
-        lake_depth: 0.72,
-        water_body_id: 1,
-        lake_inflow: 0.74,
-        lake_outlet: true,
-        ..Tile::default()
-    };
-
-    let mut outlet_world = base_world.clone();
-    let outlet = outlet_world.idx(2, 1);
-    outlet_world.tiles[outlet].river = 0.34;
-    outlet_world.tiles[outlet].river_depth = 0.34;
-    outlet_world.tiles[outlet].river_width = 0.18;
-    outlet_world.tiles[outlet].river_order = 1;
-    outlet_world.tiles[outlet].spill_discharge = 0.42;
-    outlet_world.tiles[outlet].lake_outlet = true;
-    outlet_world.tiles[outlet].flow_direction = 2;
-    let downstream = outlet_world.idx(3, 1);
-    outlet_world.tiles[downstream].river = 0.30;
-    outlet_world.tiles[downstream].river_depth = 0.30;
-    outlet_world.tiles[downstream].river_width = 0.16;
-    outlet_world.tiles[downstream].river_order = 1;
-    outlet_world.tiles[downstream].spill_discharge = 0.34;
-    outlet_world.tiles[downstream].lake_outlet = true;
-    outlet_world.tiles[downstream].flow_direction = 2;
-
-    let base = render_world(&base_world, RenderConfig { scale });
-    let outlet_image = render_world(&outlet_world, RenderConfig { scale });
-    let lake_edge = (2 * scale + 2, scale + scale / 2);
-    let channel_core = (2 * scale + scale / 2, scale + scale / 2);
-    let edge_delta = color_delta(
-        base.get_pixel(lake_edge.0, lake_edge.1).0,
-        outlet_image.get_pixel(lake_edge.0, lake_edge.1).0,
-    );
-    let core_delta = color_delta(
-        base.get_pixel(channel_core.0, channel_core.1).0,
-        outlet_image.get_pixel(channel_core.0, channel_core.1).0,
-    );
-
-    assert!(
-        edge_delta > 5.0,
-        "lake outlet channel did not visibly emerge from lake edge: delta={edge_delta}"
-    );
-    assert!(
-        core_delta + 4.0 >= edge_delta,
-        "outlet lake-edge hydration should not overpower the channel core: core={core_delta} edge={edge_delta}"
-    );
-}
-
-#[test]
-fn river_water_core_stays_clipped_while_hydration_remains_subtle() {
-    let scale = 18;
-    let mut river_world = render_test_world(3, 3);
-    let base_world = river_world.clone();
-    let center = river_world.idx(1, 1);
-    river_world.tiles[center].river = 0.82;
-    river_world.tiles[center].river_depth = 0.70;
-    river_world.tiles[center].flow_direction = 2;
-
-    let base = render_world(&base_world, RenderConfig { scale });
-    let river = render_world(&river_world, RenderConfig { scale });
-    let river_core = (scale + scale / 2, scale + scale / 2);
-    let east_neighbor = (2 * scale + scale / 2, scale + scale / 2);
-    let core_delta = color_delta(
-        base.get_pixel(river_core.0, river_core.1).0,
-        river.get_pixel(river_core.0, river_core.1).0,
-    );
-    let neighbor_delta = color_delta(
-        base.get_pixel(east_neighbor.0, east_neighbor.1).0,
-        river.get_pixel(east_neighbor.0, east_neighbor.1).0,
-    );
-
-    assert!(
-        core_delta > 8.0,
-        "river tile did not visibly render: delta={core_delta}"
-    );
-    assert!(
-        neighbor_delta < 12.0 && core_delta > neighbor_delta + 6.0,
-        "regional hydration should stay subtler than the river water core: core={core_delta} neighbor={neighbor_delta}"
-    );
-}
-
-#[test]
-fn river_depth_rendering_darkens_channel_core() {
-    let scale = 18;
-    let mut shallow_world = render_test_world(3, 3);
-    let center = shallow_world.idx(1, 1);
-    shallow_world.tiles[center].river = 0.82;
-    shallow_world.tiles[center].river_depth = 0.18;
-    shallow_world.tiles[center].flow_direction = 2;
-
-    let mut deep_world = shallow_world.clone();
-    deep_world.tiles[center].river_depth = 0.92;
-
-    let shallow = render_world(&shallow_world, RenderConfig { scale });
-    let deep = render_world(&deep_world, RenderConfig { scale });
-    let core = (scale + scale / 2, scale + scale / 2);
-    let shallow_luma = luma(shallow.get_pixel(core.0, core.1).0);
-    let deep_luma = luma(deep.get_pixel(core.0, core.1).0);
-
-    assert!(
-        deep_luma + 8.0 < shallow_luma,
-        "river depth did not darken channel core: shallow={shallow_luma} deep={deep_luma}"
-    );
-}
-
-#[test]
-fn deep_river_rendering_keeps_cross_section_gradient() {
-    let scale = 32;
-    let mut base_world = render_test_world(3, 3);
-    for tile in &mut base_world.tiles {
-        tile.raw_elevation = 0.57;
-        tile.slope = 0.009;
-        tile.relief = 0.012;
-        tile.moisture = 0.38;
-        tile.temperature = 0.54;
-    }
-
-    let mut river_world = base_world.clone();
-    for x in 0..3 {
-        let idx = river_world.idx(x, 1);
-        river_world.tiles[idx].river = 0.86;
-        river_world.tiles[idx].river_depth = 0.88;
-        river_world.tiles[idx].river_width = 0.66;
-        river_world.tiles[idx].flow_direction = 2;
-    }
-
-    let base = render_world(&base_world, RenderConfig { scale });
-    let river = render_world(&river_world, RenderConfig { scale });
-    let core = (scale + scale / 2, scale + scale / 2);
-    let margin = (scale + scale / 2, scale + scale / 2 + 10);
-    let core_luma = luma(river.get_pixel(core.0, core.1).0);
-    let margin_luma = luma(river.get_pixel(margin.0, margin.1).0);
-    let margin_delta = color_delta(
-        base.get_pixel(margin.0, margin.1).0,
-        river.get_pixel(margin.0, margin.1).0,
-    );
-
-    assert!(
-        margin_delta > 7.0,
-        "deep river margin should still render as water/near-bank influence: delta={margin_delta}"
-    );
-    assert!(
-        margin_luma > core_luma + 8.0,
-        "deep river should show a lighter margin around a dark thalweg: margin={margin_luma} core={core_luma}"
-    );
-}
-
-#[test]
-fn shallow_steep_river_depth_adds_riffle_highlights() {
-    let scale = 24;
-    let mut base_world = render_test_world(3, 3);
-    for tile in &mut base_world.tiles {
-        tile.raw_elevation = 0.62;
-        tile.slope = 0.080;
-        tile.relief = 0.090;
-        tile.moisture = 0.38;
-        tile.temperature = 0.50;
-    }
-
-    let mut shallow_world = base_world.clone();
-    for x in 0..3 {
-        let idx = shallow_world.idx(x, 1);
-        shallow_world.tiles[idx].river = 0.78;
-        shallow_world.tiles[idx].river_depth = 0.16;
-        shallow_world.tiles[idx].river_width = 0.26;
-        shallow_world.tiles[idx].flow_direction = 2;
-    }
-
-    let mut deep_world = shallow_world.clone();
-    for x in 0..3 {
-        let idx = deep_world.idx(x, 1);
-        deep_world.tiles[idx].river_depth = 0.86;
-        deep_world.tiles[idx].river_width = 0.48;
-    }
-
-    let base = render_world(&base_world, RenderConfig { scale });
-    let shallow = render_world(&shallow_world, RenderConfig { scale });
-    let deep = render_world(&deep_world, RenderConfig { scale });
-    let center_x = scale;
-    let center_y = scale;
-    let mut shallow_glints = 0_usize;
-    let mut deep_glints = 0_usize;
-    for py in center_y..center_y + scale {
-        for px in center_x..center_x + scale {
-            let base_luma = luma(base.get_pixel(px, py).0);
-            if luma(shallow.get_pixel(px, py).0) > base_luma + 5.0 {
-                shallow_glints += 1;
-            }
-            if luma(deep.get_pixel(px, py).0) > base_luma + 5.0 {
-                deep_glints += 1;
-            }
-        }
-    }
-
-    assert!(
-        shallow_glints > deep_glints + 6,
-        "shallow steep reach should show more riffle glints than deep water: shallow={shallow_glints} deep={deep_glints}"
-    );
-}
-
-#[test]
-fn deep_lowland_river_depth_mutes_clear_blue_margins() {
-    let scale = 24;
-    let mut lowland_world = render_test_world(3, 3);
-    for tile in &mut lowland_world.tiles {
-        tile.raw_elevation = 0.56;
-        tile.slope = 0.006;
-        tile.relief = 0.010;
-        tile.moisture = 0.30;
-        tile.temperature = 0.55;
-    }
-
-    for x in 0..3 {
-        let idx = lowland_world.idx(x, 1);
-        lowland_world.tiles[idx].river = 0.84;
-        lowland_world.tiles[idx].river_depth = 0.78;
-        lowland_world.tiles[idx].river_width = 0.72;
-        lowland_world.tiles[idx].flow_direction = 2;
-    }
-
-    let mut steep_world = lowland_world.clone();
-    for tile in &mut steep_world.tiles {
-        tile.slope = 0.080;
-        tile.relief = 0.090;
-    }
-
-    let lowland = render_world(&lowland_world, RenderConfig { scale });
-    let steep = render_world(&steep_world, RenderConfig { scale });
-    let mut lowland_saturation = 0.0_f32;
-    let mut steep_saturation = 0.0_f32;
-    let mut lowland_blue_dominance = 0.0_f32;
-    let mut steep_blue_dominance = 0.0_f32;
-    let mut samples = 0_u32;
-
-    for px in scale + 4..2 * scale - 4 {
-        for offset in [5_u32, 6, 7, 8] {
-            for py in [scale + scale / 2 - offset, scale + scale / 2 + offset] {
-                let lowland_pixel = lowland.get_pixel(px, py).0;
-                let steep_pixel = steep.get_pixel(px, py).0;
-                lowland_saturation += color_saturation(lowland_pixel);
-                steep_saturation += color_saturation(steep_pixel);
-                lowland_blue_dominance += lowland_pixel[2] as f32 - lowland_pixel[0] as f32;
-                steep_blue_dominance += steep_pixel[2] as f32 - steep_pixel[0] as f32;
-                samples += 1;
-            }
-        }
-    }
-
-    let samples = samples as f32;
-    let lowland_saturation = lowland_saturation / samples;
-    let steep_saturation = steep_saturation / samples;
-    let lowland_blue_dominance = lowland_blue_dominance / samples;
-    let steep_blue_dominance = steep_blue_dominance / samples;
-
-    assert!(
-        lowland_saturation + 2.0 < steep_saturation,
-        "deep lowland river margins should be less clear-blue saturated: lowland={lowland_saturation} steep={steep_saturation}"
-    );
-    assert!(
-        lowland_blue_dominance + 2.0 < steep_blue_dominance,
-        "deep lowland river margins should be less blue-dominant: lowland={lowland_blue_dominance} steep={steep_blue_dominance}"
-    );
-}
-
-#[test]
-fn deep_confined_river_depth_darkens_incisive_banks() {
-    let scale = 28;
-    let mut lowland_base = render_test_world(3, 3);
-    for tile in &mut lowland_base.tiles {
-        tile.raw_elevation = 0.62;
-        tile.slope = 0.008;
-        tile.relief = 0.012;
-        tile.moisture = 0.34;
-        tile.temperature = 0.48;
-    }
-
-    let mut confined_base = lowland_base.clone();
-    for tile in &mut confined_base.tiles {
-        tile.slope = 0.082;
-        tile.relief = 0.095;
-    }
-
-    let mut lowland_world = lowland_base.clone();
-    let mut confined_world = confined_base.clone();
-    for world in [&mut lowland_world, &mut confined_world] {
+    let base = render_world(&base_world);
+    let changed = render_world(&changed_world);
+    let mut changed_pixels = 0;
+    for y in 0..3 {
         for x in 0..3 {
-            let idx = world.idx(x, 1);
-            world.tiles[idx].river = 0.78;
-            world.tiles[idx].river_depth = 0.80;
-            world.tiles[idx].river_width = 0.34;
-            world.tiles[idx].flow_direction = 2;
-        }
-    }
-
-    let lowland_base = render_world(&lowland_base, RenderConfig { scale });
-    let confined_base = render_world(&confined_base, RenderConfig { scale });
-    let lowland = render_world(&lowland_world, RenderConfig { scale });
-    let confined = render_world(&confined_world, RenderConfig { scale });
-
-    let mut lowland_darkening = 0.0_f32;
-    let mut confined_darkening = 0.0_f32;
-    let mut samples = 0_u32;
-    for px in scale + 5..2 * scale - 5 {
-        for offset in [10_u32, 11, 12, 13] {
-            for py in [scale + scale / 2 - offset, scale + scale / 2 + offset] {
-                lowland_darkening +=
-                    luma(lowland_base.get_pixel(px, py).0) - luma(lowland.get_pixel(px, py).0);
-                confined_darkening +=
-                    luma(confined_base.get_pixel(px, py).0) - luma(confined.get_pixel(px, py).0);
-                samples += 1;
+            let delta = color_delta(base.get_pixel(x, y).0, changed.get_pixel(x, y).0);
+            if delta > 0.0 {
+                changed_pixels += 1;
+                assert_eq!((x, y), (1, 1));
             }
         }
     }
 
-    let lowland_darkening = lowland_darkening / samples as f32;
-    let confined_darkening = confined_darkening / samples as f32;
+    assert_eq!(changed_pixels, 1);
+}
+
+#[test]
+fn elevation_shade_controls_land_luminance_per_tile() {
+    let mut shaded = render_test_world(2, 1);
+    for tile in &mut shaded.tiles {
+        tile.raw_elevation = 0.72;
+        tile.biome = Biome::Foothills;
+        tile.elevation_shade = 0.20;
+    }
+    let lit_idx = shaded.idx(1, 0);
+    shaded.tiles[lit_idx].elevation_shade = 0.88;
+
+    let image = render_world(&shaded);
+    let dark = image.get_pixel(0, 0).0;
+    let lit = image.get_pixel(1, 0).0;
 
     assert!(
-        confined_darkening > lowland_darkening + 4.0,
-        "deep confined rivers should darken incised banks more than lowland channels: confined={confined_darkening} lowland={lowland_darkening}"
-    );
-    assert!(
-        confined_darkening > 6.0,
-        "deep confined river banks did not visibly darken: {confined_darkening}"
+        luma(lit) > luma(dark) + 35.0,
+        "elevation shade should materially alter tile luminance: dark={dark:?} lit={lit:?}"
     );
 }
 
 #[test]
-fn deep_sustained_river_depth_adds_current_streak_texture() {
-    let scale = 32;
-    let mut shallow_world = render_test_world(3, 3);
-    for tile in &mut shallow_world.tiles {
-        tile.raw_elevation = 0.58;
-        tile.slope = 0.010;
-        tile.relief = 0.014;
-        tile.moisture = 0.42;
-        tile.temperature = 0.52;
-    }
+fn ocean_depth_and_temperature_render_from_same_tile_only() {
+    let mut world = World::new(7, 3, 1, 0.50, 0);
+    world.tiles[0] = warm_ocean_tile(0.49);
+    world.tiles[1] = warm_ocean_tile(0.20);
+    world.tiles[2] = warm_ocean_tile(0.49);
+    world.tiles[2].temperature = 0.90;
 
-    for x in 0..3 {
-        let idx = shallow_world.idx(x, 1);
-        shallow_world.tiles[idx].river = 0.86;
-        shallow_world.tiles[idx].river_depth = 0.18;
-        shallow_world.tiles[idx].river_width = 0.30;
-        shallow_world.tiles[idx].flow_direction = 2;
-    }
-
-    let mut deep_world = shallow_world.clone();
-    for x in 0..3 {
-        let idx = deep_world.idx(x, 1);
-        deep_world.tiles[idx].river_depth = 0.84;
-        deep_world.tiles[idx].river_width = 0.66;
-    }
-
-    let shallow = render_world(&shallow_world, RenderConfig { scale });
-    let deep = render_world(&deep_world, RenderConfig { scale });
-    let mut shallow_min = f32::MAX;
-    let mut shallow_max = f32::MIN;
-    let mut deep_min = f32::MAX;
-    let mut deep_max = f32::MIN;
-
-    for px in scale + 5..2 * scale - 5 {
-        for py in scale + scale / 2 - 7..=scale + scale / 2 + 7 {
-            let shallow_luma = luma(shallow.get_pixel(px, py).0);
-            let deep_luma = luma(deep.get_pixel(px, py).0);
-            shallow_min = shallow_min.min(shallow_luma);
-            shallow_max = shallow_max.max(shallow_luma);
-            deep_min = deep_min.min(deep_luma);
-            deep_max = deep_max.max(deep_luma);
-        }
-    }
-
-    let shallow_range = shallow_max - shallow_min;
-    let deep_range = deep_max - deep_min;
+    let image = render_world(&world);
+    let shallow = image.get_pixel(0, 0).0;
+    let deep = image.get_pixel(1, 0).0;
+    let tropical = image.get_pixel(2, 0).0;
 
     assert!(
-        deep_range > shallow_range + 4.0,
-        "deep sustained river should have stronger current streak texture: deep={deep_range} shallow={shallow_range}"
+        luma(shallow) > luma(deep) + 20.0,
+        "shallow ocean should render lighter than deep ocean: shallow={shallow:?} deep={deep:?}"
     );
     assert!(
-        deep_range > 9.0,
-        "deep sustained river current streak texture too weak: range={deep_range}"
+        tropical[1] > shallow[1] && tropical[2] >= shallow[2],
+        "warm shallow ocean should shift toward lagoon cyan: shallow={shallow:?} tropical={tropical:?}"
     );
 }
 
 #[test]
-fn shallow_broad_lowland_river_depth_adds_exposed_shoal_bars() {
-    let scale = 32;
-    let mut base_world = render_test_world(3, 3);
-    for tile in &mut base_world.tiles {
-        tile.raw_elevation = 0.57;
-        tile.slope = 0.006;
-        tile.relief = 0.010;
-        tile.moisture = 0.26;
-        tile.temperature = 0.58;
-    }
-
-    let mut shallow_world = base_world.clone();
-    for x in 0..3 {
-        let idx = shallow_world.idx(x, 1);
-        shallow_world.tiles[idx].river = 0.74;
-        shallow_world.tiles[idx].river_depth = 0.16;
-        shallow_world.tiles[idx].river_width = 0.72;
-        shallow_world.tiles[idx].flow_direction = 2;
-    }
-
-    let mut deep_world = shallow_world.clone();
-    for x in 0..3 {
-        let idx = deep_world.idx(x, 1);
-        deep_world.tiles[idx].river_depth = 0.74;
-    }
-
-    let base = render_world(&base_world, RenderConfig { scale });
-    let shallow = render_world(&shallow_world, RenderConfig { scale });
-    let deep = render_world(&deep_world, RenderConfig { scale });
-    let mut shallow_bar_pixels = 0_u32;
-    let mut deep_bar_pixels = 0_u32;
-    let mut shallow_peak = f32::MIN;
-    let mut deep_peak = f32::MIN;
-
-    for px in scale + 5..2 * scale - 5 {
-        for py in scale + 6..2 * scale - 6 {
-            let base_pixel = base.get_pixel(px, py).0;
-            let shallow_pixel = shallow.get_pixel(px, py).0;
-            let deep_pixel = deep.get_pixel(px, py).0;
-            let shallow_sediment = sediment_warmth(shallow_pixel);
-            let deep_sediment = sediment_warmth(deep_pixel);
-            shallow_peak = shallow_peak.max(shallow_sediment);
-            deep_peak = deep_peak.max(deep_sediment);
-
-            if color_delta(base_pixel, shallow_pixel) > 8.0 && shallow_sediment > 72.0 {
-                shallow_bar_pixels += 1;
-            }
-            if color_delta(base_pixel, deep_pixel) > 8.0 && deep_sediment > 72.0 {
-                deep_bar_pixels += 1;
-            }
-        }
-    }
-
-    assert!(
-        shallow_bar_pixels > deep_bar_pixels + 6,
-        "shallow broad river should expose more warm shoal-bar pixels than deep water: shallow={shallow_bar_pixels} deep={deep_bar_pixels} shallow_peak={shallow_peak} deep_peak={deep_peak}"
-    );
-    assert!(
-        shallow_peak > deep_peak + 10.0,
-        "shallow broad river did not produce a warmer shoal-bar peak: shallow={shallow_peak} deep={deep_peak}"
-    );
-}
-
-#[test]
-fn river_depth_hydrates_adjacent_corridor_proportionally() {
-    let scale = 24;
-    let mut base_world = render_test_world(3, 3);
-    for tile in &mut base_world.tiles {
-        tile.raw_elevation = 0.56;
-        tile.slope = 0.010;
-        tile.relief = 0.014;
-        tile.moisture = 0.22;
-        tile.temperature = 0.62;
-    }
-
-    let mut shallow_world = base_world.clone();
-    let center = shallow_world.idx(1, 1);
-    shallow_world.tiles[center].river = 0.82;
-    shallow_world.tiles[center].river_depth = 0.12;
-    shallow_world.tiles[center].river_width = 0.22;
-    shallow_world.tiles[center].flow_direction = 2;
-
-    let mut deep_world = shallow_world.clone();
-    deep_world.tiles[center].river_depth = 0.92;
-
-    let base = render_world(&base_world, RenderConfig { scale });
-    let shallow = render_world(&shallow_world, RenderConfig { scale });
-    let deep = render_world(&deep_world, RenderConfig { scale });
-    let adjacent = (scale + scale / 2, 2 * scale + 2);
-    let base_pixel = base.get_pixel(adjacent.0, adjacent.1).0;
-    let shallow_pixel = shallow.get_pixel(adjacent.0, adjacent.1).0;
-    let deep_pixel = deep.get_pixel(adjacent.0, adjacent.1).0;
-    let shallow_delta = color_delta(base_pixel, shallow_pixel);
-    let deep_delta = color_delta(base_pixel, deep_pixel);
-
-    assert!(
-        deep_delta > shallow_delta + 5.0,
-        "deep river did not hydrate adjacent corridor proportionally: shallow={shallow_delta} deep={deep_delta}"
-    );
-    assert!(
-        green_minus_red(deep_pixel) > green_minus_red(shallow_pixel) + 1.5,
-        "deep river hydration should shift nearby dry land greener: shallow={:?} deep={:?}",
-        shallow_pixel,
-        deep_pixel
-    );
-}
-
-#[test]
-fn river_width_rendering_adds_channel_weight() {
-    let scale = 22;
-    let mut narrow_world = render_test_world(3, 3);
-    let center = narrow_world.idx(1, 1);
-    narrow_world.tiles[center].river = 0.82;
-    narrow_world.tiles[center].river_depth = 0.44;
-    narrow_world.tiles[center].river_width = 0.18;
-    narrow_world.tiles[center].flow_direction = 2;
-
-    let mut broad_world = narrow_world.clone();
-    broad_world.tiles[center].river_width = 0.92;
-
-    let base = render_world(&render_test_world(3, 3), RenderConfig { scale });
-    let narrow = render_world(&narrow_world, RenderConfig { scale });
-    let broad = render_world(&broad_world, RenderConfig { scale });
-    let shoulder = (scale + scale / 2, scale + scale / 2 + 6);
-    let narrow_luma = luma(narrow.get_pixel(shoulder.0, shoulder.1).0);
-    let broad_luma = luma(broad.get_pixel(shoulder.0, shoulder.1).0);
-    let delta = color_delta(
-        narrow.get_pixel(shoulder.0, shoulder.1).0,
-        broad.get_pixel(shoulder.0, shoulder.1).0,
-    );
-
-    assert!(
-        delta > 8.0,
-        "river width did not materially affect the channel shoulder: delta={delta}"
-    );
-    assert!(
-        broad_luma + 4.0 < narrow_luma,
-        "wider channel did not add darker water mass: narrow={narrow_luma} broad={broad_luma}"
-    );
-
-    let adjacent_center = (scale + scale / 2, scale / 2);
-    let narrow_adjacent_delta = color_delta(
-        base.get_pixel(adjacent_center.0, adjacent_center.1).0,
-        narrow.get_pixel(adjacent_center.0, adjacent_center.1).0,
-    );
-    let broad_adjacent_delta = color_delta(
-        base.get_pixel(adjacent_center.0, adjacent_center.1).0,
-        broad.get_pixel(adjacent_center.0, adjacent_center.1).0,
-    );
-
-    assert!(
-        broad_adjacent_delta > narrow_adjacent_delta + 10.0,
-        "wide simulated river should visibly spread water into the adjacent tile: broad={broad_adjacent_delta} narrow={narrow_adjacent_delta}"
-    );
-}
-
-#[test]
-fn lowland_river_rendering_adds_alluvial_floodplain() {
-    let scale = 14;
-    let mut river_world = render_test_world(4, 3);
-    for tile in &mut river_world.tiles {
-        tile.raw_elevation = 0.57;
-        tile.slope = 0.01;
-        tile.relief = 0.015;
-        tile.moisture = 0.42;
-        tile.temperature = 0.62;
-    }
-    let base_world = river_world.clone();
-
-    for x in 0..3 {
-        let idx = river_world.idx(x, 1);
-        river_world.tiles[idx].river = 0.82;
-        river_world.tiles[idx].flow_direction = 2;
-    }
-
-    let base = render_world(&base_world, RenderConfig { scale });
-    let river = render_world(&river_world, RenderConfig { scale });
-    let floodplain = (scale + scale / 2, scale + scale / 2 + 6);
-    let far = (scale + scale / 2, scale * 2 + scale / 2);
-    let floodplain_delta = color_delta(
-        base.get_pixel(floodplain.0, floodplain.1).0,
-        river.get_pixel(floodplain.0, floodplain.1).0,
-    );
-    let far_delta = color_delta(
-        base.get_pixel(far.0, far.1).0,
-        river.get_pixel(far.0, far.1).0,
-    );
-
-    assert!(
-        floodplain_delta > 4.0,
-        "lowland river did not add a visible alluvial floodplain: delta={floodplain_delta}"
-    );
-    assert!(
-        floodplain_delta > far_delta + 2.0,
-        "alluvial tint should concentrate near the channel: floodplain={floodplain_delta} far={far_delta}"
-    );
-}
-
-#[test]
-fn river_bend_rendering_favors_smoothed_inside_corner() {
-    let scale = 20;
-    let mut river_world = render_test_world(3, 4);
-    let base_world = river_world.clone();
-
-    let west = river_world.idx(0, 1);
-    let bend = river_world.idx(1, 1);
-    let south = river_world.idx(1, 2);
-    river_world.tiles[west].river = 0.66;
-    river_world.tiles[west].flow_direction = 2;
-    river_world.tiles[bend].river = 0.72;
-    river_world.tiles[bend].flow_direction = 4;
-    river_world.tiles[south].river = 0.74;
-
-    let base = render_world(&base_world, RenderConfig { scale });
-    let river = render_world(&river_world, RenderConfig { scale });
-    let inside = (scale + scale / 4, scale + scale * 3 / 4);
-    let outside = (scale + scale * 3 / 4, scale + scale / 4);
-    let inside_delta = color_delta(
-        base.get_pixel(inside.0, inside.1).0,
-        river.get_pixel(inside.0, inside.1).0,
-    );
-    let outside_delta = color_delta(
-        base.get_pixel(outside.0, outside.1).0,
-        river.get_pixel(outside.0, outside.1).0,
-    );
-
-    assert!(
-        inside_delta > outside_delta + 8.0,
-        "river bend did not round toward the inside corner: inside={inside_delta} outside={outside_delta}"
-    );
-}
-
-#[test]
-fn deep_river_bend_adds_cutbank_and_inner_shoal_contrast() {
-    let scale = 28;
-    let mut base_world = render_test_world(3, 4);
-    for tile in &mut base_world.tiles {
-        tile.raw_elevation = 0.58;
-        tile.slope = 0.012;
-        tile.relief = 0.018;
-        tile.moisture = 0.30;
-        tile.temperature = 0.62;
-    }
-
-    let mut river_world = base_world.clone();
-    let west = river_world.idx(0, 1);
-    let bend = river_world.idx(1, 1);
-    let south = river_world.idx(1, 2);
-    river_world.tiles[west].river = 0.70;
-    river_world.tiles[west].river_depth = 0.58;
-    river_world.tiles[west].river_width = 0.48;
-    river_world.tiles[west].flow_direction = 2;
-    river_world.tiles[bend].river = 0.86;
-    river_world.tiles[bend].river_depth = 0.92;
-    river_world.tiles[bend].river_width = 0.62;
-    river_world.tiles[bend].flow_direction = 4;
-    river_world.tiles[south].river = 0.76;
-    river_world.tiles[south].river_depth = 0.62;
-    river_world.tiles[south].river_width = 0.46;
-
-    let base = render_world(&base_world, RenderConfig { scale });
-    let river = render_world(&river_world, RenderConfig { scale });
-    let inner_shoal = (scale + 2, scale + scale - 2);
-    let outer_cutbank = (scale + scale - 2, scale + 2);
-    let inner_delta = color_delta(
-        base.get_pixel(inner_shoal.0, inner_shoal.1).0,
-        river.get_pixel(inner_shoal.0, inner_shoal.1).0,
-    );
-    let outer_delta = color_delta(
-        base.get_pixel(outer_cutbank.0, outer_cutbank.1).0,
-        river.get_pixel(outer_cutbank.0, outer_cutbank.1).0,
-    );
-    let inner_luma = luma(river.get_pixel(inner_shoal.0, inner_shoal.1).0);
-    let outer_luma = luma(river.get_pixel(outer_cutbank.0, outer_cutbank.1).0);
-    let outer_base_luma = luma(base.get_pixel(outer_cutbank.0, outer_cutbank.1).0);
-    let core_luma = luma(river.get_pixel(scale + scale / 2, scale + scale / 2).0);
-    let outer_thalweg = (scale + scale * 2 / 3, scale + scale / 3);
-    let outer_thalweg_luma = luma(river.get_pixel(outer_thalweg.0, outer_thalweg.1).0);
-    let outer_thalweg_base_luma = luma(base.get_pixel(outer_thalweg.0, outer_thalweg.1).0);
-
-    assert!(
-        inner_delta > 4.0 && outer_delta > 4.0,
-        "deep bend did not visibly affect both banks: inner={inner_delta} outer={outer_delta}"
-    );
-    assert!(
-        inner_luma > core_luma + 2.5,
-        "inner shoal should read shallower than the thalweg core: inner={inner_luma} core={core_luma}"
-    );
-    assert!(
-        outer_luma + 8.0 < outer_base_luma,
-        "outer cutbank should darken relative to nearby land: outer={outer_luma} base={outer_base_luma}"
-    );
-    assert!(
-        outer_thalweg_luma + 10.0 < outer_thalweg_base_luma,
-        "deep bend should push darker thalweg water toward the outside bank: outer_thalweg={outer_thalweg_luma} base={outer_thalweg_base_luma}"
-    );
-}
-
-#[test]
-fn river_confluence_rendering_widens_join_pool() {
-    let scale = 28;
-    let mut base_world = render_test_world(3, 3);
-    for tile in &mut base_world.tiles {
-        tile.raw_elevation = 0.64;
-        tile.slope = 0.07;
-        tile.relief = 0.09;
-        tile.moisture = 0.46;
-        tile.temperature = 0.60;
-    }
-
-    let mut simple_world = base_world.clone();
-    let west = simple_world.idx(0, 1);
-    let center = simple_world.idx(1, 1);
-    let east = simple_world.idx(2, 1);
-    simple_world.tiles[west].river = 0.46;
-    simple_world.tiles[west].flow_direction = 2;
-    simple_world.tiles[center].river = 0.50;
-    simple_world.tiles[center].flow_direction = 2;
-    simple_world.tiles[east].river = 0.50;
-
-    let mut confluence_world = simple_world.clone();
-    let north = confluence_world.idx(1, 0);
-    confluence_world.tiles[north].river = 0.46;
-    confluence_world.tiles[north].flow_direction = 4;
-
-    let base = render_world(&base_world, RenderConfig { scale });
-    let simple = render_world(&simple_world, RenderConfig { scale });
-    let confluence = render_world(&confluence_world, RenderConfig { scale });
-    let mut simple_max = 0.0_f32;
-    let mut confluence_max = 0.0_f32;
-    let mut confluence_extra = 0.0_f32;
-    for py in (scale / 2)..(scale + scale / 2) {
-        for px in (scale + scale / 5)..(scale + scale * 4 / 5) {
-            let base_pixel = base.get_pixel(px, py).0;
-            let simple_pixel = simple.get_pixel(px, py).0;
-            let confluence_pixel = confluence.get_pixel(px, py).0;
-            simple_max = simple_max.max(color_delta(base_pixel, simple_pixel));
-            confluence_max = confluence_max.max(color_delta(base_pixel, confluence_pixel));
-            confluence_extra = confluence_extra.max(color_delta(simple_pixel, confluence_pixel));
-        }
-    }
-
-    assert!(
-        confluence_extra > 6.0 && confluence_max + 3.0 >= simple_max,
-        "confluence did not visibly expand the join: confluence_max={confluence_max} simple_max={simple_max} extra={confluence_extra}"
-    );
-}
-
-#[test]
-fn river_mouth_rendering_widens_into_estuary() {
-    let scale = 16;
-    let mut base_world = render_test_world(4, 3);
-    let coast = base_world.idx(1, 1);
-    base_world.tiles[coast] = Tile {
-        surface: Surface::Coast,
-        biome: Biome::Coast,
-        raw_elevation: 0.525,
-        ..Tile::default()
-    };
-    let ocean = base_world.idx(2, 1);
-    base_world.tiles[ocean] = warm_ocean_tile(0.42);
-
-    let mut river_world = base_world.clone();
-    river_world.tiles[coast].river = 1.0;
-    river_world.tiles[coast].flow_direction = 2;
-
-    let base = render_world(&base_world, RenderConfig { scale });
-    let river = render_world(&river_world, RenderConfig { scale });
-    let mouth_center = (2 * scale + scale / 2, scale + scale / 2);
-    let mouth_shoulder = (mouth_center.0, mouth_center.1 + 7);
-    let center_delta = color_delta(
-        base.get_pixel(mouth_center.0, mouth_center.1).0,
-        river.get_pixel(mouth_center.0, mouth_center.1).0,
-    );
-    let shoulder_delta = color_delta(
-        base.get_pixel(mouth_shoulder.0, mouth_shoulder.1).0,
-        river.get_pixel(mouth_shoulder.0, mouth_shoulder.1).0,
-    );
-
-    assert!(
-        shoulder_delta > 8.0,
-        "river mouth did not widen into the adjacent ocean: shoulder={shoulder_delta}"
-    );
-    assert!(
-        center_delta + 2.0 >= shoulder_delta,
-        "estuary shoulder should not overpower the mouth center: center={center_delta} shoulder={shoulder_delta}"
-    );
-}
-
-#[test]
-fn tiny_coastal_islets_do_not_draw_checkerboard_coastline() {
-    let scale = 6;
-    let mut world = render_test_world(5, 5);
-    for tile in &mut world.tiles {
-        *tile = warm_ocean_tile(0.30);
-    }
-    let islet = world.idx(2, 2);
-    world.tiles[islet] = Tile {
-        surface: Surface::Coast,
-        biome: Biome::Coast,
-        raw_elevation: 0.53,
-        ..Tile::default()
-    };
-
-    let image = render_world(&world, RenderConfig { scale });
-    let coastline = [218, 210, 158, 255];
-    for py in 0..scale {
-        for px in 0..scale {
-            let pixel = image.get_pixel(2 * scale + px, 2 * scale + py);
-            assert_ne!(
-                pixel.0, coastline,
-                "tiny coastal islet retained a hard coastline pixel at ({px},{py})"
-            );
-        }
-    }
-}
-
-#[test]
-fn diagonal_coast_contact_draws_corner_waterline() {
-    let scale = 8;
-    let mut base_world = render_test_world(3, 3);
-    let coast = base_world.idx(1, 1);
-    base_world.tiles[coast] = Tile {
-        surface: Surface::Coast,
-        biome: Biome::Coast,
-        raw_elevation: 0.53,
-        ..Tile::default()
-    };
-    let mut diagonal_world = base_world.clone();
-    let ocean = diagonal_world.idx(0, 0);
-    diagonal_world.tiles[ocean] = warm_ocean_tile(0.30);
-
-    let base = render_world(&base_world, RenderConfig { scale });
-    let diagonal = render_world(&diagonal_world, RenderConfig { scale });
-    let coast_corner = (scale, scale);
-    let base_pixel = base.get_pixel(coast_corner.0, coast_corner.1).0;
-    let diagonal_pixel = diagonal.get_pixel(coast_corner.0, coast_corner.1).0;
-    let delta = color_delta(base_pixel, diagonal_pixel);
-    let blue_shift = diagonal_pixel[2] as f32 - base_pixel[2] as f32;
-    let green_shift = diagonal_pixel[1] as f32 - base_pixel[1] as f32;
-    let water_chroma = diagonal_pixel[2] as f32 - diagonal_pixel[0] as f32;
-
-    assert!(
-        delta > 24.0,
-        "diagonal ocean contact did not cut a visible waterline into the coast corner: delta={delta}"
-    );
-    assert!(
-        blue_shift > 32.0 && green_shift > 12.0 && water_chroma > 20.0,
-        "diagonal coast corner did not shift toward shallow water: base={base_pixel:?} diagonal={diagonal_pixel:?}"
-    );
-}
-
-#[test]
-fn cardinal_coastline_has_subtile_waterline_variation() {
-    let scale = 12;
-    let mut base_world = render_test_world(3, 4);
-    for tile in &mut base_world.tiles {
-        tile.raw_elevation = 0.56;
-    }
-    let coast = base_world.idx(1, 1);
-    base_world.tiles[coast] = Tile {
-        surface: Surface::Coast,
-        biome: Biome::Coast,
-        raw_elevation: 0.525,
-        ..Tile::default()
-    };
-
-    let mut coast_world = base_world.clone();
-    let ocean = coast_world.idx(0, 1);
-    coast_world.tiles[ocean] = warm_ocean_tile(0.44);
-
-    let base = render_world(&base_world, RenderConfig { scale });
-    let coast_image = render_world(&coast_world, RenderConfig { scale });
-    let sample_x = scale + 1;
-    let mut min_delta = f32::MAX;
-    let mut max_delta = 0.0_f32;
-    for py in 0..scale {
-        let y = scale + py;
-        let delta = color_delta(
-            base.get_pixel(sample_x, y).0,
-            coast_image.get_pixel(sample_x, y).0,
-        );
-        min_delta = min_delta.min(delta);
-        max_delta = max_delta.max(delta);
-    }
-
-    assert!(
-        max_delta > 30.0,
-        "coastline water intrusion is too weak: max_delta={max_delta}"
-    );
-    assert!(
-        max_delta - min_delta > 14.0,
-        "coastline still behaves like a uniform tile edge: min={min_delta} max={max_delta}"
-    );
-}
-
-#[test]
-fn rugged_coasts_render_rockier_than_flat_beaches() {
-    let scale = 20;
-    let mut flat_world = render_test_world(3, 3);
-    let coast = flat_world.idx(1, 1);
-    flat_world.tiles[coast] = Tile {
-        surface: Surface::Coast,
-        biome: Biome::Coast,
-        raw_elevation: 0.525,
-        slope: 0.004,
-        relief: 0.010,
-        ..Tile::default()
-    };
-    let ocean = flat_world.idx(0, 1);
-    flat_world.tiles[ocean] = warm_ocean_tile(0.32);
-
-    let mut rocky_world = flat_world.clone();
-    rocky_world.tiles[coast].slope = 0.11;
-    rocky_world.tiles[coast].relief = 0.13;
-
-    let flat = render_world(&flat_world, RenderConfig { scale });
-    let rocky = render_world(&rocky_world, RenderConfig { scale });
-    let sample = (scale + 1, scale + scale / 2);
-    let flat_pixel = flat.get_pixel(sample.0, sample.1).0;
-    let rocky_pixel = rocky.get_pixel(sample.0, sample.1).0;
-    let flat_sand = flat_pixel[0] as f32 + flat_pixel[1] as f32;
-    let rocky_sand = rocky_pixel[0] as f32 + rocky_pixel[1] as f32;
-
-    assert!(
-        flat_sand > rocky_sand + 20.0 && luma(flat_pixel) > luma(rocky_pixel) + 8.0,
-        "rugged coast stayed too sandy: flat={flat_pixel:?} rocky={rocky_pixel:?}"
-    );
-}
-
-#[test]
-fn vegetated_coast_keeps_climate_color_away_from_waterline() {
-    let scale = 16;
-    let mut world = World::new(7, 4, 3, 0.50, 0);
-    for tile in &mut world.tiles {
-        *tile = Tile {
-            surface: Surface::Coast,
-            biome: Biome::Coast,
-            raw_elevation: 0.56,
-            temperature: 0.44,
-            moisture: 0.68,
-            ..Tile::default()
-        };
-    }
-    for y in 0..world.height {
-        let idx = world.idx(0, y);
-        world.tiles[idx] = warm_ocean_tile(0.34);
-    }
-
-    let image = render_world(&world, RenderConfig { scale });
-    let waterline = image.get_pixel(scale + 1, scale + scale / 2).0;
-    let inland_edge = image.get_pixel(2 * scale - 2, scale + scale / 2).0;
-
-    assert!(
-        green_minus_red(inland_edge) > 24.0,
-        "vegetated coast interior stayed too sandy: inland={inland_edge:?}"
-    );
-    assert!(
-        color_delta(waterline, inland_edge) > 12.0,
-        "coastal waterline no longer separates beach/surf from vegetated hinterland: waterline={waterline:?} inland={inland_edge:?}"
-    );
-}
-
-#[test]
-fn forested_coast_interior_uses_hinterland_texture() {
-    let scale = 12;
-    let mut world = render_test_world(3, 3);
-    for tile in &mut world.tiles {
-        *tile = Tile {
-            surface: Surface::Coast,
-            biome: Biome::Coast,
-            raw_elevation: 0.56,
-            temperature: 0.44,
-            moisture: 0.68,
-            ..Tile::default()
-        };
-    }
-
-    let image = render_world(&world, RenderConfig { scale });
-    let mut min_chroma = f32::MAX;
-    let mut max_chroma = f32::MIN;
-    for py in 0..scale {
-        for px in 0..scale {
-            let pixel = image.get_pixel(scale + px, scale + py).0;
-            let chroma = green_minus_red(pixel);
-            min_chroma = min_chroma.min(chroma);
-            max_chroma = max_chroma.max(chroma);
-        }
-    }
-
-    assert!(
-        max_chroma - min_chroma > 4.0,
-        "forested coast interior lacks canopy texture: min={min_chroma} max={max_chroma}"
-    );
-}
-
-#[test]
-fn coastline_blends_surf_onto_adjacent_ocean_pixels() {
-    let scale = 8;
-    let mut world = render_test_world(5, 3);
-    for tile in &mut world.tiles {
-        *tile = warm_ocean_tile(0.30);
-    }
-
-    let coast = world.idx(2, 1);
-    world.tiles[coast] = Tile {
-        surface: Surface::Coast,
-        biome: Biome::Coast,
-        raw_elevation: 0.53,
-        ..Tile::default()
-    };
-    let land = world.idx(3, 1);
-    world.tiles[land] = Tile {
+fn lake_and_river_fields_change_only_their_own_tiles() {
+    let base_world = render_test_world(3, 2);
+    let mut water_world = base_world.clone();
+    let lake = water_world.idx(0, 1);
+    water_world.tiles[lake] = Tile {
         surface: Surface::Land,
-        biome: Biome::TemperateGrassland,
-        raw_elevation: 0.56,
-        moisture: 0.35,
-        temperature: 0.55,
+        biome: Biome::Freshwater,
+        raw_elevation: 0.54,
+        lake_depth: 0.82,
+        water_body_id: 1,
+        temperature: 0.52,
+        moisture: 1.0,
         ..Tile::default()
     };
+    let river = water_world.idx(2, 0);
+    water_world.tiles[river].river = 0.86;
+    water_world.tiles[river].river_order = 3;
+    water_world.tiles[river].river_depth = 0.72;
+    water_world.tiles[river].river_width = 0.65;
+    water_world.tiles[river].flow_direction = 2;
 
-    let image = render_world(&world, RenderConfig { scale });
-    let far_ocean = image.get_pixel(scale / 2, scale + scale / 2).0;
-    let surf = image.get_pixel(2 * scale - 1, scale + scale / 2).0;
+    let base = render_world(&base_world);
+    let water = render_world(&water_world);
+    let mut changed = Vec::new();
+    for y in 0..2 {
+        for x in 0..3 {
+            if color_delta(base.get_pixel(x, y).0, water.get_pixel(x, y).0) > 0.0 {
+                changed.push((x, y));
+            }
+        }
+    }
+
+    assert_eq!(changed, vec![(2, 0), (0, 1)]);
+    assert!(water.get_pixel(0, 1).0[2] > base.get_pixel(0, 1).0[2]);
+    assert!(luma(water.get_pixel(2, 0).0) + 10.0 < luma(base.get_pixel(2, 0).0));
+}
+
+#[test]
+fn presentation_fields_change_only_their_own_tile() {
+    let base_world = render_test_world(3, 3);
+    let mut changed_world = base_world.clone();
+    let center = changed_world.idx(1, 1);
+    changed_world.tiles[center].landform = Landform::Hill;
+    changed_world.tiles[center].terrain_texture = 0.94;
+    changed_world.tiles[center].ecotone_strength = 0.82;
+    changed_world.tiles[center].shore_influence = 0.58;
+
+    let base = render_world(&base_world);
+    let changed = render_world(&changed_world);
+    let mut changed_pixels = 0;
+    for y in 0..3 {
+        for x in 0..3 {
+            let delta = color_delta(base.get_pixel(x, y).0, changed.get_pixel(x, y).0);
+            if delta > 0.0 {
+                changed_pixels += 1;
+                assert_eq!((x, y), (1, 1));
+            }
+        }
+    }
+
+    assert_eq!(changed_pixels, 1);
+}
+
+#[test]
+fn landform_and_texture_materially_affect_luminance() {
+    let mut world = render_test_world(3, 1);
+    let plain = world.idx(0, 0);
+    let bright = world.idx(1, 0);
+    let dark = world.idx(2, 0);
+    world.tiles[bright].landform = Landform::Ridge;
+    world.tiles[bright].terrain_texture = 0.96;
+    world.tiles[bright].relief = 0.08;
+    world.tiles[dark].landform = Landform::Basin;
+    world.tiles[dark].terrain_texture = 0.04;
+
+    let image = render_world(&world);
+    let plain_luma = luma(image.get_pixel(plain as u32, 0).0);
+    let bright_luma = luma(image.get_pixel(bright as u32, 0).0);
+    let dark_luma = luma(image.get_pixel(dark as u32, 0).0);
+
     assert!(
-        luma(surf) > luma(far_ocean) + 8.0,
-        "coastal surf did not lighten adjacent ocean pixels enough: surf={surf:?} far={far_ocean:?}"
+        bright_luma > plain_luma + 8.0,
+        "ridge/bright texture should read lighter: plain={plain_luma} bright={bright_luma}"
     );
-    assert_ne!(
-        image.get_pixel(2 * scale, scale + scale / 2).0,
-        [218, 210, 158, 255],
-        "coastal land edge fell back to the old hard coastline color"
+    assert!(
+        dark_luma + 5.0 < plain_luma,
+        "basin/dark texture should read darker: plain={plain_luma} dark={dark_luma}"
     );
 }
 
@@ -3301,20 +1275,6 @@ fn color_delta(a: [u8; 4], b: [u8; 4]) -> f32 {
     (a[0] as f32 - b[0] as f32).abs()
         + (a[1] as f32 - b[1] as f32).abs()
         + (a[2] as f32 - b[2] as f32).abs()
-}
-
-fn color_saturation(pixel: [u8; 4]) -> f32 {
-    let max = pixel[0].max(pixel[1]).max(pixel[2]) as f32;
-    let min = pixel[0].min(pixel[1]).min(pixel[2]) as f32;
-    max - min
-}
-
-fn sediment_warmth(pixel: [u8; 4]) -> f32 {
-    pixel[0] as f32 + pixel[1] as f32 - pixel[2] as f32 * 1.6
-}
-
-fn green_minus_red(pixel: [u8; 4]) -> f32 {
-    pixel[1] as f32 - pixel[0] as f32
 }
 
 fn mean_precipitation(world: &World) -> f32 {
@@ -3350,26 +1310,6 @@ fn warm_ocean_tile(raw_elevation: f32) -> Tile {
         moisture: 1.0,
         ..Tile::default()
     }
-}
-
-fn alpine_render_test_world() -> World {
-    let mut world = World::new(7, 3, 3, 0.50, 0);
-    for y in 0..world.height {
-        for x in 0..world.width {
-            let idx = world.idx(x, y);
-            world.tiles[idx] = Tile {
-                surface: Surface::Land,
-                biome: Biome::Alpine,
-                raw_elevation: 0.91 - ((x.abs_diff(1) + y.abs_diff(1)) as f32 * 0.015),
-                slope: 0.055,
-                relief: 0.075,
-                temperature: 0.04,
-                mountain_feature: MountainFeature::AlpineSlope,
-                ..Tile::default()
-            };
-        }
-    }
-    world
 }
 
 fn center_vs_outer_land_fraction(world: &World) -> (f32, f32) {
