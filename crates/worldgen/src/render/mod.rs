@@ -33,11 +33,10 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
         world,
         scale,
         &land_vertices,
-        &land_colors,
         &ocean_vertices,
         &hillshade,
     );
-    draw_land_features(&mut image, world, scale, &land_colors);
+    draw_land_features(&mut image, world, scale);
 
     image
 }
@@ -104,7 +103,6 @@ fn draw_base_layer(
     world: &World,
     scale: u32,
     land_vertices: &shading::LandVertexGrid,
-    land_colors: &[Rgba<u8>],
     ocean_vertices: &OceanVertexGrid,
     hillshade: &[f32],
 ) {
@@ -114,7 +112,7 @@ fn draw_base_layer(
         if matches!(tile.biome, Biome::Ocean) {
             draw_ocean_tile(image, world, ocean_vertices, x, y, scale);
         } else if matches!(tile.biome, Biome::Freshwater) {
-            draw_freshwater_tile(image, world, land_colors, idx, x, y, scale);
+            draw_freshwater_tile(image, world, idx, x, y, scale);
         } else {
             draw_tile_hillshaded(image, land_vertices, world, hillshade, x as u32, y as u32, scale);
         }
@@ -163,7 +161,6 @@ fn draw_ocean_tile(
 fn draw_freshwater_tile(
     image: &mut RgbaImage,
     world: &World,
-    land_colors: &[Rgba<u8>],
     idx: usize,
     x: usize,
     y: usize,
@@ -172,157 +169,32 @@ fn draw_freshwater_tile(
     let ox = x as u32 * scale;
     let oy = y as u32 * scale;
     let tile = &world.tiles[idx];
-    let depth = tile.lake_depth.clamp(0.0, 1.0);
-    let pond_color = lerp_rgba(Rgba([74, 122, 112, 255]), Rgba([48, 82, 86, 255]), depth);
-    let pool_color = lerp_rgba(Rgba([92, 138, 118, 255]), Rgba([58, 98, 96, 255]), depth);
-    let shore_color = freshwater_shore_color(world, land_colors, idx);
-    let neighbors = freshwater_neighbors(world, x, y);
-    let shallow = ((1.0 - smoothstep(0.02, 0.16, tile.relief + tile.slope * 0.8))
-        * (1.0 - depth * 0.55))
-        .clamp(0.0, 1.0);
+    // Teal depth ramp matching the river palette. Tiles touching the shore render
+    // shallower as a simple depth cue; open-water tiles render at full depth.
+    let shallow = Rgba([86, 144, 156, 255]);
+    let deep = Rgba([34, 84, 108, 255]);
+    let depth_t = smoothstep(0.05, 0.80, tile.lake_depth.clamp(0.0, 1.0));
+    let depth_t = if freshwater_is_shore(world, x, y) {
+        depth_t * 0.45
+    } else {
+        depth_t
+    };
+    let base = lerp_rgba(shallow, deep, depth_t);
 
     for py in 0..scale {
         for px in 0..scale {
             let gx = (ox + px) as usize;
             let gy = (oy + py) as usize;
             let ripple = value_noise(world.seed ^ 0x3E7F_91C2, gx, gy, 7) - 0.5;
-            let glint = smoothstep(0.62, 0.92, value_noise(world.seed ^ 0x9B4A_57D3, gx, gy, 5));
-            let water = freshwater_mask(world.seed, &neighbors, gx, gy, px, py, scale);
-            let color = lerp_rgba(
-                pond_color,
-                pool_color,
-                shallow * 0.34 + glint * 0.08 + depth * 0.30,
-            );
-            let color = offset(color, (ripple * 5.0) as i16);
-            image.put_pixel(ox + px, oy + py, lerp_rgba(shore_color, color, water));
+            image.put_pixel(ox + px, oy + py, offset(base, (ripple * 5.0) as i16));
         }
     }
 }
 
-#[derive(Clone, Copy)]
-struct FreshwaterNeighbors {
-    west: bool,
-    east: bool,
-    north: bool,
-    south: bool,
-    north_west: bool,
-    north_east: bool,
-    south_west: bool,
-    south_east: bool,
-}
-
-fn freshwater_neighbors(world: &World, x: usize, y: usize) -> FreshwaterNeighbors {
-    let x = x as isize;
-    let y = y as isize;
-    FreshwaterNeighbors {
-        west: freshwater_at(world, x - 1, y),
-        east: freshwater_at(world, x + 1, y),
-        north: freshwater_at(world, x, y - 1),
-        south: freshwater_at(world, x, y + 1),
-        north_west: freshwater_at(world, x - 1, y - 1),
-        north_east: freshwater_at(world, x + 1, y - 1),
-        south_west: freshwater_at(world, x - 1, y + 1),
-        south_east: freshwater_at(world, x + 1, y + 1),
-    }
-}
-
-fn freshwater_mask(
-    seed: u64,
-    neighbors: &FreshwaterNeighbors,
-    gx: usize,
-    gy: usize,
-    px: u32,
-    py: u32,
-    scale: u32,
-) -> f32 {
-    let s = scale as f32;
-    let fx = (px as f32 + 0.5) / s;
-    let fy = (py as f32 + 0.5) / s;
-    let mut edge_distance = 1.0_f32;
-
-    if !neighbors.west {
-        edge_distance = edge_distance.min(fx);
-    }
-    if !neighbors.east {
-        edge_distance = edge_distance.min(1.0 - fx);
-    }
-    if !neighbors.north {
-        edge_distance = edge_distance.min(fy);
-    }
-    if !neighbors.south {
-        edge_distance = edge_distance.min(1.0 - fy);
-    }
-
-    if neighbors.west && neighbors.north && !neighbors.north_west {
-        edge_distance = edge_distance.min((fx * fx + fy * fy).sqrt() * 0.82);
-    }
-    if neighbors.east && neighbors.north && !neighbors.north_east {
-        let dx = 1.0 - fx;
-        edge_distance = edge_distance.min((dx * dx + fy * fy).sqrt() * 0.82);
-    }
-    if neighbors.west && neighbors.south && !neighbors.south_west {
-        let dy = 1.0 - fy;
-        edge_distance = edge_distance.min((fx * fx + dy * dy).sqrt() * 0.82);
-    }
-    if neighbors.east && neighbors.south && !neighbors.south_east {
-        let dx = 1.0 - fx;
-        let dy = 1.0 - fy;
-        edge_distance = edge_distance.min((dx * dx + dy * dy).sqrt() * 0.82);
-    }
-
-    let shoreline_noise = (value_noise(seed ^ 0xC47D_5A91, gx, gy, 5) - 0.5) * 0.045;
-    smoothstep(0.055, 0.24, edge_distance + shoreline_noise)
-}
-
-fn freshwater_at(world: &World, x: isize, y: isize) -> bool {
-    world.in_bounds(x, y)
-        && matches!(
-            world.tiles[world.idx(x as usize, y as usize)].biome,
-            Biome::Freshwater
-        )
-}
-
-fn freshwater_shore_color(world: &World, land_colors: &[Rgba<u8>], idx: usize) -> Rgba<u8> {
-    let (x, y) = world.coords(idx);
-    let mut r = 0.0_f32;
-    let mut g = 0.0_f32;
-    let mut b = 0.0_f32;
-    let mut weight = 0.0_f32;
-
-    for dy in -1_isize..=1 {
-        for dx in -1_isize..=1 {
-            if dx == 0 && dy == 0 {
-                continue;
-            }
-            let nx = x as isize + dx;
-            let ny = y as isize + dy;
-            if !world.in_bounds(nx, ny) {
-                continue;
-            }
-
-            let nidx = world.idx(nx as usize, ny as usize);
-            if matches!(world.tiles[nidx].biome, Biome::Freshwater | Biome::Ocean) {
-                continue;
-            }
-
-            let color = land_colors[nidx];
-            r += color[0] as f32;
-            g += color[1] as f32;
-            b += color[2] as f32;
-            weight += 1.0;
-        }
-    }
-
-    if weight == 0.0 {
-        return Rgba([92, 128, 78, 255]);
-    }
-
-    Rgba([
-        (r / weight).round() as u8,
-        (g / weight).round() as u8,
-        (b / weight).round() as u8,
-        255,
-    ])
+fn freshwater_is_shore(world: &World, x: usize, y: usize) -> bool {
+    world.neighbors8(x, y).any(|(nx, ny)| {
+        !matches!(world.tiles[world.idx(nx, ny)].biome, Biome::Freshwater)
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -522,13 +394,13 @@ fn polar_ice_strength(seed: u64, depth: f32, temperature: f32, x: usize, y: usiz
     (cold * (0.24 + shelf * 0.76) * (0.50 + broken_pack * 0.50)).clamp(0.0, 1.0)
 }
 
-fn draw_land_features(image: &mut RgbaImage, world: &World, scale: u32, land_colors: &[Rgba<u8>]) {
+fn draw_land_features(image: &mut RgbaImage, world: &World, scale: u32) {
     for (idx, tile) in world.tiles.iter().enumerate() {
         if tile.biome == Biome::Coast {
             draw_coastline(image, world, idx, scale);
         }
     }
-    draw_rivers(image, world, scale, land_colors);
+    draw_rivers(image, world, scale);
 }
 
 #[cfg(test)]

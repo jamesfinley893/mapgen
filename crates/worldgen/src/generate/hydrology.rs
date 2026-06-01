@@ -802,13 +802,11 @@ fn assign_lake_bodies(world: &World, lake_depth: &mut [f32]) -> Vec<u32> {
 
         let mut queue = VecDeque::new();
         let mut body = Vec::new();
-        let mut max_depth = 0.0_f32;
         visited[idx] = true;
         queue.push_back(idx);
 
         while let Some(current) = queue.pop_front() {
             body.push(current);
-            max_depth = max_depth.max(lake_depth[current]);
 
             for nidx in world.neighbor_indices8(current) {
                 if visited[nidx] || lake_depth[nidx] <= 0.0 {
@@ -819,7 +817,10 @@ fn assign_lake_bodies(world: &World, lake_depth: &mut [f32]) -> Vec<u32> {
             }
         }
 
-        if body.len() < 3 && max_depth < 0.55 {
+        // Drop 1-2 tile depressions outright: at this resolution they are
+        // terrain-noise dimples, not lakes. Their runoff routes over the filled
+        // elevation instead of ponding as a stray pixel of water.
+        if body.len() < 3 {
             for body_idx in body {
                 lake_depth[body_idx] = 0.0;
             }
