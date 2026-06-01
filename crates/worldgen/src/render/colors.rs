@@ -42,20 +42,14 @@ fn tile_land_color(
     if biome != Biome::Ocean {
         let height_above_sea = (tile.raw_elevation - world.sea_level).max(0.0);
         if matches!(biome, Biome::Alpine) {
-            let alpine_t = smoothstep(0.38, 0.72, height_above_sea);
+            // Rock brightness is keyed primarily to elevation so height reads as
+            // shading: low alpine slopes are dark stone, high crests pale rock.
+            let alpine_t = smoothstep(0.24, 0.70, height_above_sea);
             let rugged = smoothstep(0.020, 0.080, tile.relief + tile.slope * 0.75);
             color = lerp_rgba(
-                lerp_rgba(
-                    Rgba([104, 102, 96, 255]),
-                    Rgba([136, 132, 122, 255]),
-                    rugged,
-                ),
-                lerp_rgba(
-                    Rgba([132, 132, 126, 255]),
-                    Rgba([170, 170, 164, 255]),
-                    rugged,
-                ),
-                alpine_t * 0.55 + rugged * 0.25,
+                lerp_rgba(Rgba([82, 84, 84, 255]), Rgba([108, 106, 100, 255]), rugged),
+                lerp_rgba(Rgba([166, 166, 160, 255]), Rgba([186, 186, 180, 255]), rugged),
+                (alpine_t * 0.86 + rugged * 0.14).clamp(0.0, 1.0),
             );
         } else {
             let tint_strength = smoothstep(0.04, 0.30, height_above_sea) * 0.28;
@@ -65,7 +59,7 @@ fn tile_land_color(
         }
         let variation = hash01(world.seed, x, y);
         let regional = sample_noise(world.seed.wrapping_add(0xCAFE_BABE), x, y, noise_cell);
-        let elev_shade = (height_above_sea * 24.0) as i16;
+        let elev_shade = (height_above_sea * 24.0).min(14.0) as i16;
         let micro = (variation * micro_amp as f32) as i16 - micro_amp / 2;
         let macro_v = ((regional - 0.5) * 10.0) as i16;
         color = offset(color, elev_shade + micro + macro_v);

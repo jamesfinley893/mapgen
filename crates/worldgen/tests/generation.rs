@@ -250,6 +250,41 @@ fn exported_tiles_include_bounded_geology_context() {
             tile.river
         );
         assert!(
+            tile.river_depth.is_finite() && (0.0..=1.0).contains(&tile.river_depth),
+            "tile {idx} river depth out of range: {}",
+            tile.river_depth
+        );
+        assert!(
+            tile.river_width.is_finite() && (0.0..=1.0).contains(&tile.river_width),
+            "tile {idx} river width out of range: {}",
+            tile.river_width
+        );
+        assert!(
+            tile.river_order <= 16,
+            "tile {idx} river order out of range: {}",
+            tile.river_order
+        );
+        assert!(
+            tile.lake_depth.is_finite() && (0.0..=1.0).contains(&tile.lake_depth),
+            "tile {idx} lake depth out of range: {}",
+            tile.lake_depth
+        );
+        assert!(
+            tile.lake_inflow.is_finite() && (0.0..=1.0).contains(&tile.lake_inflow),
+            "tile {idx} lake inflow out of range: {}",
+            tile.lake_inflow
+        );
+        assert!(
+            tile.spill_discharge.is_finite() && (0.0..=1.0).contains(&tile.spill_discharge),
+            "tile {idx} spill discharge out of range: {}",
+            tile.spill_discharge
+        );
+        assert!(
+            tile.erosion.is_finite() && (0.0..=1.0).contains(&tile.erosion),
+            "tile {idx} erosion out of range: {}",
+            tile.erosion
+        );
+        assert!(
             (-1..=7).contains(&tile.flow_direction),
             "tile {idx} flow direction out of range: {}",
             tile.flow_direction
@@ -264,11 +299,37 @@ fn exported_tiles_include_bounded_geology_context() {
             assert_eq!(tile.runoff, 0.0);
             assert_eq!(tile.flow_accumulation, 0.0);
             assert_eq!(tile.river, 0.0);
+            assert_eq!(tile.river_depth, 0.0);
+            assert_eq!(tile.river_width, 0.0);
+            assert_eq!(tile.river_order, 0);
+            assert_eq!(tile.lake_depth, 0.0);
+            assert_eq!(tile.water_body_id, 0);
+            assert_eq!(tile.lake_inflow, 0.0);
+            assert!(!tile.lake_outlet);
+            assert_eq!(tile.spill_discharge, 0.0);
             assert_eq!(tile.flow_direction, -1);
         } else {
             assert!(tile.ocean_distance > 0);
-            if tile.river > 0.08 {
+            if tile.lake_depth > 0.0 {
+                assert!(
+                    tile.water_body_id > 0,
+                    "lake tile {idx} has no water body id"
+                );
+            }
+            if tile.river > 0.035 {
                 assert!(tile.flow_direction >= 0);
+                assert!(
+                    tile.river_order > 0,
+                    "visible river tile {idx} has no stream order"
+                );
+                assert!(
+                    tile.river_depth > 0.0,
+                    "visible river tile {idx} has no depth"
+                );
+                assert!(
+                    tile.river_width > 0.0,
+                    "visible river tile {idx} has no width"
+                );
             }
         }
         assert_eq!(
@@ -329,6 +390,154 @@ fn fixed_seed_set_produces_ocean_draining_river_networks() {
         river_worlds >= 4,
         "fixed seed set did not produce enough visible river networks: {river_worlds}"
     );
+}
+
+#[test]
+fn fixed_seed_set_includes_hydrological_lake_basins() {
+    let mut lake_worlds = 0_usize;
+
+    for seed in [42_u64, 97, 3000, 7073116918442829777, 12302556654306610728] {
+        let world = fixed_world(seed);
+        let lake_tiles = world
+            .tiles
+            .iter()
+            .filter(|tile| tile.surface != Surface::Ocean && tile.lake_depth > 0.0)
+            .count();
+
+        if lake_tiles > world.width / 8 {
+            lake_worlds += 1;
+        }
+
+        for tile in world.tiles.iter().filter(|tile| tile.lake_depth > 0.0) {
+            assert_eq!(tile.biome, Biome::Freshwater);
+            assert!(tile.water_body_id > 0);
+            assert_eq!(tile.river, 0.0);
+        }
+    }
+
+    assert!(
+        lake_worlds >= 3,
+        "fixed seed set did not produce enough hydrological lake basins: {lake_worlds}"
+    );
+}
+
+#[test]
+fn major_river_paths_terminate_in_lake_or_ocean() {
+    let world = fixed_world(42);
+    let mut major_rivers = 0_usize;
+    let mut terminated = 0_usize;
+
+    for (idx, tile) in world.tiles.iter().enumerate() {
+        if tile.surface == Surface::Ocean || tile.river <= 0.55 {
+            continue;
+        }
+
+        major_rivers += 1;
+        if river_path_reaches_water_sink(world, idx) {
+            terminated += 1;
+        }
+    }
+
+    assert!(major_rivers > world.width / 2);
+    assert!(
+        terminated as f32 / major_rivers.max(1) as f32 > 0.94,
+        "too many major river paths fail to terminate in lake or ocean: {terminated}/{major_rivers}"
+    );
+}
+
+#[test]
+fn major_rivers_export_stream_order_and_erosive_power() {
+    let world = fixed_world(42);
+    let mut major_rivers = 0_usize;
+    let mut ordered = 0_usize;
+    let mut erosive = 0_usize;
+    let mut erosion_sum = 0.0_f32;
+
+    for tile in &world.tiles {
+        if tile.surface == Surface::Ocean || tile.river <= 0.55 {
+            continue;
+        }
+
+        major_rivers += 1;
+        ordered += usize::from(tile.river_order > 0);
+        erosive += usize::from(tile.erosion > 0.045);
+        erosion_sum += tile.erosion;
+    }
+
+    assert!(major_rivers > world.width / 2);
+    assert_eq!(ordered, major_rivers);
+    assert!(
+        erosive as f32 / major_rivers.max(1) as f32 > 0.70,
+        "too few major river tiles carry erosive power: {erosive}/{major_rivers}"
+    );
+    assert!(
+        erosion_sum / major_rivers.max(1) as f32 > 0.08,
+        "mean major-river erosion is too weak"
+    );
+}
+
+#[test]
+fn fixed_seed_major_rivers_reach_deep_render_regime() {
+    for seed in [42_u64, 97, 3000] {
+        let world = fixed_world(seed);
+        let mut depths = world
+            .tiles
+            .iter()
+            .filter(|tile| tile.surface != Surface::Ocean && tile.river > 0.55)
+            .map(|tile| tile.river_depth)
+            .collect::<Vec<_>>();
+        depths.sort_by(|a, b| a.total_cmp(b));
+
+        let major_rivers = depths.len();
+        assert!(
+            major_rivers > world.width / 2,
+            "seed {seed} did not produce enough major river depth samples: {major_rivers}"
+        );
+
+        let deep_reaches = depths.iter().filter(|depth| **depth >= 0.70).count();
+        let p90 = depths[((major_rivers - 1) as f32 * 0.90) as usize];
+
+        assert!(
+            p90 > 0.68,
+            "seed {seed} major-river depth distribution is too flat for deep-water rendering: p90={p90}"
+        );
+        assert!(
+            deep_reaches as f32 / major_rivers.max(1) as f32 > 0.08,
+            "seed {seed} has too few major reaches in the deep-water regime: {deep_reaches}/{major_rivers}"
+        );
+    }
+}
+
+#[test]
+fn fixed_seed_major_rivers_export_broad_simulated_width() {
+    for seed in [42_u64, 97, 3000] {
+        let world = fixed_world(seed);
+        let mut widths = world
+            .tiles
+            .iter()
+            .filter(|tile| tile.surface != Surface::Ocean && tile.river > 0.55)
+            .map(|tile| tile.river_width)
+            .collect::<Vec<_>>();
+        widths.sort_by(|a, b| a.total_cmp(b));
+
+        let major_rivers = widths.len();
+        assert!(
+            major_rivers > world.width / 2,
+            "seed {seed} did not produce enough major river width samples: {major_rivers}"
+        );
+
+        let p50 = widths[((major_rivers - 1) as f32 * 0.50) as usize];
+        let p90 = widths[((major_rivers - 1) as f32 * 0.90) as usize];
+
+        assert!(
+            p50 > 0.70,
+            "seed {seed} major-river median simulated width is too narrow: p50={p50}"
+        );
+        assert!(
+            p90 > 0.90,
+            "seed {seed} major-river high-flow simulated width is too narrow: p90={p90}"
+        );
+    }
 }
 
 #[test]
@@ -517,6 +726,17 @@ fn freshwater_bodies_stay_low_flat_and_non_oceanic() {
                 Surface::Land,
                 "freshwater {idx} is not inland land"
             );
+            if tile.lake_depth > 0.0 {
+                assert!(
+                    tile.water_body_id > 0,
+                    "freshwater lake {idx} has no water body id"
+                );
+                assert!(
+                    tile.raw_elevation > world.sea_level,
+                    "freshwater lake {idx} sank below sea level"
+                );
+                continue;
+            }
             assert!(
                 tile.raw_elevation <= world.sea_level + 0.14,
                 "freshwater {idx} is too high: {}",
@@ -1428,12 +1648,16 @@ fn freshwater_rendering_uses_inland_water_texture() {
 
     let image = render_world(&world, RenderConfig { scale });
     let mut colors = std::collections::HashSet::new();
-    let mut min_blue_red = f32::MAX;
+    let mut min_green_red = f32::MAX;
+    let mut max_blue_red = f32::MIN;
+    let mut max_saturation = f32::MIN;
     for py in 0..scale {
         for px in 0..scale {
             let pixel = image.get_pixel(scale + px, scale + py).0;
             colors.insert((pixel[0], pixel[1], pixel[2]));
-            min_blue_red = min_blue_red.min(pixel[2] as f32 - pixel[0] as f32);
+            min_green_red = min_green_red.min(pixel[1] as f32 - pixel[0] as f32);
+            max_blue_red = max_blue_red.max(pixel[2] as f32 - pixel[0] as f32);
+            max_saturation = max_saturation.max(color_saturation(pixel));
         }
     }
 
@@ -1443,8 +1667,12 @@ fn freshwater_rendering_uses_inland_water_texture() {
         colors.len()
     );
     assert!(
-        min_blue_red > 45.0,
-        "freshwater is not rendering as blue-green water: min={min_blue_red}"
+        min_green_red > 26.0,
+        "freshwater should keep a muted inland green water signal: min={min_green_red}"
+    );
+    assert!(
+        max_blue_red < 54.0 && max_saturation < 72.0,
+        "freshwater should not use saturated ocean-blue color: blue_red={max_blue_red} saturation={max_saturation}"
     );
 }
 
@@ -1467,12 +1695,11 @@ fn isolated_freshwater_renders_with_soft_shoreline() {
     let image = render_world(&world, RenderConfig { scale });
     let edge = image.get_pixel(scale + 1, scale + scale / 2).0;
     let center = image.get_pixel(scale + scale / 2, scale + scale / 2).0;
-    let edge_water = edge[2] as f32 - edge[0] as f32;
-    let center_water = center[2] as f32 - center[0] as f32;
+    let shoreline_delta = color_delta(edge, center);
 
     assert!(
-        center_water > edge_water + 35.0,
-        "isolated freshwater tile has a blocky shore: edge={edge_water} center={center_water}"
+        shoreline_delta > 28.0,
+        "isolated freshwater tile has a blocky shore: delta={shoreline_delta}"
     );
 }
 
@@ -1505,12 +1732,11 @@ fn diagonal_freshwater_land_contact_feathers_corner() {
     let image = render_world(&world, RenderConfig { scale });
     let corner = image.get_pixel(scale, scale).0;
     let center = image.get_pixel(scale + scale / 2, scale + scale / 2).0;
-    let corner_water = corner[2] as f32 - corner[0] as f32;
-    let center_water = center[2] as f32 - center[0] as f32;
+    let feather_delta = color_delta(corner, center);
 
     assert!(
-        center_water > corner_water + 28.0,
-        "diagonal land contact did not feather the freshwater corner: corner={corner_water} center={center_water}"
+        feather_delta > 20.0,
+        "diagonal land contact did not feather the freshwater corner: delta={feather_delta}"
     );
 }
 
@@ -2038,6 +2264,557 @@ fn minor_stream_rendering_reaches_coastal_ocean() {
 }
 
 #[test]
+fn lake_outlet_rendering_connects_lake_edge_to_channel() {
+    let scale = 18;
+    let mut base_world = render_test_world(4, 3);
+    let lake = base_world.idx(1, 1);
+    base_world.tiles[lake] = Tile {
+        surface: Surface::Land,
+        biome: Biome::Freshwater,
+        raw_elevation: 0.57,
+        lake_depth: 0.72,
+        water_body_id: 1,
+        lake_inflow: 0.74,
+        lake_outlet: true,
+        ..Tile::default()
+    };
+
+    let mut outlet_world = base_world.clone();
+    let outlet = outlet_world.idx(2, 1);
+    outlet_world.tiles[outlet].river = 0.34;
+    outlet_world.tiles[outlet].river_depth = 0.34;
+    outlet_world.tiles[outlet].river_width = 0.18;
+    outlet_world.tiles[outlet].river_order = 1;
+    outlet_world.tiles[outlet].spill_discharge = 0.42;
+    outlet_world.tiles[outlet].lake_outlet = true;
+    outlet_world.tiles[outlet].flow_direction = 2;
+    let downstream = outlet_world.idx(3, 1);
+    outlet_world.tiles[downstream].river = 0.30;
+    outlet_world.tiles[downstream].river_depth = 0.30;
+    outlet_world.tiles[downstream].river_width = 0.16;
+    outlet_world.tiles[downstream].river_order = 1;
+    outlet_world.tiles[downstream].spill_discharge = 0.34;
+    outlet_world.tiles[downstream].lake_outlet = true;
+    outlet_world.tiles[downstream].flow_direction = 2;
+
+    let base = render_world(&base_world, RenderConfig { scale });
+    let outlet_image = render_world(&outlet_world, RenderConfig { scale });
+    let lake_edge = (2 * scale + 2, scale + scale / 2);
+    let channel_core = (2 * scale + scale / 2, scale + scale / 2);
+    let edge_delta = color_delta(
+        base.get_pixel(lake_edge.0, lake_edge.1).0,
+        outlet_image.get_pixel(lake_edge.0, lake_edge.1).0,
+    );
+    let core_delta = color_delta(
+        base.get_pixel(channel_core.0, channel_core.1).0,
+        outlet_image.get_pixel(channel_core.0, channel_core.1).0,
+    );
+
+    assert!(
+        edge_delta > 5.0,
+        "lake outlet channel did not visibly emerge from lake edge: delta={edge_delta}"
+    );
+    assert!(
+        core_delta + 4.0 >= edge_delta,
+        "outlet lake-edge hydration should not overpower the channel core: core={core_delta} edge={edge_delta}"
+    );
+}
+
+#[test]
+fn river_water_core_stays_clipped_while_hydration_remains_subtle() {
+    let scale = 18;
+    let mut river_world = render_test_world(3, 3);
+    let base_world = river_world.clone();
+    let center = river_world.idx(1, 1);
+    river_world.tiles[center].river = 0.82;
+    river_world.tiles[center].river_depth = 0.70;
+    river_world.tiles[center].flow_direction = 2;
+
+    let base = render_world(&base_world, RenderConfig { scale });
+    let river = render_world(&river_world, RenderConfig { scale });
+    let river_core = (scale + scale / 2, scale + scale / 2);
+    let east_neighbor = (2 * scale + scale / 2, scale + scale / 2);
+    let core_delta = color_delta(
+        base.get_pixel(river_core.0, river_core.1).0,
+        river.get_pixel(river_core.0, river_core.1).0,
+    );
+    let neighbor_delta = color_delta(
+        base.get_pixel(east_neighbor.0, east_neighbor.1).0,
+        river.get_pixel(east_neighbor.0, east_neighbor.1).0,
+    );
+
+    assert!(
+        core_delta > 8.0,
+        "river tile did not visibly render: delta={core_delta}"
+    );
+    assert!(
+        neighbor_delta < 12.0 && core_delta > neighbor_delta + 6.0,
+        "regional hydration should stay subtler than the river water core: core={core_delta} neighbor={neighbor_delta}"
+    );
+}
+
+#[test]
+fn river_depth_rendering_darkens_channel_core() {
+    let scale = 18;
+    let mut shallow_world = render_test_world(3, 3);
+    let center = shallow_world.idx(1, 1);
+    shallow_world.tiles[center].river = 0.82;
+    shallow_world.tiles[center].river_depth = 0.18;
+    shallow_world.tiles[center].flow_direction = 2;
+
+    let mut deep_world = shallow_world.clone();
+    deep_world.tiles[center].river_depth = 0.92;
+
+    let shallow = render_world(&shallow_world, RenderConfig { scale });
+    let deep = render_world(&deep_world, RenderConfig { scale });
+    let core = (scale + scale / 2, scale + scale / 2);
+    let shallow_luma = luma(shallow.get_pixel(core.0, core.1).0);
+    let deep_luma = luma(deep.get_pixel(core.0, core.1).0);
+
+    assert!(
+        deep_luma + 8.0 < shallow_luma,
+        "river depth did not darken channel core: shallow={shallow_luma} deep={deep_luma}"
+    );
+}
+
+#[test]
+fn deep_river_rendering_keeps_cross_section_gradient() {
+    let scale = 32;
+    let mut base_world = render_test_world(3, 3);
+    for tile in &mut base_world.tiles {
+        tile.raw_elevation = 0.57;
+        tile.slope = 0.009;
+        tile.relief = 0.012;
+        tile.moisture = 0.38;
+        tile.temperature = 0.54;
+    }
+
+    let mut river_world = base_world.clone();
+    for x in 0..3 {
+        let idx = river_world.idx(x, 1);
+        river_world.tiles[idx].river = 0.86;
+        river_world.tiles[idx].river_depth = 0.88;
+        river_world.tiles[idx].river_width = 0.66;
+        river_world.tiles[idx].flow_direction = 2;
+    }
+
+    let base = render_world(&base_world, RenderConfig { scale });
+    let river = render_world(&river_world, RenderConfig { scale });
+    let core = (scale + scale / 2, scale + scale / 2);
+    let margin = (scale + scale / 2, scale + scale / 2 + 10);
+    let core_luma = luma(river.get_pixel(core.0, core.1).0);
+    let margin_luma = luma(river.get_pixel(margin.0, margin.1).0);
+    let margin_delta = color_delta(
+        base.get_pixel(margin.0, margin.1).0,
+        river.get_pixel(margin.0, margin.1).0,
+    );
+
+    assert!(
+        margin_delta > 7.0,
+        "deep river margin should still render as water/near-bank influence: delta={margin_delta}"
+    );
+    assert!(
+        margin_luma > core_luma + 8.0,
+        "deep river should show a lighter margin around a dark thalweg: margin={margin_luma} core={core_luma}"
+    );
+}
+
+#[test]
+fn shallow_steep_river_depth_adds_riffle_highlights() {
+    let scale = 24;
+    let mut base_world = render_test_world(3, 3);
+    for tile in &mut base_world.tiles {
+        tile.raw_elevation = 0.62;
+        tile.slope = 0.080;
+        tile.relief = 0.090;
+        tile.moisture = 0.38;
+        tile.temperature = 0.50;
+    }
+
+    let mut shallow_world = base_world.clone();
+    for x in 0..3 {
+        let idx = shallow_world.idx(x, 1);
+        shallow_world.tiles[idx].river = 0.78;
+        shallow_world.tiles[idx].river_depth = 0.16;
+        shallow_world.tiles[idx].river_width = 0.26;
+        shallow_world.tiles[idx].flow_direction = 2;
+    }
+
+    let mut deep_world = shallow_world.clone();
+    for x in 0..3 {
+        let idx = deep_world.idx(x, 1);
+        deep_world.tiles[idx].river_depth = 0.86;
+        deep_world.tiles[idx].river_width = 0.48;
+    }
+
+    let base = render_world(&base_world, RenderConfig { scale });
+    let shallow = render_world(&shallow_world, RenderConfig { scale });
+    let deep = render_world(&deep_world, RenderConfig { scale });
+    let center_x = scale;
+    let center_y = scale;
+    let mut shallow_glints = 0_usize;
+    let mut deep_glints = 0_usize;
+    for py in center_y..center_y + scale {
+        for px in center_x..center_x + scale {
+            let base_luma = luma(base.get_pixel(px, py).0);
+            if luma(shallow.get_pixel(px, py).0) > base_luma + 5.0 {
+                shallow_glints += 1;
+            }
+            if luma(deep.get_pixel(px, py).0) > base_luma + 5.0 {
+                deep_glints += 1;
+            }
+        }
+    }
+
+    assert!(
+        shallow_glints > deep_glints + 6,
+        "shallow steep reach should show more riffle glints than deep water: shallow={shallow_glints} deep={deep_glints}"
+    );
+}
+
+#[test]
+fn deep_lowland_river_depth_mutes_clear_blue_margins() {
+    let scale = 24;
+    let mut lowland_world = render_test_world(3, 3);
+    for tile in &mut lowland_world.tiles {
+        tile.raw_elevation = 0.56;
+        tile.slope = 0.006;
+        tile.relief = 0.010;
+        tile.moisture = 0.30;
+        tile.temperature = 0.55;
+    }
+
+    for x in 0..3 {
+        let idx = lowland_world.idx(x, 1);
+        lowland_world.tiles[idx].river = 0.84;
+        lowland_world.tiles[idx].river_depth = 0.78;
+        lowland_world.tiles[idx].river_width = 0.72;
+        lowland_world.tiles[idx].flow_direction = 2;
+    }
+
+    let mut steep_world = lowland_world.clone();
+    for tile in &mut steep_world.tiles {
+        tile.slope = 0.080;
+        tile.relief = 0.090;
+    }
+
+    let lowland = render_world(&lowland_world, RenderConfig { scale });
+    let steep = render_world(&steep_world, RenderConfig { scale });
+    let mut lowland_saturation = 0.0_f32;
+    let mut steep_saturation = 0.0_f32;
+    let mut lowland_blue_dominance = 0.0_f32;
+    let mut steep_blue_dominance = 0.0_f32;
+    let mut samples = 0_u32;
+
+    for px in scale + 4..2 * scale - 4 {
+        for offset in [5_u32, 6, 7, 8] {
+            for py in [scale + scale / 2 - offset, scale + scale / 2 + offset] {
+                let lowland_pixel = lowland.get_pixel(px, py).0;
+                let steep_pixel = steep.get_pixel(px, py).0;
+                lowland_saturation += color_saturation(lowland_pixel);
+                steep_saturation += color_saturation(steep_pixel);
+                lowland_blue_dominance += lowland_pixel[2] as f32 - lowland_pixel[0] as f32;
+                steep_blue_dominance += steep_pixel[2] as f32 - steep_pixel[0] as f32;
+                samples += 1;
+            }
+        }
+    }
+
+    let samples = samples as f32;
+    let lowland_saturation = lowland_saturation / samples;
+    let steep_saturation = steep_saturation / samples;
+    let lowland_blue_dominance = lowland_blue_dominance / samples;
+    let steep_blue_dominance = steep_blue_dominance / samples;
+
+    assert!(
+        lowland_saturation + 2.0 < steep_saturation,
+        "deep lowland river margins should be less clear-blue saturated: lowland={lowland_saturation} steep={steep_saturation}"
+    );
+    assert!(
+        lowland_blue_dominance + 2.0 < steep_blue_dominance,
+        "deep lowland river margins should be less blue-dominant: lowland={lowland_blue_dominance} steep={steep_blue_dominance}"
+    );
+}
+
+#[test]
+fn deep_confined_river_depth_darkens_incisive_banks() {
+    let scale = 28;
+    let mut lowland_base = render_test_world(3, 3);
+    for tile in &mut lowland_base.tiles {
+        tile.raw_elevation = 0.62;
+        tile.slope = 0.008;
+        tile.relief = 0.012;
+        tile.moisture = 0.34;
+        tile.temperature = 0.48;
+    }
+
+    let mut confined_base = lowland_base.clone();
+    for tile in &mut confined_base.tiles {
+        tile.slope = 0.082;
+        tile.relief = 0.095;
+    }
+
+    let mut lowland_world = lowland_base.clone();
+    let mut confined_world = confined_base.clone();
+    for world in [&mut lowland_world, &mut confined_world] {
+        for x in 0..3 {
+            let idx = world.idx(x, 1);
+            world.tiles[idx].river = 0.78;
+            world.tiles[idx].river_depth = 0.80;
+            world.tiles[idx].river_width = 0.34;
+            world.tiles[idx].flow_direction = 2;
+        }
+    }
+
+    let lowland_base = render_world(&lowland_base, RenderConfig { scale });
+    let confined_base = render_world(&confined_base, RenderConfig { scale });
+    let lowland = render_world(&lowland_world, RenderConfig { scale });
+    let confined = render_world(&confined_world, RenderConfig { scale });
+
+    let mut lowland_darkening = 0.0_f32;
+    let mut confined_darkening = 0.0_f32;
+    let mut samples = 0_u32;
+    for px in scale + 5..2 * scale - 5 {
+        for offset in [10_u32, 11, 12, 13] {
+            for py in [scale + scale / 2 - offset, scale + scale / 2 + offset] {
+                lowland_darkening +=
+                    luma(lowland_base.get_pixel(px, py).0) - luma(lowland.get_pixel(px, py).0);
+                confined_darkening +=
+                    luma(confined_base.get_pixel(px, py).0) - luma(confined.get_pixel(px, py).0);
+                samples += 1;
+            }
+        }
+    }
+
+    let lowland_darkening = lowland_darkening / samples as f32;
+    let confined_darkening = confined_darkening / samples as f32;
+
+    assert!(
+        confined_darkening > lowland_darkening + 4.0,
+        "deep confined rivers should darken incised banks more than lowland channels: confined={confined_darkening} lowland={lowland_darkening}"
+    );
+    assert!(
+        confined_darkening > 6.0,
+        "deep confined river banks did not visibly darken: {confined_darkening}"
+    );
+}
+
+#[test]
+fn deep_sustained_river_depth_adds_current_streak_texture() {
+    let scale = 32;
+    let mut shallow_world = render_test_world(3, 3);
+    for tile in &mut shallow_world.tiles {
+        tile.raw_elevation = 0.58;
+        tile.slope = 0.010;
+        tile.relief = 0.014;
+        tile.moisture = 0.42;
+        tile.temperature = 0.52;
+    }
+
+    for x in 0..3 {
+        let idx = shallow_world.idx(x, 1);
+        shallow_world.tiles[idx].river = 0.86;
+        shallow_world.tiles[idx].river_depth = 0.18;
+        shallow_world.tiles[idx].river_width = 0.30;
+        shallow_world.tiles[idx].flow_direction = 2;
+    }
+
+    let mut deep_world = shallow_world.clone();
+    for x in 0..3 {
+        let idx = deep_world.idx(x, 1);
+        deep_world.tiles[idx].river_depth = 0.84;
+        deep_world.tiles[idx].river_width = 0.66;
+    }
+
+    let shallow = render_world(&shallow_world, RenderConfig { scale });
+    let deep = render_world(&deep_world, RenderConfig { scale });
+    let mut shallow_min = f32::MAX;
+    let mut shallow_max = f32::MIN;
+    let mut deep_min = f32::MAX;
+    let mut deep_max = f32::MIN;
+
+    for px in scale + 5..2 * scale - 5 {
+        for py in scale + scale / 2 - 7..=scale + scale / 2 + 7 {
+            let shallow_luma = luma(shallow.get_pixel(px, py).0);
+            let deep_luma = luma(deep.get_pixel(px, py).0);
+            shallow_min = shallow_min.min(shallow_luma);
+            shallow_max = shallow_max.max(shallow_luma);
+            deep_min = deep_min.min(deep_luma);
+            deep_max = deep_max.max(deep_luma);
+        }
+    }
+
+    let shallow_range = shallow_max - shallow_min;
+    let deep_range = deep_max - deep_min;
+
+    assert!(
+        deep_range > shallow_range + 4.0,
+        "deep sustained river should have stronger current streak texture: deep={deep_range} shallow={shallow_range}"
+    );
+    assert!(
+        deep_range > 9.0,
+        "deep sustained river current streak texture too weak: range={deep_range}"
+    );
+}
+
+#[test]
+fn shallow_broad_lowland_river_depth_adds_exposed_shoal_bars() {
+    let scale = 32;
+    let mut base_world = render_test_world(3, 3);
+    for tile in &mut base_world.tiles {
+        tile.raw_elevation = 0.57;
+        tile.slope = 0.006;
+        tile.relief = 0.010;
+        tile.moisture = 0.26;
+        tile.temperature = 0.58;
+    }
+
+    let mut shallow_world = base_world.clone();
+    for x in 0..3 {
+        let idx = shallow_world.idx(x, 1);
+        shallow_world.tiles[idx].river = 0.74;
+        shallow_world.tiles[idx].river_depth = 0.16;
+        shallow_world.tiles[idx].river_width = 0.72;
+        shallow_world.tiles[idx].flow_direction = 2;
+    }
+
+    let mut deep_world = shallow_world.clone();
+    for x in 0..3 {
+        let idx = deep_world.idx(x, 1);
+        deep_world.tiles[idx].river_depth = 0.74;
+    }
+
+    let base = render_world(&base_world, RenderConfig { scale });
+    let shallow = render_world(&shallow_world, RenderConfig { scale });
+    let deep = render_world(&deep_world, RenderConfig { scale });
+    let mut shallow_bar_pixels = 0_u32;
+    let mut deep_bar_pixels = 0_u32;
+    let mut shallow_peak = f32::MIN;
+    let mut deep_peak = f32::MIN;
+
+    for px in scale + 5..2 * scale - 5 {
+        for py in scale + 6..2 * scale - 6 {
+            let base_pixel = base.get_pixel(px, py).0;
+            let shallow_pixel = shallow.get_pixel(px, py).0;
+            let deep_pixel = deep.get_pixel(px, py).0;
+            let shallow_sediment = sediment_warmth(shallow_pixel);
+            let deep_sediment = sediment_warmth(deep_pixel);
+            shallow_peak = shallow_peak.max(shallow_sediment);
+            deep_peak = deep_peak.max(deep_sediment);
+
+            if color_delta(base_pixel, shallow_pixel) > 8.0 && shallow_sediment > 72.0 {
+                shallow_bar_pixels += 1;
+            }
+            if color_delta(base_pixel, deep_pixel) > 8.0 && deep_sediment > 72.0 {
+                deep_bar_pixels += 1;
+            }
+        }
+    }
+
+    assert!(
+        shallow_bar_pixels > deep_bar_pixels + 6,
+        "shallow broad river should expose more warm shoal-bar pixels than deep water: shallow={shallow_bar_pixels} deep={deep_bar_pixels} shallow_peak={shallow_peak} deep_peak={deep_peak}"
+    );
+    assert!(
+        shallow_peak > deep_peak + 10.0,
+        "shallow broad river did not produce a warmer shoal-bar peak: shallow={shallow_peak} deep={deep_peak}"
+    );
+}
+
+#[test]
+fn river_depth_hydrates_adjacent_corridor_proportionally() {
+    let scale = 24;
+    let mut base_world = render_test_world(3, 3);
+    for tile in &mut base_world.tiles {
+        tile.raw_elevation = 0.56;
+        tile.slope = 0.010;
+        tile.relief = 0.014;
+        tile.moisture = 0.22;
+        tile.temperature = 0.62;
+    }
+
+    let mut shallow_world = base_world.clone();
+    let center = shallow_world.idx(1, 1);
+    shallow_world.tiles[center].river = 0.82;
+    shallow_world.tiles[center].river_depth = 0.12;
+    shallow_world.tiles[center].river_width = 0.22;
+    shallow_world.tiles[center].flow_direction = 2;
+
+    let mut deep_world = shallow_world.clone();
+    deep_world.tiles[center].river_depth = 0.92;
+
+    let base = render_world(&base_world, RenderConfig { scale });
+    let shallow = render_world(&shallow_world, RenderConfig { scale });
+    let deep = render_world(&deep_world, RenderConfig { scale });
+    let adjacent = (scale + scale / 2, 2 * scale + 2);
+    let base_pixel = base.get_pixel(adjacent.0, adjacent.1).0;
+    let shallow_pixel = shallow.get_pixel(adjacent.0, adjacent.1).0;
+    let deep_pixel = deep.get_pixel(adjacent.0, adjacent.1).0;
+    let shallow_delta = color_delta(base_pixel, shallow_pixel);
+    let deep_delta = color_delta(base_pixel, deep_pixel);
+
+    assert!(
+        deep_delta > shallow_delta + 5.0,
+        "deep river did not hydrate adjacent corridor proportionally: shallow={shallow_delta} deep={deep_delta}"
+    );
+    assert!(
+        green_minus_red(deep_pixel) > green_minus_red(shallow_pixel) + 1.5,
+        "deep river hydration should shift nearby dry land greener: shallow={:?} deep={:?}",
+        shallow_pixel,
+        deep_pixel
+    );
+}
+
+#[test]
+fn river_width_rendering_adds_channel_weight() {
+    let scale = 22;
+    let mut narrow_world = render_test_world(3, 3);
+    let center = narrow_world.idx(1, 1);
+    narrow_world.tiles[center].river = 0.82;
+    narrow_world.tiles[center].river_depth = 0.44;
+    narrow_world.tiles[center].river_width = 0.18;
+    narrow_world.tiles[center].flow_direction = 2;
+
+    let mut broad_world = narrow_world.clone();
+    broad_world.tiles[center].river_width = 0.92;
+
+    let base = render_world(&render_test_world(3, 3), RenderConfig { scale });
+    let narrow = render_world(&narrow_world, RenderConfig { scale });
+    let broad = render_world(&broad_world, RenderConfig { scale });
+    let shoulder = (scale + scale / 2, scale + scale / 2 + 6);
+    let narrow_luma = luma(narrow.get_pixel(shoulder.0, shoulder.1).0);
+    let broad_luma = luma(broad.get_pixel(shoulder.0, shoulder.1).0);
+    let delta = color_delta(
+        narrow.get_pixel(shoulder.0, shoulder.1).0,
+        broad.get_pixel(shoulder.0, shoulder.1).0,
+    );
+
+    assert!(
+        delta > 8.0,
+        "river width did not materially affect the channel shoulder: delta={delta}"
+    );
+    assert!(
+        broad_luma + 4.0 < narrow_luma,
+        "wider channel did not add darker water mass: narrow={narrow_luma} broad={broad_luma}"
+    );
+
+    let adjacent_center = (scale + scale / 2, scale / 2);
+    let narrow_adjacent_delta = color_delta(
+        base.get_pixel(adjacent_center.0, adjacent_center.1).0,
+        narrow.get_pixel(adjacent_center.0, adjacent_center.1).0,
+    );
+    let broad_adjacent_delta = color_delta(
+        base.get_pixel(adjacent_center.0, adjacent_center.1).0,
+        broad.get_pixel(adjacent_center.0, adjacent_center.1).0,
+    );
+
+    assert!(
+        broad_adjacent_delta > narrow_adjacent_delta + 10.0,
+        "wide simulated river should visibly spread water into the adjacent tile: broad={broad_adjacent_delta} narrow={narrow_adjacent_delta}"
+    );
+}
+
+#[test]
 fn lowland_river_rendering_adds_alluvial_floodplain() {
     let scale = 14;
     let mut river_world = render_test_world(4, 3);
@@ -2114,6 +2891,72 @@ fn river_bend_rendering_favors_smoothed_inside_corner() {
 }
 
 #[test]
+fn deep_river_bend_adds_cutbank_and_inner_shoal_contrast() {
+    let scale = 28;
+    let mut base_world = render_test_world(3, 4);
+    for tile in &mut base_world.tiles {
+        tile.raw_elevation = 0.58;
+        tile.slope = 0.012;
+        tile.relief = 0.018;
+        tile.moisture = 0.30;
+        tile.temperature = 0.62;
+    }
+
+    let mut river_world = base_world.clone();
+    let west = river_world.idx(0, 1);
+    let bend = river_world.idx(1, 1);
+    let south = river_world.idx(1, 2);
+    river_world.tiles[west].river = 0.70;
+    river_world.tiles[west].river_depth = 0.58;
+    river_world.tiles[west].river_width = 0.48;
+    river_world.tiles[west].flow_direction = 2;
+    river_world.tiles[bend].river = 0.86;
+    river_world.tiles[bend].river_depth = 0.92;
+    river_world.tiles[bend].river_width = 0.62;
+    river_world.tiles[bend].flow_direction = 4;
+    river_world.tiles[south].river = 0.76;
+    river_world.tiles[south].river_depth = 0.62;
+    river_world.tiles[south].river_width = 0.46;
+
+    let base = render_world(&base_world, RenderConfig { scale });
+    let river = render_world(&river_world, RenderConfig { scale });
+    let inner_shoal = (scale + 2, scale + scale - 2);
+    let outer_cutbank = (scale + scale - 2, scale + 2);
+    let inner_delta = color_delta(
+        base.get_pixel(inner_shoal.0, inner_shoal.1).0,
+        river.get_pixel(inner_shoal.0, inner_shoal.1).0,
+    );
+    let outer_delta = color_delta(
+        base.get_pixel(outer_cutbank.0, outer_cutbank.1).0,
+        river.get_pixel(outer_cutbank.0, outer_cutbank.1).0,
+    );
+    let inner_luma = luma(river.get_pixel(inner_shoal.0, inner_shoal.1).0);
+    let outer_luma = luma(river.get_pixel(outer_cutbank.0, outer_cutbank.1).0);
+    let outer_base_luma = luma(base.get_pixel(outer_cutbank.0, outer_cutbank.1).0);
+    let core_luma = luma(river.get_pixel(scale + scale / 2, scale + scale / 2).0);
+    let outer_thalweg = (scale + scale * 2 / 3, scale + scale / 3);
+    let outer_thalweg_luma = luma(river.get_pixel(outer_thalweg.0, outer_thalweg.1).0);
+    let outer_thalweg_base_luma = luma(base.get_pixel(outer_thalweg.0, outer_thalweg.1).0);
+
+    assert!(
+        inner_delta > 4.0 && outer_delta > 4.0,
+        "deep bend did not visibly affect both banks: inner={inner_delta} outer={outer_delta}"
+    );
+    assert!(
+        inner_luma > core_luma + 2.5,
+        "inner shoal should read shallower than the thalweg core: inner={inner_luma} core={core_luma}"
+    );
+    assert!(
+        outer_luma + 8.0 < outer_base_luma,
+        "outer cutbank should darken relative to nearby land: outer={outer_luma} base={outer_base_luma}"
+    );
+    assert!(
+        outer_thalweg_luma + 10.0 < outer_thalweg_base_luma,
+        "deep bend should push darker thalweg water toward the outside bank: outer_thalweg={outer_thalweg_luma} base={outer_thalweg_base_luma}"
+    );
+}
+
+#[test]
 fn river_confluence_rendering_widens_join_pool() {
     let scale = 28;
     let mut base_world = render_test_world(3, 3);
@@ -2143,19 +2986,23 @@ fn river_confluence_rendering_widens_join_pool() {
     let base = render_world(&base_world, RenderConfig { scale });
     let simple = render_world(&simple_world, RenderConfig { scale });
     let confluence = render_world(&confluence_world, RenderConfig { scale });
-    let shoulder = (scale + scale / 2 - 6, scale + scale / 2 - 6);
-    let simple_delta = color_delta(
-        base.get_pixel(shoulder.0, shoulder.1).0,
-        simple.get_pixel(shoulder.0, shoulder.1).0,
-    );
-    let confluence_delta = color_delta(
-        base.get_pixel(shoulder.0, shoulder.1).0,
-        confluence.get_pixel(shoulder.0, shoulder.1).0,
-    );
+    let mut simple_max = 0.0_f32;
+    let mut confluence_max = 0.0_f32;
+    let mut confluence_extra = 0.0_f32;
+    for py in (scale / 2)..(scale + scale / 2) {
+        for px in (scale + scale / 5)..(scale + scale * 4 / 5) {
+            let base_pixel = base.get_pixel(px, py).0;
+            let simple_pixel = simple.get_pixel(px, py).0;
+            let confluence_pixel = confluence.get_pixel(px, py).0;
+            simple_max = simple_max.max(color_delta(base_pixel, simple_pixel));
+            confluence_max = confluence_max.max(color_delta(base_pixel, confluence_pixel));
+            confluence_extra = confluence_extra.max(color_delta(simple_pixel, confluence_pixel));
+        }
+    }
 
     assert!(
-        confluence_delta > simple_delta + 4.0,
-        "confluence did not widen the join shoulder: confluence={confluence_delta} simple={simple_delta}"
+        confluence_extra > 6.0 && confluence_max + 3.0 >= simple_max,
+        "confluence did not visibly expand the join: confluence_max={confluence_max} simple_max={simple_max} extra={confluence_extra}"
     );
 }
 
@@ -2462,6 +3309,10 @@ fn color_saturation(pixel: [u8; 4]) -> f32 {
     max - min
 }
 
+fn sediment_warmth(pixel: [u8; 4]) -> f32 {
+    pixel[0] as f32 + pixel[1] as f32 - pixel[2] as f32 * 1.6
+}
+
 fn green_minus_red(pixel: [u8; 4]) -> f32 {
     pixel[1] as f32 - pixel[0] as f32
 }
@@ -2593,6 +3444,48 @@ fn mountain_component_count(world: &World, min_area: usize) -> usize {
     component_count(world, min_area, |tile| {
         matches!(tile.biome, Biome::Alpine | Biome::Foothills)
     })
+}
+
+fn river_path_reaches_water_sink(world: &World, start_idx: usize) -> bool {
+    let directions = [
+        (0_isize, -1_isize),
+        (1, -1),
+        (1, 0),
+        (1, 1),
+        (0, 1),
+        (-1, 1),
+        (-1, 0),
+        (-1, -1),
+    ];
+    let mut seen = vec![false; world.tiles.len()];
+    let mut idx = start_idx;
+
+    for _ in 0..world.tiles.len().min(2048) {
+        if seen[idx] {
+            return false;
+        }
+        seen[idx] = true;
+
+        let tile = &world.tiles[idx];
+        if tile.surface == Surface::Ocean || tile.lake_depth > 0.0 {
+            return true;
+        }
+        if tile.flow_direction < 0 {
+            return false;
+        }
+
+        let (x, y) = world.coords(idx);
+        let (dx, dy) = directions[tile.flow_direction as usize];
+        let nx = x as isize + dx;
+        let ny = y as isize + dy;
+        if !world.in_bounds(nx, ny) {
+            return false;
+        }
+
+        idx = world.idx(nx as usize, ny as usize);
+    }
+
+    false
 }
 
 fn longest_major_river_straight_run(world: &World, edge_margin: usize) -> usize {

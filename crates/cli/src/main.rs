@@ -9,7 +9,7 @@ use time::format_description::FormatItem;
 use time::macros::format_description;
 use worldgen::{RenderConfig, World, WorldConfig, build_metadata, generate_world, render_world};
 
-const TILES_SCHEMA_VERSION: u32 = 7;
+const TILES_SCHEMA_VERSION: u32 = 11;
 
 #[derive(Serialize, Deserialize)]
 struct TileExport {
@@ -345,8 +345,8 @@ mod tests {
     }
 
     #[test]
-    fn current_tile_export_schema_is_version_seven() {
-        assert_eq!(TILES_SCHEMA_VERSION, 7);
+    fn current_tile_export_schema_is_version_eleven() {
+        assert_eq!(TILES_SCHEMA_VERSION, 11);
     }
 
     #[test]

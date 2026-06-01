@@ -8,7 +8,7 @@ mod util;
 use noise::OpenSimplex;
 
 use crate::features::mountain_feature_for_tile;
-use crate::{Biome, MountainFeature, Surface, World, WorldConfig};
+use crate::{MountainFeature, Surface, World, WorldConfig};
 
 pub use biomes::biome_for_tile;
 pub(crate) use util::{hash01, smoothstep, value_noise};
@@ -71,7 +71,7 @@ pub fn generate_world(config: &WorldConfig) -> Result<World, String> {
         &ocean,
         &surfaces,
     );
-    let biomes = biomes::assign_biomes(
+    let biome_fields = biomes::assign_biomes(
         &world,
         &terrain_fields,
         &climate_fields,
@@ -86,7 +86,7 @@ pub fn generate_world(config: &WorldConfig) -> Result<World, String> {
         &surfaces,
         &climate_fields,
         &hydrology_fields,
-        &biomes,
+        &biome_fields,
     );
 
     Ok(world)
@@ -98,7 +98,7 @@ fn commit_tiles(
     surfaces: &[Surface],
     climate: &climate::ClimateFields,
     hydrology: &hydrology::HydrologyFields,
-    biomes: &[Biome],
+    biomes: &biomes::BiomeFields,
 ) {
     for idx in 0..world.tile_count() {
         let tile = &mut world.tiles[idx];
@@ -108,14 +108,23 @@ fn commit_tiles(
         tile.runoff = hydrology.runoff[idx];
         tile.flow_accumulation = hydrology.flow_accumulation[idx];
         tile.river = hydrology.river[idx];
+        tile.river_depth = hydrology.river_depth[idx];
+        tile.river_width = hydrology.river_width[idx];
+        tile.river_order = hydrology.river_order[idx];
+        tile.lake_depth = hydrology.lake_depth[idx];
+        tile.water_body_id = hydrology.water_body_id[idx];
+        tile.lake_inflow = hydrology.lake_inflow[idx];
+        tile.lake_outlet = hydrology.lake_outlet[idx];
+        tile.spill_discharge = hydrology.spill_discharge[idx];
+        tile.erosion = hydrology.erosion[idx];
         tile.flow_direction = hydrology.flow_direction[idx];
         tile.temperature = climate.temperature[idx];
-        tile.moisture = climate.moisture[idx];
+        tile.moisture = biomes.moisture[idx];
         tile.precipitation = climate.precipitation[idx];
         tile.continentality = climate.continentality[idx];
         tile.ocean_distance = climate.ocean_distance[idx];
         tile.surface = surfaces[idx];
-        tile.biome = biomes[idx];
+        tile.biome = biomes.biome[idx];
         tile.mountain_feature = MountainFeature::None;
     }
 

@@ -35,8 +35,9 @@ pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
         &land_vertices,
         &land_colors,
         &ocean_vertices,
+        &hillshade,
     );
-    draw_land_features(&mut image, world, scale);
+    draw_land_features(&mut image, world, scale, &land_colors);
 
     image
 }
@@ -51,7 +52,7 @@ fn build_hillshade(world: &World) -> Vec<f32> {
             compute_hillshade(world, x, y)
         })
         .collect::<Vec<_>>();
-    smooth_hillshade_in_place(world, &mut hillshade, 2);
+    smooth_hillshade_in_place(world, &mut hillshade, 1);
     hillshade
 }
 
@@ -105,6 +106,7 @@ fn draw_base_layer(
     land_vertices: &shading::LandVertexGrid,
     land_colors: &[Rgba<u8>],
     ocean_vertices: &OceanVertexGrid,
+    hillshade: &[f32],
 ) {
     for (idx, tile) in world.tiles.iter().enumerate() {
         let (x, y) = world.coords(idx);
@@ -114,7 +116,7 @@ fn draw_base_layer(
         } else if matches!(tile.biome, Biome::Freshwater) {
             draw_freshwater_tile(image, world, land_colors, idx, x, y, scale);
         } else {
-            draw_tile_hillshaded(image, land_vertices, world, x as u32, y as u32, scale);
+            draw_tile_hillshaded(image, land_vertices, world, hillshade, x as u32, y as u32, scale);
         }
     }
 }
@@ -170,11 +172,14 @@ fn draw_freshwater_tile(
     let ox = x as u32 * scale;
     let oy = y as u32 * scale;
     let tile = &world.tiles[idx];
-    let pond_color = Rgba([54, 118, 138, 255]);
-    let pool_color = Rgba([72, 146, 154, 255]);
+    let depth = tile.lake_depth.clamp(0.0, 1.0);
+    let pond_color = lerp_rgba(Rgba([74, 122, 112, 255]), Rgba([48, 82, 86, 255]), depth);
+    let pool_color = lerp_rgba(Rgba([92, 138, 118, 255]), Rgba([58, 98, 96, 255]), depth);
     let shore_color = freshwater_shore_color(world, land_colors, idx);
     let neighbors = freshwater_neighbors(world, x, y);
-    let shallow = (1.0 - smoothstep(0.02, 0.16, tile.relief + tile.slope * 0.8)).clamp(0.0, 1.0);
+    let shallow = ((1.0 - smoothstep(0.02, 0.16, tile.relief + tile.slope * 0.8))
+        * (1.0 - depth * 0.55))
+        .clamp(0.0, 1.0);
 
     for py in 0..scale {
         for px in 0..scale {
@@ -183,7 +188,11 @@ fn draw_freshwater_tile(
             let ripple = value_noise(world.seed ^ 0x3E7F_91C2, gx, gy, 7) - 0.5;
             let glint = smoothstep(0.62, 0.92, value_noise(world.seed ^ 0x9B4A_57D3, gx, gy, 5));
             let water = freshwater_mask(world.seed, &neighbors, gx, gy, px, py, scale);
-            let color = lerp_rgba(pond_color, pool_color, shallow * 0.42 + glint * 0.10);
+            let color = lerp_rgba(
+                pond_color,
+                pool_color,
+                shallow * 0.34 + glint * 0.08 + depth * 0.30,
+            );
             let color = offset(color, (ripple * 5.0) as i16);
             image.put_pixel(ox + px, oy + py, lerp_rgba(shore_color, color, water));
         }
@@ -513,13 +522,13 @@ fn polar_ice_strength(seed: u64, depth: f32, temperature: f32, x: usize, y: usiz
     (cold * (0.24 + shelf * 0.76) * (0.50 + broken_pack * 0.50)).clamp(0.0, 1.0)
 }
 
-fn draw_land_features(image: &mut RgbaImage, world: &World, scale: u32) {
+fn draw_land_features(image: &mut RgbaImage, world: &World, scale: u32, land_colors: &[Rgba<u8>]) {
     for (idx, tile) in world.tiles.iter().enumerate() {
         if tile.biome == Biome::Coast {
             draw_coastline(image, world, idx, scale);
         }
     }
-    draw_rivers(image, world, scale);
+    draw_rivers(image, world, scale, land_colors);
 }
 
 #[cfg(test)]

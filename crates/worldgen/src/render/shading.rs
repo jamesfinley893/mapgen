@@ -21,6 +21,7 @@ pub(super) fn draw_tile_hillshaded(
     image: &mut RgbaImage,
     vertices: &LandVertexGrid,
     world: &World,
+    hillshade: &[f32],
     x: u32,
     y: u32,
     scale: u32,
@@ -75,24 +76,39 @@ pub(super) fn draw_tile_hillshaded(
         Biome::Ocean => 0.0,
         _ => 0.92,
     };
+    // Tile-based shading: pull each tile's shade toward its own per-tile hillshade
+    // value (rather than the cross-tile bilinear blend) so elevation reads as
+    // discrete tiles. Mountains lean hard into this; plains stay smooth.
+    let center_shade = hillshade[center_idx];
+    let tileness = match center_biome {
+        Biome::Alpine => 0.62,
+        Biome::Foothills => 0.48,
+        _ => 0.16,
+    };
 
     for py in 0..scale {
         for px in 0..scale {
             let fx = (px as f32 + 0.5) / s;
             let fy = (py as f32 + 0.5) / s;
-            let shade = v00.shade * (1.0 - fx) * (1.0 - fy)
+            let interp_shade = v00.shade * (1.0 - fx) * (1.0 - fy)
                 + v10.shade * fx * (1.0 - fy)
                 + v01.shade * (1.0 - fx) * fy
                 + v11.shade * fx * fy;
+            let shade = interp_shade + (center_shade - interp_shade) * tileness;
             let base_color = bilerp_rgba(v00.color, v10.color, v01.color, v11.color, fx, fy);
             let shade_factor = match center_biome {
-                Biome::Alpine => 0.34 + shade * 0.72,
-                Biome::Foothills => 0.36 + shade * 0.68,
+                Biome::Alpine => 0.56 + shade * 0.50,
+                Biome::Foothills => 0.54 + shade * 0.50,
                 _ => 0.37 + shade * 0.61,
             };
             let color = scale_rgb(base_color, shade_factor);
             // Aspect tinting: lit faces warm (+R, -B), shadowed faces cool (-R, +B).
-            let tint = ((shade - 0.5) * 16.0) as i16;
+            // Mountains use a gentler tint so steep shadowed faces don't go navy.
+            let tint_amp = match center_biome {
+                Biome::Alpine | Biome::Foothills => 9.0,
+                _ => 16.0,
+            };
+            let tint = ((shade - 0.5) * tint_amp) as i16;
             let mut color = Rgba([
                 (color[0] as i16 + tint).clamp(0, 255) as u8,
                 color[1],
@@ -106,7 +122,7 @@ pub(super) fn draw_tile_hillshaded(
                 let fine = hash01(world.seed ^ 0x2C67_54ED, gx / 2, gy / 2);
                 let grain = coarse * 0.72 + fine * 0.28 - 0.5;
                 let detail = (grain
-                    * (4.0 + land_texture_relief * 4.2 + rugged * 18.0)
+                    * (4.0 + land_texture_relief * 4.2 + rugged * 7.0)
                     * biome_strength) as i16;
                 color = offset(color, detail);
                 color = if texture_edge {
@@ -836,8 +852,8 @@ fn apply_alpine_crag_texture(color: Rgba<u8>, seed: u64, x: usize, y: usize) -> 
         * (0.55 + rib * 0.45);
     let scree =
         smoothstep(0.52, 0.90, value_noise(seed ^ 0x39B6_C812, x, y, 4)) * (1.0 - rib * 0.45);
-    let lift = (rib * 10.0 + scree * 4.0) as i16;
-    let shadow = (crack * 12.0) as i16;
+    let lift = (rib * 5.0 + scree * 4.0) as i16;
+    let shadow = (crack * 7.0) as i16;
 
     add_rgb(color, lift - shadow, lift - shadow, lift + 2 - shadow / 2)
 }
@@ -856,13 +872,13 @@ fn apply_mountain_talus_texture(
     let chute = smoothstep(0.58, 0.96, phase.sin() * 0.5 + 0.5);
     let rubble = smoothstep(0.48, 0.90, value_noise(seed ^ 0xB3E6_4127, x, y, 4));
     let shadow_face = 1.0 - smoothstep(0.18, 0.56, shade);
-    let stone = (chute * 14.0 + rubble * 8.0) * strength;
-    let shadow = (chute * shadow_face * 8.0 + rubble * 2.5) * strength;
+    let stone = (chute * 7.0 + rubble * 8.0) * strength;
+    let shadow = (chute * shadow_face * 5.0 + rubble * 2.5) * strength;
     let scree = Rgba([134, 132, 124, 255]);
     let color = lerp_rgba(
         color,
         scree,
-        (strength * (0.12 + chute * 0.18 + rubble * 0.10)).clamp(0.0, 0.42),
+        (strength * (0.08 + chute * 0.12 + rubble * 0.07)).clamp(0.0, 0.30),
     );
 
     add_rgb(
@@ -902,7 +918,7 @@ fn apply_broken_snowfield_texture(
     let ice_shadow = (1.0 - lit) * strength * smoothstep(0.58, 0.94, pocket);
     let scoured_rock = (1.0 - smoothstep(0.22, 0.52, pocket)) * (1.0 - wind_slab * 0.55) * strength;
     let snow_color = lerp_rgba(Rgba([224, 230, 232, 255]), Rgba([250, 252, 252, 255]), lit);
-    let color = lerp_rgba(color, snow_color, snow.clamp(0.0, 0.64));
+    let color = lerp_rgba(color, snow_color, snow.clamp(0.0, 0.46));
     add_rgb(
         color,
         -(ice_shadow * 6.0 + scoured_rock * 11.0) as i16,
@@ -940,12 +956,12 @@ fn apply_mountain_spine_texture(
     let lit = smoothstep(0.42, 0.86, shade);
     let color = lerp_rgba(
         color,
-        Rgba([220, 220, 212, 255]),
-        (crest * (0.12 + lit * 0.18)).clamp(0.0, 0.32),
+        Rgba([198, 200, 196, 255]),
+        (crest * (0.06 + lit * 0.10)).clamp(0.0, 0.20),
     );
 
-    let ridge_light = crest * (8.0 + lit * 15.0);
-    let side_shadow = shoulder * lee_side * (7.0 + (1.0 - lit) * 12.0);
+    let ridge_light = crest * (5.0 + lit * 9.0);
+    let side_shadow = shoulder * lee_side * (6.0 + (1.0 - lit) * 10.0);
     add_rgb(
         color,
         (ridge_light - side_shadow * 0.95) as i16,
@@ -1022,21 +1038,21 @@ fn apply_mountain_feature_texture(
     match feature {
         MountainFeature::Summit => {
             let fracture = value_noise(seed ^ 0xD177_A1B5, x, y, 7);
-            let crest = (15.0
-                + lit_face * 21.0
-                + rugged * 24.0
-                + ridge_grain * 9.0
-                + rib * lit_face * 11.0) as i16;
+            let crest = (5.0
+                + lit_face * 9.0
+                + rugged * 9.0
+                + ridge_grain * 6.0
+                + rib * lit_face * 6.0) as i16;
             let crack =
-                (((1.0 - fracture) * shadow_face + gully * 0.75) * (11.0 + rugged * 20.0)) as i16;
-            add_rgb(color, crest - crack, crest - crack, crest + 4 - crack / 2)
+                (((1.0 - fracture) * shadow_face + gully * 0.75) * (9.0 + rugged * 15.0)) as i16;
+            add_rgb(color, crest - crack, crest - crack, crest + 3 - crack / 2)
         }
         MountainFeature::Ridge => {
             let fracture = value_noise(seed ^ 0xD177_A1B5, x, y, 7);
             let crest =
-                (8.0 + lit_face * 13.0 + rugged * 15.0 + ridge_grain * 7.0 + rib * 9.0) as i16;
-            let crack = (((1.0 - fracture) * shadow_face + gully) * (7.0 + rugged * 17.0)) as i16;
-            add_rgb(color, crest - crack, crest - crack, crest + 3 - crack / 2)
+                (4.0 + lit_face * 6.0 + rugged * 8.0 + ridge_grain * 5.0 + rib * 5.0) as i16;
+            let crack = (((1.0 - fracture) * shadow_face + gully) * (6.0 + rugged * 13.0)) as i16;
+            add_rgb(color, crest - crack, crest - crack, crest + 2 - crack / 2)
         }
         MountainFeature::AlpineSlope => {
             let scree = (ridge_grain * (5.0 + rugged * 11.0) + gully * -5.0) as i16;

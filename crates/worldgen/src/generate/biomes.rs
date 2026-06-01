@@ -7,6 +7,17 @@ use super::hydrology::HydrologyFields;
 use super::terrain::TerrainFields;
 use super::util::{octave_noise, smoothstep};
 
+pub(super) struct BiomeFields {
+    pub(super) biome: Vec<Biome>,
+    pub(super) moisture: Vec<f32>,
+}
+
+#[derive(Clone, Copy)]
+struct BiomeSample {
+    biome: Biome,
+    moisture: f32,
+}
+
 #[derive(Clone, Copy)]
 struct BiomeContext {
     surface: Surface,
@@ -18,6 +29,7 @@ struct BiomeContext {
     river_influence: f32,
     runoff: f32,
     flow_accumulation: f32,
+    lake_depth: f32,
     support: f32,
     proximity: f32,
     relief: f32,
@@ -38,20 +50,25 @@ pub(super) fn assign_biomes(
     hydrology: &HydrologyFields,
     surfaces: &[Surface],
     ecotone_noise: &OpenSimplex,
-) -> Vec<Biome> {
-    (0..world.tile_count())
-        .map(|idx| {
-            biome_for_world_tile(
-                world,
-                terrain,
-                climate,
-                hydrology,
-                surfaces,
-                ecotone_noise,
-                idx,
-            )
-        })
-        .collect()
+) -> BiomeFields {
+    let mut biome = Vec::with_capacity(world.tile_count());
+    let mut moisture = Vec::with_capacity(world.tile_count());
+
+    for idx in 0..world.tile_count() {
+        let sample = biome_for_world_tile(
+            world,
+            terrain,
+            climate,
+            hydrology,
+            surfaces,
+            ecotone_noise,
+            idx,
+        );
+        biome.push(sample.biome);
+        moisture.push(sample.moisture);
+    }
+
+    BiomeFields { biome, moisture }
 }
 
 fn biome_for_world_tile(
@@ -62,7 +79,7 @@ fn biome_for_world_tile(
     surfaces: &[Surface],
     ecotone_noise: &OpenSimplex,
     idx: usize,
-) -> Biome {
+) -> BiomeSample {
     let mut ctx = BiomeContext {
         surface: surfaces[idx],
         elevation: terrain.elevation[idx],
@@ -73,13 +90,18 @@ fn biome_for_world_tile(
         river_influence: riparian_influence(world, surfaces, hydrology, idx),
         runoff: hydrology.runoff[idx],
         flow_accumulation: hydrology.flow_accumulation[idx],
+        lake_depth: hydrology.lake_depth[idx],
         support: mountain_support(world, terrain, idx),
         proximity: mountain_proximity(world, terrain, idx),
         relief: terrain.relief[idx],
     };
     apply_ecotone_variation(world, ecotone_noise, idx, &mut ctx);
     apply_riparian_moisture(&mut ctx);
-    biome_for_tile_with_support(ctx)
+    let moisture = ctx.moisture;
+    BiomeSample {
+        biome: biome_for_tile_with_support(ctx),
+        moisture,
+    }
 }
 
 fn riparian_influence(
@@ -93,7 +115,7 @@ fn riparian_influence(
     }
 
     let (x, y) = world.coords(idx);
-    let mut influence = smoothstep(0.12, 0.72, hydrology.river[idx]) * 1.15;
+    let mut influence = riparian_water_signal(hydrology, idx);
 
     for dy in -3_isize..=3 {
         for dx in -3_isize..=3 {
@@ -111,11 +133,23 @@ fn riparian_influence(
             }
             let dist2 = (dx * dx + dy * dy) as f32;
             let falloff = (1.0 / (1.0 + dist2 * 0.72)).clamp(0.0, 0.72);
-            influence = influence.max(smoothstep(0.22, 0.86, hydrology.river[nidx]) * falloff);
+            influence = influence.max(riparian_water_signal(hydrology, nidx) * falloff);
         }
     }
 
     influence.clamp(0.0, 1.0)
+}
+
+fn riparian_water_signal(hydrology: &HydrologyFields, idx: usize) -> f32 {
+    let river = smoothstep(0.08, 0.70, hydrology.river[idx]);
+    let depth = smoothstep(0.08, 0.88, hydrology.river_depth[idx]);
+    let width = smoothstep(0.10, 0.92, hydrology.river_width[idx]);
+    let channel_capacity = (0.34 + depth * 0.46 + width * 0.20).clamp(0.0, 1.0);
+    let channel = river * channel_capacity;
+    let lake = hydrology.lake_depth[idx] * 0.90;
+    let spill = hydrology.spill_discharge[idx] * (0.42 + depth * 0.28 + width * 0.14);
+
+    channel.max(lake).max(spill).clamp(0.0, 1.0)
 }
 
 fn apply_riparian_moisture(ctx: &mut BiomeContext) {
@@ -327,6 +361,7 @@ pub fn biome_for_tile(
         river_influence: 0.0,
         runoff: 0.0,
         flow_accumulation: 0.0,
+        lake_depth: 0.0,
         support: 1.0,
         proximity: 1.0,
         relief: 0.08,
@@ -343,6 +378,9 @@ fn biome_for_tile_with_support(ctx: BiomeContext) -> Biome {
 
 fn land_biome_with_support(ctx: BiomeContext) -> Biome {
     let height_above_sea = (ctx.elevation - ctx.sea_level).max(0.0);
+    if ctx.lake_depth > 0.0 {
+        return Biome::Freshwater;
+    }
     if ctx.elevation > ctx.sea_level + 0.36
         && ctx.support > 0.50
         && (ctx.relief > 0.034
@@ -420,5 +458,91 @@ fn land_biome_with_support(ctx: BiomeContext) -> Biome {
         Biome::TropicalForest
     } else {
         Biome::Rainforest
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::generate::terrain::TerrainFields;
+
+    fn empty_hydrology(world: &World) -> HydrologyFields {
+        HydrologyFields {
+            runoff: vec![0.0; world.tile_count()],
+            flow_accumulation: vec![0.0; world.tile_count()],
+            river: vec![0.0; world.tile_count()],
+            river_depth: vec![0.0; world.tile_count()],
+            river_width: vec![0.0; world.tile_count()],
+            river_order: vec![0; world.tile_count()],
+            lake_depth: vec![0.0; world.tile_count()],
+            water_body_id: vec![0; world.tile_count()],
+            lake_inflow: vec![0.0; world.tile_count()],
+            lake_outlet: vec![false; world.tile_count()],
+            spill_discharge: vec![0.0; world.tile_count()],
+            erosion: vec![0.0; world.tile_count()],
+            flow_direction: vec![-1; world.tile_count()],
+        }
+    }
+
+    #[test]
+    fn riparian_signal_scales_with_simulated_depth_and_width() {
+        let world = World::new(7, 1, 1, 0.50, 0);
+        let mut shallow = empty_hydrology(&world);
+        shallow.river[0] = 0.82;
+        shallow.river_depth[0] = 0.12;
+        shallow.river_width[0] = 0.16;
+
+        let mut deep = empty_hydrology(&world);
+        deep.river[0] = 0.82;
+        deep.river_depth[0] = 0.88;
+        deep.river_width[0] = 0.64;
+
+        let shallow_signal = riparian_water_signal(&shallow, 0);
+        let deep_signal = riparian_water_signal(&deep, 0);
+
+        assert!(
+            deep_signal > shallow_signal + 0.34,
+            "deep/wide sustained channel should hydrate more regionally: shallow={shallow_signal} deep={deep_signal}"
+        );
+    }
+
+    #[test]
+    fn assigned_biome_moisture_exports_depth_scaled_riparian_boost() {
+        let world = World::new(7, 3, 3, 0.50, 0);
+        let terrain = TerrainFields {
+            elevation: vec![0.56; world.tile_count()],
+            slope: vec![0.008; world.tile_count()],
+            relief: vec![0.010; world.tile_count()],
+        };
+        let climate = ClimateFields {
+            temperature: vec![0.55; world.tile_count()],
+            moisture: vec![0.22; world.tile_count()],
+            precipitation: vec![0.22; world.tile_count()],
+            ocean_distance: vec![12; world.tile_count()],
+            continentality: vec![0.35; world.tile_count()],
+        };
+        let surfaces = vec![Surface::Land; world.tile_count()];
+        let center = world.idx(1, 1);
+
+        let mut shallow = empty_hydrology(&world);
+        shallow.river[center] = 0.82;
+        shallow.river_depth[center] = 0.12;
+        shallow.river_width[center] = 0.16;
+
+        let mut deep = empty_hydrology(&world);
+        deep.river[center] = 0.82;
+        deep.river_depth[center] = 0.88;
+        deep.river_width[center] = 0.64;
+
+        let noise = OpenSimplex::new(17);
+        let shallow_fields = assign_biomes(&world, &terrain, &climate, &shallow, &surfaces, &noise);
+        let deep_fields = assign_biomes(&world, &terrain, &climate, &deep, &surfaces, &noise);
+
+        assert!(
+            deep_fields.moisture[center] > shallow_fields.moisture[center] + 0.06,
+            "exported moisture should carry the depth-scaled riparian boost: shallow={} deep={}",
+            shallow_fields.moisture[center],
+            deep_fields.moisture[center]
+        );
     }
 }

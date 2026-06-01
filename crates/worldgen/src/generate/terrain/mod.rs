@@ -113,6 +113,7 @@ pub(super) fn generate_terrain_fields(
     apply_landform_detail(world, ridge, &fields, &mut elevation);
     apply_orographic_denudation(world, &mut elevation);
     apply_talus_relaxation(world, &mut elevation);
+    apply_range_dissection(world, ridge, &fields, &mut elevation);
 
     let mut terrain = TerrainFields::from_elevation(elevation);
     refresh_derived_fields(world, &mut terrain);
@@ -148,7 +149,10 @@ fn apply_fluvial_incision(
     let mut changed = false;
 
     for idx in 0..world.tile_count() {
-        if context.ocean[idx] || hydrology.river[idx] <= 0.06 {
+        if context.ocean[idx]
+            || (hydrology.river_depth[idx] <= 0.03 && hydrology.lake_depth[idx] <= 0.0)
+                && hydrology.spill_discharge[idx] <= 0.02
+        {
             continue;
         }
 
@@ -158,13 +162,57 @@ fn apply_fluvial_incision(
             continue;
         }
 
+        if hydrology.lake_depth[idx] > 0.0 {
+            let outlet_scour = if hydrology.lake_outlet[idx] {
+                hydrology.spill_discharge[idx].max(hydrology.lake_inflow[idx] * 0.55)
+            } else {
+                0.0
+            };
+            let lake_planing = (hydrology.lake_depth[idx] * 0.82
+                + hydrology.lake_inflow[idx] * 0.22
+                + outlet_scour * 0.42)
+                * smoothstep(0.010, 0.090, height_above_sea);
+            if lake_planing > 0.0 {
+                delta[idx] -= lake_planing * (0.010 + outlet_scour * 0.016);
+                let (x, y) = world.coords(idx);
+                for (nx, ny) in world.neighbors8(x, y) {
+                    let nidx = world.idx(nx, ny);
+                    if context.ocean[nidx] {
+                        continue;
+                    }
+                    let shore = if hydrology.lake_depth[nidx] > 0.0 {
+                        0.35
+                    } else {
+                        0.12
+                    };
+                    let outlet_channel = if hydrology.lake_outlet[nidx] {
+                        0.018 * hydrology.spill_discharge[nidx].max(outlet_scour * 0.75)
+                    } else {
+                        0.0
+                    };
+                    delta[nidx] -= lake_planing * shore * 0.004 + outlet_channel;
+                }
+            }
+            continue;
+        }
+
         let river = hydrology.river[idx];
-        let channel = smoothstep(0.08, 0.78, river);
+        let depth = hydrology.river_depth[idx];
+        let width = hydrology.river_width[idx];
+        let spill = hydrology.spill_discharge[idx];
+        let channel = smoothstep(0.035, 0.72, river).max(smoothstep(0.02, 0.42, spill));
         let elevated = smoothstep(0.035, 0.34, height_above_sea);
+        let gradient = terrain.slope[idx] + terrain.relief[idx] * 0.55;
+        let scour = smoothstep(0.012, 0.16, gradient);
         let wet = (context.climate.precipitation[idx] * 0.55
             + context.climate.moisture[idx] * 0.45)
             .clamp(0.0, 1.0);
-        let incision = channel * elevated * (0.0025 + wet * 0.0065 + river * 0.0050);
+        let stream_power = hydrology.erosion[idx]
+            .max((depth * 0.62 + width * 0.38 + spill * 0.25) * (0.80 + scour * 0.34));
+        let incision = channel
+            * stream_power
+            * elevated
+            * (0.0036 + wet * 0.0076 + river * 0.0048 + scour * 0.0068 + spill * 0.0075);
         if incision <= 0.00008 {
             continue;
         }
@@ -178,7 +226,12 @@ fn apply_fluvial_incision(
             }
             let dx = x.abs_diff(nx);
             let dy = y.abs_diff(ny);
-            let flank_weight = if dx == 1 && dy == 1 { 0.10 } else { 0.18 };
+            let lateral_erosion = (width + spill * 0.16) * (1.0 - scour * 0.55);
+            let flank_weight = if dx == 1 && dy == 1 {
+                0.10 + lateral_erosion * 0.035
+            } else {
+                0.18 + lateral_erosion * 0.060
+            };
             let neighbor_height = (terrain.elevation[nidx] - world.sea_level).max(0.0);
             let neighbor_emerged = smoothstep(0.025, 0.26, neighbor_height);
             delta[nidx] -= incision * flank_weight * neighbor_emerged;
@@ -416,6 +469,47 @@ fn apply_landform_detail(
                 + rolling_detail * rolling_strength
                 + upland_detail * shoulder_fabric * upland_mask)
                 .max(world.sea_level + 0.001);
+        }
+    }
+}
+
+// Break a broad highland massif into distinct ranges separated by valleys.
+// Runs after talus relaxation so the carved valleys are not refilled; the later
+// fluvial-incision pass only deepens them further along real drainage lines.
+fn apply_range_dissection(
+    world: &World,
+    ridge: &OpenSimplex,
+    fields: &OrogenFields,
+    terrain: &mut [f32],
+) {
+    let ws = world.effective_world_size();
+
+    for y in 0..world.height {
+        for x in 0..world.width {
+            let idx = world.idx(x, y);
+            let current = terrain[idx];
+            let height_above_sea = (current - world.sea_level).max(0.0);
+            if height_above_sea <= 0.10 {
+                continue;
+            }
+
+            let uplift_signal = fields.axial_uplift[idx] + fields.shoulder_uplift[idx] * 0.65;
+            let uplift = smoothstep(0.10, 0.58, uplift_signal);
+            let dissect_mask =
+                smoothstep(0.16, 0.46, height_above_sea) * (0.55 + uplift * 0.45);
+            if dissect_mask <= 0.0 {
+                continue;
+            }
+
+            let xf = x as f64 / ws as f64;
+            let yf = y as f64 / ws as f64;
+            // Ridge lines (ranges near 1) rise modestly; inter-ridge ground
+            // (ranges near 0) is carved into valleys.
+            let ranges = ridge_noise(ridge, xf * 6.8 + 113.0, yf * 6.8 - 67.0, 4);
+            let range_signal = ranges - 0.63;
+            let delta = (range_signal.max(0.0) * 0.16 + range_signal.min(0.0) * 0.78) * dissect_mask;
+
+            terrain[idx] = (current + delta).max(world.sea_level + 0.001);
         }
     }
 }
