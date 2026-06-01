@@ -121,6 +121,9 @@ pub(super) fn generate_terrain_fields(
     profile.time("terrain: detail", || {
         apply_landform_detail(world, ridge, &fields, &mut elevation);
     });
+    profile.time("terrain: bathymetry detail", || {
+        apply_bathymetry_detail(world, ridge, &mut elevation);
+    });
     profile.time("terrain: denudation", || {
         apply_orographic_denudation(world, &mut elevation);
     });
@@ -129,6 +132,9 @@ pub(super) fn generate_terrain_fields(
     });
     profile.time("terrain: range dissection", || {
         apply_range_dissection(world, ridge, &fields, &mut elevation);
+    });
+    profile.time("terrain: alpine breakup", || {
+        apply_alpine_breakup(world, ridge, &fields, &mut elevation);
     });
 
     let mut terrain = TerrainFields::from_elevation(elevation);
@@ -492,6 +498,41 @@ fn apply_landform_detail(
     }
 }
 
+fn apply_bathymetry_detail(world: &World, ridge: &OpenSimplex, terrain: &mut [f32]) {
+    let ws = world.effective_world_size();
+
+    for y in 0..world.height {
+        for x in 0..world.width {
+            let idx = world.idx(x, y);
+            let current = terrain[idx];
+            if current >= world.sea_level - 0.001 {
+                continue;
+            }
+
+            let depth = (world.sea_level - current).max(0.0);
+            let shelf = 1.0 - smoothstep(0.018, 0.160, depth);
+            let basin = smoothstep(0.045, 0.300, depth);
+            let xf = x as f64 / ws as f64;
+            let yf = y as f64 / ws as f64;
+
+            let broad = octave_noise(ridge, xf * 5.8 - 143.0, yf * 5.8 + 91.0, 3, 0.56, 2.0);
+            let shelf_grain =
+                octave_noise(ridge, xf * 18.0 + 67.0, yf * 18.0 - 131.0, 3, 0.52, 2.0);
+            let abyssal_fabric = ridge_noise(ridge, xf * 9.2 - 31.0, yf * 9.2 + 47.0, 3);
+            let fracture = octave_noise(ridge, xf * 27.0 + 181.0, yf * 27.0 - 173.0, 2, 0.50, 2.0);
+
+            let shelf_detail = (shelf_grain - 0.5) * 0.020 * shelf;
+            let basin_warp = (broad - 0.5) * 0.030 * basin;
+            let fabric_detail = (abyssal_fabric - 0.52) * 0.025 * basin;
+            let seamount = (abyssal_fabric - 0.70).max(0.0) * 0.052 * basin;
+            let trench = (0.34 - fracture).max(0.0) * 0.030 * basin;
+            let next = current + shelf_detail + basin_warp + fabric_detail + seamount - trench;
+
+            terrain[idx] = next.clamp(0.020, world.sea_level - 0.002);
+        }
+    }
+}
+
 // Break a broad highland massif into distinct ranges separated by valleys.
 // Runs after talus relaxation so the carved valleys are not refilled; the later
 // fluvial-incision pass only deepens them further along real drainage lines.
@@ -529,6 +570,55 @@ fn apply_range_dissection(
                 (range_signal.max(0.0) * 0.16 + range_signal.min(0.0) * 0.78) * dissect_mask;
 
             terrain[idx] = (current + delta).max(world.sea_level + 0.001);
+        }
+    }
+}
+
+fn apply_alpine_breakup(
+    world: &World,
+    ridge: &OpenSimplex,
+    fields: &OrogenFields,
+    terrain: &mut [f32],
+) {
+    let ws = world.effective_world_size();
+
+    for y in 0..world.height {
+        for x in 0..world.width {
+            let idx = world.idx(x, y);
+            let current = terrain[idx];
+            let height_above_sea = (current - world.sea_level).max(0.0);
+            if height_above_sea <= 0.18 {
+                continue;
+            }
+
+            let uplift_signal = fields.axial_uplift[idx]
+                + fields.shoulder_uplift[idx] * 0.54
+                + fields.plateau_support[idx] * 0.28;
+            let alpine_mask =
+                smoothstep(0.20, 0.52, height_above_sea) * smoothstep(0.16, 0.62, uplift_signal);
+            if alpine_mask <= 0.0 {
+                continue;
+            }
+
+            let xf = x as f64 / ws as f64;
+            let yf = y as f64 / ws as f64;
+            let crest = ridge_noise(ridge, xf * 11.5 + 211.0, yf * 11.5 - 157.0, 4);
+            let serration = ridge_noise(ridge, xf * 22.0 - 53.0, yf * 22.0 + 197.0, 3);
+            let fracture_a = octave_noise(ridge, xf * 15.0 + 71.0, yf * 15.0 - 89.0, 3, 0.52, 2.0);
+            let fracture_b = octave_noise(ridge, xf * 31.0 - 173.0, yf * 31.0 + 29.0, 2, 0.50, 2.0);
+            let notch_field = ((1.0 - crest) * 0.62
+                + (0.48 - fracture_a).max(0.0) * 0.58
+                + (0.44 - fracture_b).max(0.0) * 0.36)
+                .clamp(0.0, 1.0);
+            let crest_field = ((crest - 0.62).max(0.0) * 0.56 + (serration - 0.68).max(0.0) * 0.46)
+                .clamp(0.0, 1.0);
+            let shoulder_guard = (1.0 - fields.plateau_support[idx] * 0.28).clamp(0.62, 1.0);
+            let notch =
+                notch_field * alpine_mask * shoulder_guard * (0.030 + height_above_sea * 0.035);
+            let crest_raise = crest_field * alpine_mask * (0.010 + height_above_sea * 0.018);
+            let floor = world.sea_level + 0.002;
+
+            terrain[idx] = (current + crest_raise - notch).max(floor);
         }
     }
 }

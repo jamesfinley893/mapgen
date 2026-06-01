@@ -315,9 +315,6 @@ fn committed_neighbor_stats(world: &World, idx: usize) -> CommittedNeighborStats
 
 fn terrain_texture_for_tile(world: &World, idx: usize, landform: Landform) -> f32 {
     let tile = &world.tiles[idx];
-    if matches!(landform, Landform::Water) {
-        return 0.5;
-    }
 
     let (x, y) = world.coords(idx);
     let coarse = value_noise(
@@ -339,6 +336,18 @@ fn terrain_texture_for_tile(world: &World, idx: usize, landform: Landform) -> f3
         scaled_texture_cell(world, 5),
     );
     let noise = coarse * 0.46 + medium * 0.36 + fine * 0.18;
+    if matches!(landform, Landform::Water) {
+        let depth = if tile.surface == Surface::Ocean {
+            (world.sea_level - tile.raw_elevation).max(0.0)
+        } else {
+            tile.lake_depth.max(0.0)
+        };
+        let shore = shore_influence_for_tile(world, idx);
+        let depth_detail = smoothstep(0.015, 0.18, depth);
+        let gain = (0.12 + shore * 0.18 + depth_detail * 0.08).clamp(0.10, 0.30);
+        return (0.5 + (noise - 0.5) * gain).clamp(0.0, 1.0);
+    }
+
     let rugged = smoothstep(0.018, 0.115, tile.relief + tile.slope * 0.75);
     let wetness = smoothstep(0.45, 0.88, tile.moisture);
     let erosion = smoothstep(0.025, 0.145, tile.erosion);

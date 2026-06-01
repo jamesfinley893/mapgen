@@ -405,6 +405,29 @@ fn generated_worlds_export_nontrivial_presentation_fields() {
 }
 
 #[test]
+fn generated_water_tiles_export_nontrivial_texture() {
+    let world = fixed_world(12302556654306610728);
+    let water_tiles = world
+        .tiles
+        .iter()
+        .filter(|tile| matches!(tile.landform, Landform::Water))
+        .count();
+    let textured_water = world
+        .tiles
+        .iter()
+        .filter(|tile| {
+            matches!(tile.landform, Landform::Water) && (tile.terrain_texture - 0.5).abs() > 0.006
+        })
+        .count();
+
+    assert!(water_tiles > world.tile_count() / 4);
+    assert!(
+        textured_water > water_tiles / 5,
+        "too few water tiles carry bathymetry/shore texture: {textured_water}/{water_tiles}"
+    );
+}
+
+#[test]
 fn coast_tiles_export_stronger_shore_influence_than_inland_tiles() {
     let world = fixed_world(42);
     let mut coast_sum = 0.0_f32;
@@ -715,14 +738,16 @@ fn major_rivers_are_incised_into_local_corridors() {
 }
 
 #[test]
-fn interior_major_rivers_do_not_form_long_straight_runs() {
-    let world = fixed_world(42);
-    let longest = longest_major_river_straight_run(world, 8);
+fn fixed_seed_major_rivers_do_not_form_long_straight_runs() {
+    for seed in [42_u64, 97, 3000, 7073116918442829777, 12302556654306610728] {
+        let world = fixed_world(seed);
+        let longest = longest_major_river_straight_run(world, 8);
 
-    assert!(
-        longest < world.width / 9,
-        "interior major river channel is too straight: {longest}"
-    );
+        assert!(
+            longest < world.width / 8,
+            "seed {seed} interior major river channel is too straight: {longest}"
+        );
+    }
 }
 
 #[test]

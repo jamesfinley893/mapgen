@@ -49,10 +49,10 @@ fn is_channel(tile: &Tile) -> bool {
 fn ocean_color(world: &World, tile: &Tile) -> Rgba<u8> {
     let depth = (world.sea_level - tile.raw_elevation).max(0.0);
     let shelf_t = (1.0 - smoothstep(0.0, 0.048, depth)).clamp(0.0, 1.0);
-    let deep_t = smoothstep(0.06, 0.26, depth).clamp(0.0, 1.0);
-    let shelf_color = Rgba([58, 132, 182, 255]);
-    let ocean_color = Rgba([38, 84, 148, 255]);
-    let abyss_color = Rgba([18, 46, 102, 255]);
+    let deep_t = smoothstep(0.06, 0.26, depth).clamp(0.0, 1.0) * 0.78;
+    let shelf_color = Rgba([62, 136, 180, 255]);
+    let ocean_color = Rgba([42, 90, 150, 255]);
+    let abyss_color = Rgba([26, 58, 116, 255]);
     let mut color = lerp_rgba(
         lerp_rgba(ocean_color, shelf_color, shelf_t),
         abyss_color,
@@ -76,19 +76,21 @@ fn ocean_color(world: &World, tile: &Tile) -> Rgba<u8> {
         color = lerp_rgba(color, Rgba([78, 156, 190, 255]), shore * 0.26);
     }
 
+    color = apply_water_texture(color, tile, shore, deep_t);
+
     color
 }
 
 fn freshwater_color(tile: &Tile) -> Rgba<u8> {
     let shallow = Rgba([86, 144, 156, 255]);
-    let deep = Rgba([34, 84, 108, 255]);
+    let deep = Rgba([42, 94, 118, 255]);
     let depth_t = smoothstep(0.05, 0.80, tile.lake_depth.clamp(0.0, 1.0));
     let mut color = lerp_rgba(shallow, deep, depth_t);
     let shore = tile.shore_influence.clamp(0.0, 1.0);
     if shore > 0.0 {
         color = lerp_rgba(color, Rgba([96, 166, 170, 255]), shore * 0.30);
     }
-    color
+    apply_water_texture(color, tile, shore, depth_t)
 }
 
 fn land_color(world: &World, tile: &Tile) -> Rgba<u8> {
@@ -161,14 +163,33 @@ fn apply_landform_style(
             offset(lerp_rgba(color, Rgba([70, 128, 88, 255]), strength), -3)
         }
         Landform::Ridge => {
-            let strength = (0.16 + rugged * 0.10).clamp(0.16, 0.28);
-            offset(lerp_rgba(color, Rgba([150, 142, 122, 255]), strength), 5)
+            let strength = (0.12 + rugged * 0.08).clamp(0.12, 0.22);
+            offset(lerp_rgba(color, Rgba([142, 134, 116, 255]), strength), 2)
         }
         Landform::Peak => {
-            let strength = (0.24 + rugged * 0.14).clamp(0.24, 0.38);
-            offset(lerp_rgba(color, Rgba([190, 190, 182, 255]), strength), 8)
+            let strength = (0.18 + rugged * 0.10).clamp(0.18, 0.30);
+            offset(lerp_rgba(color, Rgba([172, 170, 160, 255]), strength), 4)
         }
         Landform::Basin => offset(lerp_rgba(color, Rgba([158, 146, 88, 255]), 0.14), -4),
+    }
+}
+
+fn apply_water_texture(color: Rgba<u8>, tile: &Tile, shore: f32, depth_t: f32) -> Rgba<u8> {
+    let texture = tile.terrain_texture.clamp(0.0, 1.0) - 0.5;
+    if texture.abs() <= 0.001 {
+        return color;
+    }
+
+    let gain = (0.10 + shore * 0.08 + depth_t * 0.06).clamp(0.08, 0.22);
+    let shimmer = scale_rgb(color, (1.0 + texture * gain).clamp(0.88, 1.12));
+    if shore > 0.18 {
+        lerp_rgba(
+            shimmer,
+            Rgba([82, 158, 184, 255]),
+            shore * texture.max(0.0) * 0.10,
+        )
+    } else {
+        shimmer
     }
 }
 
@@ -244,13 +265,13 @@ fn visual_land_biome(tile: &Tile) -> Biome {
 fn alpine_color(height_above_sea: f32, rugged: f32) -> Rgba<u8> {
     let alpine_t = smoothstep(0.24, 0.70, height_above_sea);
     lerp_rgba(
-        lerp_rgba(Rgba([82, 84, 84, 255]), Rgba([108, 106, 100, 255]), rugged),
+        lerp_rgba(Rgba([88, 88, 84, 255]), Rgba([116, 110, 98, 255]), rugged),
         lerp_rgba(
-            Rgba([166, 166, 160, 255]),
-            Rgba([186, 186, 180, 255]),
+            Rgba([148, 146, 136, 255]),
+            Rgba([170, 166, 154, 255]),
             rugged,
         ),
-        (alpine_t * 0.86 + rugged * 0.14).clamp(0.0, 1.0),
+        (alpine_t * 0.72 + rugged * 0.16).clamp(0.0, 1.0),
     )
 }
 
@@ -271,8 +292,8 @@ fn coast_color(tile: &Tile) -> Rgba<u8> {
 
 fn shade_factor(biome: Biome, shade: f32) -> f32 {
     match biome {
-        Biome::Alpine => 0.56 + shade * 0.70,
-        Biome::Foothills => 0.58 + shade * 0.66,
+        Biome::Alpine => 0.66 + shade * 0.54,
+        Biome::Foothills => 0.63 + shade * 0.55,
         _ => 0.66 + shade * 0.56,
     }
 }
@@ -284,10 +305,10 @@ fn apply_mountain_feature(
     rugged: f32,
 ) -> Rgba<u8> {
     match feature {
-        MountainFeature::Summit => offset(color, (14.0 + shade * 12.0) as i16),
-        MountainFeature::Ridge => offset(color, (6.0 + rugged * 10.0 + shade * 5.0) as i16),
-        MountainFeature::AlpineSlope => offset(color, (rugged * 5.0) as i16),
-        MountainFeature::Foothill => offset(color, (rugged * 3.0) as i16),
+        MountainFeature::Summit => offset(color, (7.0 + shade * 7.0) as i16),
+        MountainFeature::Ridge => offset(color, (3.0 + rugged * 6.0 + shade * 3.0) as i16),
+        MountainFeature::AlpineSlope => offset(color, (rugged * 3.0) as i16),
+        MountainFeature::Foothill => offset(color, (rugged * 2.0) as i16),
         MountainFeature::None => color,
     }
 }
@@ -298,11 +319,11 @@ fn tile_snow_cover(world: &World, tile: &Tile) -> f32 {
     let (snow_line, melt_band, max_cover) = match tile.biome {
         Biome::Alpine => {
             let (line_offset, max_cover) = match tile.mountain_feature {
-                MountainFeature::Summit => (0.04, 0.58),
-                MountainFeature::Ridge => (0.08, 0.34),
+                MountainFeature::Summit => (0.04, 0.48),
+                MountainFeature::Ridge => (0.08, 0.26),
                 MountainFeature::AlpineSlope
                 | MountainFeature::None
-                | MountainFeature::Foothill => (0.10, 0.16),
+                | MountainFeature::Foothill => (0.10, 0.10),
             };
             let snow_line = (world.sea_level + 0.28 + tile.temperature * 0.20 + line_offset)
                 .min(world.sea_level + 0.56);
@@ -314,7 +335,7 @@ fn tile_snow_cover(world: &World, tile: &Tile) -> f32 {
             }
             let snow_line =
                 (world.sea_level + 0.34 + tile.temperature * 0.14).min(world.sea_level + 0.54);
-            (snow_line, 0.12, 0.12)
+            (snow_line, 0.12, 0.08)
         }
         Biome::Tundra | Biome::PolarDesert => {
             if tile.temperature > 0.16 || height_above_sea < 0.28 {
@@ -322,7 +343,7 @@ fn tile_snow_cover(world: &World, tile: &Tile) -> f32 {
             }
             let snow_line =
                 (world.sea_level + 0.32 + tile.temperature * 0.16).min(world.sea_level + 0.52);
-            (snow_line, 0.14, 0.42)
+            (snow_line, 0.14, 0.34)
         }
         _ => return 0.0,
     };

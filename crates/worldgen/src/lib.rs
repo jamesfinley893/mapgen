@@ -141,6 +141,8 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(stages.contains(&"terrain: tectonic sampling"));
+        assert!(stages.contains(&"terrain: bathymetry detail"));
+        assert!(stages.contains(&"terrain: alpine breakup"));
         assert!(stages.contains(&"hydrology"));
         assert!(stages.contains(&"biomes"));
         assert!(profile.total_duration() > std::time::Duration::ZERO);

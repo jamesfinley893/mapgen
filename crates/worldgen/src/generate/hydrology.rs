@@ -655,6 +655,31 @@ fn low_gradient_route_bias(
     let scale = base_scale.clamp(min_scale, max_scale);
     let vx = value_noise(world.seed ^ 0x6CA1_33B5_7E91_22A7, x, y, scale) * 2.0 - 1.0;
     let vy = value_noise(world.seed ^ 0xB28D_F413_09AC_4E7B, x, y, scale) * 2.0 - 1.0;
+    let meander_scale = ((scale as f32 * 0.42).round() as usize).clamp(
+        (5.0 * density).round().max(5.0) as usize,
+        (17.0 * density).round().max(17.0) as usize,
+    );
+    let mx = value_noise(
+        world.seed ^ 0x11D3_5EED_A631_49C5,
+        x.wrapping_add(direction.max(0) as usize * 3),
+        y,
+        meander_scale,
+    ) * 2.0
+        - 1.0;
+    let my = value_noise(
+        world.seed ^ 0xE6E0_3A7B_5C17_D91D,
+        x,
+        y.wrapping_add(direction.max(0) as usize * 5),
+        meander_scale,
+    ) * 2.0
+        - 1.0;
+    let turn_phase = value_noise(
+        world.seed ^ 0x7A5A_93D2_6B12_C04F,
+        x.wrapping_add(y / meander_scale.max(1)),
+        y.wrapping_add(x / meander_scale.max(1)),
+        meander_scale,
+    ) * 2.0
+        - 1.0;
     let distance = if dx != 0 && dy != 0 {
         std::f32::consts::SQRT_2
     } else {
@@ -664,13 +689,20 @@ fn low_gradient_route_bias(
     let dir_y = dy as f32 / distance;
     let vector_len = (vx * vx + vy * vy).sqrt().max(0.001);
     let planform_alignment = ((vx * dir_x + vy * dir_y) / vector_len).clamp(-1.0, 1.0) * 0.5 + 0.5;
+    let meander_len = (mx * mx + my * my).sqrt().max(0.001);
+    let meander_alignment = ((mx * dir_x + my * dir_y) / meander_len).clamp(-1.0, 1.0) * 0.5 + 0.5;
+    let cross = (dir_x * vy - dir_y * vx).clamp(-1.0, 1.0);
+    let turn_preference = (cross * turn_phase).clamp(-1.0, 1.0) * 0.5 + 0.5;
     let local_jitter = hash01(
         world.seed ^ 0xA5E1_F10D_7723_4B91,
         x.wrapping_mul(17).wrapping_add(direction.max(0) as usize),
         y.wrapping_mul(17).wrapping_add(direction.max(0) as usize),
     );
-    let tie_breaker = planform_alignment * 0.72 + local_jitter * 0.28;
-    let amplitude = (gradient * 0.46 + 0.000060).min(0.00078);
+    let tie_breaker = planform_alignment * 0.50
+        + meander_alignment * 0.22
+        + turn_preference * 0.16
+        + local_jitter * 0.12;
+    let amplitude = (gradient * 0.56 + 0.000075).min(0.00105);
 
     tie_breaker * amplitude
 }
