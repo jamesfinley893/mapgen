@@ -20,7 +20,7 @@ pub fn mountain_feature_for_tile(world: &World, idx: usize) -> MountainFeature {
 
 pub fn permanent_snow_cover(world: &World, idx: usize) -> f32 {
     let tile = &world.tiles[idx];
-    let height_above_sea = (tile.raw_elevation - world.sea_level).max(0.0);
+    let height_above_sea = (tile.elevation - world.sea_level).max(0.0);
 
     let (snow_line, melt_band, max_cover) = match tile.biome {
         Biome::Alpine => {
@@ -54,13 +54,13 @@ pub fn permanent_snow_cover(world: &World, idx: usize) -> f32 {
         _ => return 0.0,
     };
 
-    ((tile.raw_elevation - snow_line) / melt_band).clamp(0.0, max_cover)
+    ((tile.elevation - snow_line) / melt_band).clamp(0.0, max_cover)
 }
 
 fn classify_alpine_feature(world: &World, idx: usize) -> MountainFeature {
     let tile = &world.tiles[idx];
     let (x, y) = world.coords(idx);
-    let elevation = tile.raw_elevation;
+    let elevation = tile.elevation;
     let height_above_sea = elevation - world.sea_level;
     let ruggedness = (tile.relief + tile.slope * 0.65).clamp(0.0, 1.0);
     let mut higher_neighbors = 0_u8;
@@ -71,15 +71,15 @@ fn classify_alpine_feature(world: &World, idx: usize) -> MountainFeature {
 
     for (nx, ny) in world.neighbors8(x, y) {
         let neighbor = &world.tiles[world.idx(nx, ny)];
-        min_elev = min_elev.min(neighbor.raw_elevation);
-        max_elev = max_elev.max(neighbor.raw_elevation);
+        min_elev = min_elev.min(neighbor.elevation);
+        max_elev = max_elev.max(neighbor.elevation);
         if matches!(neighbor.biome, Biome::Alpine) {
             alpine_neighbors += 1;
         }
-        if neighbor.raw_elevation > elevation + 0.004 {
+        if neighbor.elevation > elevation + 0.004 {
             higher_neighbors += 1;
         }
-        if elevation > neighbor.raw_elevation + 0.012 {
+        if elevation > neighbor.elevation + 0.012 {
             lower_neighbors += 1;
         }
     }
@@ -104,14 +104,13 @@ fn classify_alpine_feature(world: &World, idx: usize) -> MountainFeature {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Surface, Tile};
+    use crate::Tile;
 
     fn one_tile_world(biome: Biome, elevation: f32, temperature: f32) -> World {
         let mut world = World::new(1, 1, 1, 0.50, 0);
         world.tiles[0] = Tile {
-            raw_elevation: elevation,
+            elevation,
             temperature,
-            surface: Surface::Land,
             biome,
             ..Tile::default()
         };
@@ -134,9 +133,8 @@ mod tests {
         for (i, (x, y)) in coords.into_iter().enumerate() {
             let idx = world.idx(x, y);
             world.tiles[idx] = Tile {
-                raw_elevation: neighbor_elevations[i],
+                elevation: neighbor_elevations[i],
                 temperature: 0.04,
-                surface: Surface::Land,
                 biome: Biome::Alpine,
                 ..Tile::default()
             };
@@ -144,9 +142,8 @@ mod tests {
 
         let center = world.idx(1, 1);
         world.tiles[center] = Tile {
-            raw_elevation: center_elevation,
+            elevation: center_elevation,
             temperature: 0.04,
-            surface: Surface::Land,
             biome: Biome::Alpine,
             ..Tile::default()
         };

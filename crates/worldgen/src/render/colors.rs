@@ -31,7 +31,7 @@ fn tile_land_color(
     let (x, y) = world.coords(idx);
     let mut color = biome_color_climatic(biome, tile.temperature, moisture);
     if biome != Biome::Ocean {
-        let height_above_sea = (tile.raw_elevation - world.sea_level).max(0.0);
+        let height_above_sea = (tile.elevation - world.sea_level).max(0.0);
         if matches!(biome, Biome::Alpine) {
             let alpine_t = ((height_above_sea - 0.36) / 0.08).clamp(0.0, 1.0);
             let rugged = smoothstep(0.020, 0.080, tile.relief + tile.slope * 0.75);

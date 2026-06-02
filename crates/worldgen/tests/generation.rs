@@ -1,8 +1,8 @@
 use std::sync::OnceLock;
 
 use worldgen::{
-    Biome, MountainFeature, RenderConfig, Surface, Tile, World, WorldConfig, build_metadata,
-    generate_world, mountain_feature_for_tile, render_world,
+    Biome, MountainFeature, Tile, World, WorldConfig, build_metadata, generate_world,
+    mountain_feature_for_tile, render_world,
 };
 
 fn config() -> WorldConfig {
@@ -10,7 +10,6 @@ fn config() -> WorldConfig {
         seed: 99,
         width: 128,
         height: 128,
-        render_scale: 2,
         ..WorldConfig::default()
     }
 }
@@ -20,7 +19,6 @@ fn fixed_config(seed: u64) -> WorldConfig {
         seed,
         width: 256,
         height: 256,
-        render_scale: 2,
         ..WorldConfig::default()
     }
 }
@@ -54,16 +52,8 @@ fn fixed_world(seed: u64) -> &'static World {
 #[test]
 fn worlds_contain_land_and_ocean() {
     let world = generate_world(&config()).unwrap();
-    let land = world
-        .tiles
-        .iter()
-        .filter(|tile| tile.surface != Surface::Ocean)
-        .count();
-    let ocean = world
-        .tiles
-        .iter()
-        .filter(|tile| tile.surface == Surface::Ocean)
-        .count();
+    let land = world.tiles.iter().filter(|tile| tile.is_land()).count();
+    let ocean = world.tiles.iter().filter(|tile| tile.is_ocean()).count();
 
     assert!(land > 0);
     assert!(ocean > 0);
@@ -78,7 +68,7 @@ fn ocean_tiles_are_boundary_connected() {
     for x in 0..world.width {
         for y in [0, world.height - 1] {
             let idx = world.idx(x, y);
-            if world.tiles[idx].surface == Surface::Ocean && !visited[idx] {
+            if world.tiles[idx].is_ocean() && !visited[idx] {
                 visited[idx] = true;
                 queue.push_back(idx);
             }
@@ -87,7 +77,7 @@ fn ocean_tiles_are_boundary_connected() {
     for y in 0..world.height {
         for x in [0, world.width - 1] {
             let idx = world.idx(x, y);
-            if world.tiles[idx].surface == Surface::Ocean && !visited[idx] {
+            if world.tiles[idx].is_ocean() && !visited[idx] {
                 visited[idx] = true;
                 queue.push_back(idx);
             }
@@ -98,7 +88,7 @@ fn ocean_tiles_are_boundary_connected() {
         let (x, y) = world.coords(idx);
         for (nx, ny) in world.neighbors8(x, y) {
             let nidx = world.idx(nx, ny);
-            if !visited[nidx] && world.tiles[nidx].surface == Surface::Ocean {
+            if !visited[nidx] && world.tiles[nidx].is_ocean() {
                 visited[nidx] = true;
                 queue.push_back(nidx);
             }
@@ -106,22 +96,24 @@ fn ocean_tiles_are_boundary_connected() {
     }
 
     for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.surface == Surface::Ocean {
+        if tile.is_ocean() {
             assert!(visited[idx], "found inland ocean tile at index {idx}");
         }
     }
 }
 
 #[test]
-fn generated_worlds_use_only_ocean_coast_and_land_surfaces() {
+fn generated_worlds_have_ocean_coast_and_land_tiles() {
     for seed in [42_u64, 97, 3000, 7073116918442829777, 12302556654306610728] {
         let world = fixed_world(seed);
-        for tile in &world.tiles {
-            assert!(matches!(
-                tile.surface,
-                Surface::Ocean | Surface::Coast | Surface::Land
-            ));
-        }
+        assert!(world.tiles.iter().any(|tile| tile.is_ocean()));
+        assert!(world.tiles.iter().any(|tile| tile.is_coast()));
+        assert!(
+            world
+                .tiles
+                .iter()
+                .any(|tile| tile.is_land() && !tile.is_coast())
+        );
     }
 }
 
@@ -131,7 +123,7 @@ fn coast_tiles_touch_ocean() {
     let mut coasts = 0_usize;
 
     for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.surface != Surface::Coast {
+        if !tile.is_coast() {
             continue;
         }
         coasts += 1;
@@ -139,7 +131,7 @@ fn coast_tiles_touch_ocean() {
         assert!(
             world
                 .neighbors8(x, y)
-                .any(|(nx, ny)| world.tiles[world.idx(nx, ny)].surface == Surface::Ocean),
+                .any(|(nx, ny)| world.tiles[world.idx(nx, ny)].is_ocean()),
             "coast tile {idx} is not adjacent to ocean"
         );
     }
@@ -195,7 +187,7 @@ fn exported_tiles_include_bounded_geology_context() {
             "tile {idx} continentality out of range: {}",
             tile.continentality
         );
-        if tile.surface == Surface::Ocean {
+        if tile.is_ocean() {
             assert_eq!(tile.ocean_distance, 0);
         } else {
             assert!(tile.ocean_distance > 0);
@@ -238,7 +230,6 @@ fn rainfall_scale_changes_precipitation() {
         seed: 42,
         width: 128,
         height: 128,
-        render_scale: 2,
         rainfall_scale: 0.65,
         ..WorldConfig::default()
     };
@@ -258,11 +249,7 @@ fn rainfall_scale_changes_precipitation() {
 #[test]
 fn seed_42_does_not_collapse_into_alpine_blanket() {
     let world = fixed_world(42);
-    let land_tiles = world
-        .tiles
-        .iter()
-        .filter(|tile| tile.surface != Surface::Ocean)
-        .count();
+    let land_tiles = world.tiles.iter().filter(|tile| tile.is_land()).count();
     let alpine_tiles = world
         .tiles
         .iter()
@@ -299,10 +286,10 @@ fn lowlands_are_not_overwhelmingly_woodland_and_tundra() {
         let mut lowland = 0_usize;
         let mut dominant = 0_usize;
         for tile in &world.tiles {
-            if tile.surface == Surface::Ocean {
+            if tile.is_ocean() {
                 continue;
             }
-            if tile.raw_elevation > world.sea_level + 0.18
+            if tile.elevation > world.sea_level + 0.18
                 || matches!(tile.biome, Biome::Alpine | Biome::Foothills)
             {
                 continue;
@@ -380,7 +367,7 @@ fn fixed_seed_set_includes_multiple_major_landmasses() {
 #[test]
 fn render_world_produces_expected_dimensions() {
     let world = render_test_world(5, 5);
-    let image = render_world(&world, RenderConfig { scale: 6 });
+    let image = render_world(&world, 6);
     assert_eq!(image.width(), 30);
     assert_eq!(image.height(), 30);
 }
@@ -391,21 +378,19 @@ fn tiny_coastal_islets_do_not_draw_checkerboard_coastline() {
     let mut world = render_test_world(5, 5);
     for tile in &mut world.tiles {
         *tile = Tile {
-            surface: Surface::Ocean,
             biome: Biome::Ocean,
-            raw_elevation: 0.30,
+            elevation: 0.30,
             ..Tile::default()
         };
     }
     let islet = world.idx(2, 2);
     world.tiles[islet] = Tile {
-        surface: Surface::Coast,
         biome: Biome::Coast,
-        raw_elevation: 0.53,
+        elevation: 0.53,
         ..Tile::default()
     };
 
-    let image = render_world(&world, RenderConfig { scale });
+    let image = render_world(&world, scale);
     let coastline = [218, 210, 158, 255];
     for py in 0..scale {
         for px in 0..scale {
@@ -431,9 +416,8 @@ fn render_test_world(width: usize, height: usize) -> World {
     let mut world = World::new(7, width, height, 0.50, 0);
     for tile in &mut world.tiles {
         *tile = Tile {
-            surface: Surface::Land,
             biome: Biome::TemperateGrassland,
-            raw_elevation: 0.56,
+            elevation: 0.56,
             temperature: 0.55,
             moisture: 0.35,
             ..Tile::default()
@@ -454,7 +438,7 @@ fn center_vs_outer_land_fraction(world: &World) -> (f32, f32) {
 
     for y in 0..world.height {
         for x in 0..world.width {
-            let land = world.tiles[world.idx(x, y)].surface != Surface::Ocean;
+            let land = world.tiles[world.idx(x, y)].is_land();
             if (x0..x1).contains(&x) && (y0..y1).contains(&y) {
                 center_total += 1;
                 center_land += land as usize;
@@ -478,7 +462,7 @@ fn edge_land_fractions(world: &World, band: usize) -> [f32; 4] {
 
     for y in 0..world.height {
         for x in 0..world.width {
-            let is_land = world.tiles[world.idx(x, y)].surface != Surface::Ocean;
+            let is_land = world.tiles[world.idx(x, y)].is_land();
             if y < band {
                 total[0] += 1;
                 land[0] += is_land as usize;
@@ -507,7 +491,7 @@ fn edge_land_fractions(world: &World, band: usize) -> [f32; 4] {
 }
 
 fn major_landmass_count(world: &World, min_area: usize) -> usize {
-    component_count(world, min_area, |tile| tile.surface != Surface::Ocean)
+    component_count(world, min_area, |tile| tile.is_land())
 }
 
 fn mountain_component_count(world: &World, min_area: usize) -> usize {

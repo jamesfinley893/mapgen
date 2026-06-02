@@ -4,16 +4,7 @@ use noise::OpenSimplex;
 
 use crate::{World, WorldConfig};
 
-use super::terrain::TerrainFields;
 use super::util::{hash01, latitude_factor, normalize, octave_noise, smoothstep};
-
-pub(crate) struct ClimateFields {
-    pub(crate) temperature: Vec<f32>,
-    pub(crate) moisture: Vec<f32>,
-    pub(crate) precipitation: Vec<f32>,
-    pub(crate) ocean_distance: Vec<u16>,
-    pub(crate) continentality: Vec<f32>,
-}
 
 struct ClimateSampleInputs<'a> {
     ocean: &'a [bool],
@@ -23,45 +14,36 @@ struct ClimateSampleInputs<'a> {
     regional_continentality: &'a [f32],
 }
 
-pub(super) fn generate_climate_fields(
-    world: &World,
+pub(super) fn generate_climate(
+    world: &mut World,
     config: &WorldConfig,
-    terrain: &TerrainFields,
     ocean: &[bool],
-    distance_to_ocean: &[u16],
     climate: &OpenSimplex,
-) -> ClimateFields {
+) {
+    let distance_to_ocean = fill_ocean_distance(world, ocean);
     let nearby_water = compute_nearby_water(world, ocean);
     let regional_continentality = compute_regional_continentality(world, ocean);
     let inputs = ClimateSampleInputs {
         ocean,
-        distance_to_ocean,
+        distance_to_ocean: &distance_to_ocean,
         climate,
         nearby_water: &nearby_water,
         regional_continentality: &regional_continentality,
     };
-    sample_climate_fields(world, config, terrain, &inputs)
+    sample_climate_fields(world, config, &inputs);
 }
 
 fn sample_climate_fields(
-    world: &World,
+    world: &mut World,
     config: &WorldConfig,
-    terrain: &TerrainFields,
     inputs: &ClimateSampleInputs<'_>,
-) -> ClimateFields {
-    let mut out = ClimateFields {
-        temperature: vec![0.0; world.tile_count()],
-        moisture: vec![0.0; world.tile_count()],
-        precipitation: vec![0.0; world.tile_count()],
-        ocean_distance: inputs.distance_to_ocean.to_vec(),
-        continentality: inputs.regional_continentality.to_vec(),
-    };
+) {
     let wind_tilt = prevailing_wind_angle(world.seed);
 
     for y in 0..world.height {
         for x in 0..world.width {
             let idx = world.idx(x, y);
-            let elevation = terrain.elevation[idx];
+            let elevation = world.tiles[idx].elevation;
             let lat = latitude_factor(y, world.height);
             let wind = wind_at_latitude(wind_tilt, lat);
             let climate_noise = octave_noise(
@@ -102,16 +84,17 @@ fn sample_climate_fields(
                 regional_continentality: inputs.regional_continentality,
                 wind,
             };
-            let moisture = (moisture_value(world, terrain, &fields, x, y) * config.rainfall_scale
+            let moisture = (moisture_value(world, &fields, x, y) * config.rainfall_scale
                 + config.moisture_bias)
                 .clamp(0.0, 1.0);
-            out.temperature[idx] = temperature;
-            out.moisture[idx] = moisture;
-            out.precipitation[idx] = moisture;
+            let tile = &mut world.tiles[idx];
+            tile.temperature = temperature;
+            tile.moisture = moisture;
+            tile.precipitation = moisture;
+            tile.ocean_distance = inputs.distance_to_ocean[idx];
+            tile.continentality = inputs.regional_continentality[idx];
         }
     }
-
-    out
 }
 
 fn compute_nearby_water(world: &World, ocean: &[bool]) -> Vec<f32> {
@@ -206,13 +189,7 @@ struct MoistureFields<'a> {
     wind: (f32, f32),
 }
 
-fn moisture_value(
-    world: &World,
-    terrain: &TerrainFields,
-    fields: &MoistureFields<'_>,
-    x: usize,
-    y: usize,
-) -> f32 {
+fn moisture_value(world: &World, fields: &MoistureFields<'_>, x: usize, y: usize) -> f32 {
     let idx = world.idx(x, y);
     if fields.ocean[idx] {
         return 1.0;
@@ -221,7 +198,7 @@ fn moisture_value(
     let ocean_influence = 1.0
         - (fields.distance_to_ocean[idx] as f32 / (world.width.max(world.height) as f32 * 0.45))
             .clamp(0.0, 1.0);
-    let shadow = rain_shadow(world, terrain, fields.ocean, fields.wind, x, y);
+    let shadow = rain_shadow(world, fields.ocean, fields.wind, x, y);
     let lat = latitude_factor(y, world.height);
     // Wider transitions break the sharp moisture stripe at the Hadley cell boundary.
     let subtropical_dryness = smoothstep(0.12, 0.36, lat) * (1.0_f32 - smoothstep(0.40, 0.66, lat));
@@ -247,7 +224,7 @@ fn moisture_value(
         2.0,
     );
     let continentality = fields.regional_continentality[idx];
-    let lowland = 1.0 - ((terrain.elevation[idx] - world.sea_level) / 0.24).clamp(0.0, 1.0);
+    let lowland = 1.0 - ((world.tiles[idx].elevation - world.sea_level) / 0.24).clamp(0.0, 1.0);
 
     // Shift weight from the latitude-band (zonal) and directional rain-shadow terms toward
     // noise, so biome zones are geographically varied rather than strict horizontal bands.
@@ -279,14 +256,7 @@ fn wind_at_latitude(world_tilt: f32, lat: f32) -> (f32, f32) {
     normalize((zonal * c, zonal * s))
 }
 
-fn rain_shadow(
-    world: &World,
-    terrain: &TerrainFields,
-    ocean: &[bool],
-    wind: (f32, f32),
-    x: usize,
-    y: usize,
-) -> f32 {
+fn rain_shadow(world: &World, ocean: &[bool], wind: (f32, f32), x: usize, y: usize) -> f32 {
     // Scan upwind for a moisture source, accumulating terrain barriers along the way.
     let upwind = (-wind.0, -wind.1);
     let mut moisture = 0.0_f32;
@@ -307,7 +277,7 @@ fn rain_shadow(
             found_ocean = true;
             break;
         }
-        barrier += (terrain.elevation[nidx] - world.sea_level).max(0.0) * 0.09;
+        barrier += (world.tiles[nidx].elevation - world.sea_level).max(0.0) * 0.09;
     }
 
     if !found_ocean {

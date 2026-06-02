@@ -81,12 +81,6 @@ struct OrogenFields {
     basin_bias: Vec<f32>,
 }
 
-pub(crate) struct TerrainFields {
-    pub(crate) elevation: Vec<f32>,
-    pub(crate) slope: Vec<f32>,
-    pub(crate) relief: Vec<f32>,
-}
-
 struct NeighborStats {
     avg_neighbor: f32,
     count: f32,
@@ -94,11 +88,7 @@ struct NeighborStats {
     ocean_neighbors: f32,
 }
 
-pub(super) fn generate_terrain_fields(
-    world: &World,
-    base: &OpenSimplex,
-    ridge: &OpenSimplex,
-) -> TerrainFields {
+pub(super) fn generate_terrain(world: &mut World, base: &OpenSimplex, ridge: &OpenSimplex) {
     let fields = sample_orogen_fields(world, base, ridge);
     let mut elevation = fields.initial_terrain();
 
@@ -107,53 +97,46 @@ pub(super) fn generate_terrain_fields(
     apply_tectonic_equilibrium(world, ridge, &fields, &mut elevation);
     apply_mountain_crag_detail(world, ridge, &fields, &mut elevation);
 
-    let mut terrain = TerrainFields::from_elevation(elevation);
-    refresh_derived_fields(world, &mut terrain);
-    terrain
+    finalize_sea_level(world, &elevation);
+    commit_terrain(world, &elevation);
 }
 
-pub(super) fn apply_terrain_mutators(_world: &World, _terrain: &mut TerrainFields) {
-    // Extension point for future landscape mutators such as erosion. Mutators should
-    // edit terrain fields before ocean/surface/climate/biome classification runs.
-}
+fn commit_terrain(world: &mut World, elevation: &[f32]) {
+    let mut slopes = vec![0.0_f32; world.tile_count()];
+    let mut relief = vec![0.0_f32; world.tile_count()];
 
-pub(super) fn refresh_derived_fields(world: &World, terrain: &mut TerrainFields) {
     for idx in 0..world.tile_count() {
-        let current = terrain.elevation[idx];
+        let current = elevation[idx];
         let mut min_elev = current;
         let mut max_elev = current;
         let mut max_delta = 0.0_f32;
 
         for nidx in world.neighbor_indices8(idx) {
-            let neighbor = terrain.elevation[nidx];
+            let neighbor = elevation[nidx];
             min_elev = min_elev.min(neighbor);
             max_elev = max_elev.max(neighbor);
             max_delta = max_delta.max((current - neighbor).abs());
         }
 
-        terrain.slope[idx] = max_delta.clamp(0.0, 1.0);
-        terrain.relief[idx] = (max_elev - min_elev).clamp(0.0, 1.0);
+        slopes[idx] = max_delta.clamp(0.0, 1.0);
+        relief[idx] = (max_elev - min_elev).clamp(0.0, 1.0);
+    }
+
+    for idx in 0..world.tile_count() {
+        let tile = &mut world.tiles[idx];
+        tile.elevation = elevation[idx];
+        tile.slope = slopes[idx];
+        tile.relief = relief[idx];
     }
 }
 
-pub(super) fn finalize_sea_level(world: &mut World, terrain: &TerrainFields) {
+fn finalize_sea_level(world: &mut World, elevation: &[f32]) {
     const MIN_LAND_FRAC: f32 = 0.25;
-    let mut elevs = terrain.elevation.clone();
+    let mut elevs = elevation.to_vec();
     elevs.sort_by(|a, b| a.total_cmp(b));
     let threshold_idx =
         ((elevs.len() as f32 * (1.0 - MIN_LAND_FRAC)) as usize).min(elevs.len().saturating_sub(1));
     world.sea_level = world.sea_level.min(elevs[threshold_idx]);
-}
-
-impl TerrainFields {
-    fn from_elevation(elevation: Vec<f32>) -> Self {
-        let tile_count = elevation.len();
-        Self {
-            elevation,
-            slope: vec![0.0; tile_count],
-            relief: vec![0.0; tile_count],
-        }
-    }
 }
 
 impl OrogenFields {

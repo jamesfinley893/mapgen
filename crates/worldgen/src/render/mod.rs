@@ -10,13 +10,8 @@ mod shading;
 
 use crate::{Biome, World};
 
-#[derive(Debug, Clone, Copy)]
-pub struct RenderConfig {
-    pub scale: u32,
-}
-
-pub fn render_world(world: &World, config: RenderConfig) -> RgbaImage {
-    let scale = config.scale.max(1);
+pub fn render_world(world: &World, scale: u32) -> RgbaImage {
+    let scale = scale.max(1);
     let width = world.width as u32 * scale;
     let height = world.height as u32 * scale;
     let mut image = RgbaImage::new(width, height);
@@ -83,7 +78,7 @@ fn draw_ocean_tile(
 ) {
     let tile = &world.tiles[idx];
     let variation = hash01(world.seed, x, y);
-    let depth = (world.sea_level - tile.raw_elevation).max(0.0);
+    let depth = (world.sea_level - tile.elevation).max(0.0);
     let shelf_t = (1.0 - smoothstep(0.0, 0.048, depth)).clamp(0.0, 1.0);
     let deep_t = smoothstep(0.06, 0.26, depth).clamp(0.0, 1.0);
     let shelf_color = Rgba([58, 132, 182, 255]);

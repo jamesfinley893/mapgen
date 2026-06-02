@@ -9,8 +9,8 @@ pub use config::WorldConfig;
 pub use features::{mountain_feature_for_tile, permanent_snow_cover};
 pub use generate::{biome_for_tile, generate_world};
 pub use metadata::{WorldMetadata, build_metadata};
-pub use render::{RenderConfig, render_world};
-pub use world::{Biome, MountainFeature, Surface, Tile, World};
+pub use render::render_world;
+pub use world::{Biome, MountainFeature, Tile, World};
 
 #[cfg(test)]
 mod tests {
@@ -21,7 +21,6 @@ mod tests {
             seed: 42,
             width: 96,
             height: 96,
-            render_scale: 2,
             ..WorldConfig::default()
         }
     }
@@ -32,29 +31,32 @@ mod tests {
         let b = generate_world(&test_config()).unwrap();
         assert_eq!(a.tiles.len(), b.tiles.len());
         for (left, right) in a.tiles.iter().zip(b.tiles.iter()) {
-            assert_eq!(left.surface, right.surface);
             assert_eq!(left.biome, right.biome);
-            assert!((left.raw_elevation - right.raw_elevation).abs() < f32::EPSILON);
+            assert!((left.elevation - right.elevation).abs() < f32::EPSILON);
         }
     }
 
     #[test]
     fn biome_thresholds_are_stable() {
         assert_eq!(
-            biome_for_tile(Surface::Land, 0.6, 0.5, 0.8, 0.9),
+            biome_for_tile(false, false, 0.6, 0.5, 0.8, 0.9),
             Biome::Rainforest
         );
         assert_eq!(
-            biome_for_tile(Surface::Land, 0.58, 0.5, 0.45, 0.12),
+            biome_for_tile(false, false, 0.58, 0.5, 0.45, 0.12),
             Biome::Desert
         );
         assert_eq!(
-            biome_for_tile(Surface::Land, 0.9, 0.5, 0.4, 0.5),
+            biome_for_tile(false, false, 0.9, 0.5, 0.4, 0.5),
             Biome::Alpine
         );
         assert_eq!(
-            biome_for_tile(Surface::Ocean, 0.1, 0.5, 0.4, 0.5),
+            biome_for_tile(true, false, 0.1, 0.5, 0.4, 0.5),
             Biome::Ocean
+        );
+        assert_eq!(
+            biome_for_tile(false, true, 0.55, 0.5, 0.4, 0.5),
+            Biome::Coast
         );
     }
 

@@ -1,13 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Surface {
-    Ocean,
-    Coast,
-    Land,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Biome {
     Ocean,
     Coast,
@@ -39,7 +32,7 @@ pub enum MountainFeature {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Tile {
-    pub raw_elevation: f32,
+    pub elevation: f32,
     pub slope: f32,
     pub relief: f32,
     pub temperature: f32,
@@ -47,7 +40,6 @@ pub struct Tile {
     pub precipitation: f32,
     pub continentality: f32,
     pub ocean_distance: u16,
-    pub surface: Surface,
     pub biome: Biome,
     pub mountain_feature: MountainFeature,
 }
@@ -55,7 +47,7 @@ pub struct Tile {
 impl Default for Tile {
     fn default() -> Self {
         Self {
-            raw_elevation: 0.0,
+            elevation: 0.0,
             slope: 0.0,
             relief: 0.0,
             temperature: 0.0,
@@ -63,10 +55,23 @@ impl Default for Tile {
             precipitation: 0.0,
             continentality: 0.0,
             ocean_distance: u16::MAX,
-            surface: Surface::Ocean,
             biome: Biome::Ocean,
             mountain_feature: MountainFeature::None,
         }
+    }
+}
+
+impl Tile {
+    pub fn is_ocean(&self) -> bool {
+        self.biome == Biome::Ocean
+    }
+
+    pub fn is_coast(&self) -> bool {
+        self.biome == Biome::Coast
+    }
+
+    pub fn is_land(&self) -> bool {
+        !self.is_ocean()
     }
 }
 
@@ -138,5 +143,17 @@ impl World {
     pub fn neighbor_indices8(&self, idx: usize) -> impl Iterator<Item = usize> + '_ {
         let (x, y) = self.coords(idx);
         self.neighbors8(x, y).map(|(nx, ny)| self.idx(nx, ny))
+    }
+
+    pub fn is_ocean(&self, idx: usize) -> bool {
+        self.tiles[idx].is_ocean()
+    }
+
+    pub fn is_coast(&self, idx: usize) -> bool {
+        self.tiles[idx].is_coast()
+    }
+
+    pub fn is_land(&self, idx: usize) -> bool {
+        self.tiles[idx].is_land()
     }
 }

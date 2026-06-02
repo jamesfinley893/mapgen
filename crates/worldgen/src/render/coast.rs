@@ -1,6 +1,6 @@
 use image::{Rgba, RgbaImage};
 
-use crate::{Surface, World};
+use crate::World;
 
 const COASTLINE_COLOR: Rgba<u8> = Rgba([218, 210, 158, 255]);
 
@@ -18,7 +18,7 @@ pub(super) fn draw_coastline(image: &mut RgbaImage, world: &World, idx: usize, s
             continue;
         }
         let neighbor = &world.tiles[world.idx(nx as usize, ny as usize)];
-        if neighbor.surface == Surface::Ocean {
+        if neighbor.is_ocean() {
             draw_coastline_edge(image, x, y, scale, edge);
         }
     }

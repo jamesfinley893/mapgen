@@ -1,11 +1,9 @@
-use crate::{Biome, Surface, World};
-
-use super::climate::ClimateFields;
-use super::terrain::TerrainFields;
+use crate::{Biome, World};
 
 #[derive(Clone, Copy)]
 struct BiomeContext {
-    surface: Surface,
+    is_ocean: bool,
+    is_coast: bool,
     elevation: f32,
     sea_level: f32,
     temperature: f32,
@@ -23,42 +21,36 @@ struct NeighborSupportSpec {
     partial_weight: f32,
 }
 
-pub(super) fn assign_biomes(
-    world: &World,
-    terrain: &TerrainFields,
-    climate: &ClimateFields,
-    surfaces: &[Surface],
-) -> Vec<Biome> {
-    (0..world.tile_count())
-        .map(|idx| biome_for_world_tile(world, terrain, climate, surfaces, idx))
-        .collect()
+pub(super) fn assign_biomes(world: &mut World) {
+    let biomes = (0..world.tile_count())
+        .map(|idx| biome_for_world_tile(world, idx))
+        .collect::<Vec<_>>();
+
+    for (tile, biome) in world.tiles.iter_mut().zip(biomes.into_iter()) {
+        tile.biome = biome;
+    }
 }
 
-fn biome_for_world_tile(
-    world: &World,
-    terrain: &TerrainFields,
-    climate: &ClimateFields,
-    surfaces: &[Surface],
-    idx: usize,
-) -> Biome {
+fn biome_for_world_tile(world: &World, idx: usize) -> Biome {
+    let tile = &world.tiles[idx];
     biome_for_tile_with_support(BiomeContext {
-        surface: surfaces[idx],
-        elevation: terrain.elevation[idx],
+        is_ocean: tile.is_ocean(),
+        is_coast: tile.is_coast(),
+        elevation: tile.elevation,
         sea_level: world.sea_level,
-        temperature: climate.temperature[idx],
-        moisture: climate.moisture[idx],
-        support: mountain_support(world, terrain, idx),
-        proximity: mountain_proximity(world, terrain, idx),
-        relief: terrain.relief[idx],
+        temperature: tile.temperature,
+        moisture: tile.moisture,
+        support: mountain_support(world, idx),
+        proximity: mountain_proximity(world, idx),
+        relief: tile.relief,
     })
 }
 
-fn mountain_support(world: &World, terrain: &TerrainFields, idx: usize) -> f32 {
+fn mountain_support(world: &World, idx: usize) -> f32 {
     let high_threshold = world.sea_level + 0.24;
     let alpine_threshold = world.sea_level + 0.34;
     weighted_neighbor_support(
         world,
-        terrain,
         idx,
         NeighborSupportSpec {
             radius: 2,
@@ -73,12 +65,11 @@ fn mountain_support(world: &World, terrain: &TerrainFields, idx: usize) -> f32 {
     )
 }
 
-fn mountain_proximity(world: &World, terrain: &TerrainFields, idx: usize) -> f32 {
+fn mountain_proximity(world: &World, idx: usize) -> f32 {
     let alpine_threshold = world.sea_level + 0.38;
     let ridge_threshold = world.sea_level + 0.32;
     weighted_neighbor_support(
         world,
-        terrain,
         idx,
         NeighborSupportSpec {
             radius: 4,
@@ -95,7 +86,6 @@ fn mountain_proximity(world: &World, terrain: &TerrainFields, idx: usize) -> f32
 
 fn weighted_neighbor_support(
     world: &World,
-    terrain: &TerrainFields,
     idx: usize,
     spec: NeighborSupportSpec,
     weight_for: impl Fn(isize, isize) -> f32,
@@ -116,7 +106,7 @@ fn weighted_neighbor_support(
             }
             let nidx = world.idx(nx as usize, ny as usize);
             let weight = weight_for(dx, dy);
-            let elev = terrain.elevation[nidx];
+            let elev = world.tiles[nidx].elevation;
             total += weight;
             if elev > spec.full_threshold {
                 support += weight;
@@ -134,14 +124,16 @@ fn weighted_neighbor_support(
 }
 
 pub fn biome_for_tile(
-    surface: Surface,
+    is_ocean: bool,
+    is_coast: bool,
     elevation: f32,
     sea_level: f32,
     temperature: f32,
     moisture: f32,
 ) -> Biome {
     biome_for_tile_with_support(BiomeContext {
-        surface,
+        is_ocean,
+        is_coast,
         elevation,
         sea_level,
         temperature,
@@ -153,10 +145,12 @@ pub fn biome_for_tile(
 }
 
 fn biome_for_tile_with_support(ctx: BiomeContext) -> Biome {
-    match ctx.surface {
-        Surface::Ocean => Biome::Ocean,
-        Surface::Coast => Biome::Coast,
-        Surface::Land => land_biome_with_support(ctx),
+    if ctx.is_ocean {
+        Biome::Ocean
+    } else if ctx.is_coast {
+        Biome::Coast
+    } else {
+        land_biome_with_support(ctx)
     }
 }
 

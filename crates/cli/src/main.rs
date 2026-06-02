@@ -7,13 +7,12 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::FormatItem;
 use time::macros::format_description;
-use worldgen::{RenderConfig, World, WorldConfig, build_metadata, generate_world, render_world};
+use worldgen::{World, WorldConfig, build_metadata, generate_world, render_world};
 
-const TILES_SCHEMA_VERSION: u32 = 4;
+const TILES_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Serialize, Deserialize)]
 struct TileExport {
-    #[serde(default)]
     schema_version: u32,
     #[serde(flatten)]
     world: World,
@@ -109,9 +108,7 @@ fn run_render(args: RenderArgs) -> Result<(), String> {
     validate_render_world(&world)?;
     let image = render_world(
         &world,
-        RenderConfig {
-            scale: render_scale_for_dimensions(world.width, world.height),
-        },
+        render_scale_for_dimensions(world.width, world.height),
     );
     let out_path = run_dir.join("rerendered.png");
     image
@@ -138,13 +135,19 @@ fn run_generate(args: GenerateArgs) -> Result<(), String> {
         temperature_bias: args.temperature_bias,
         moisture_bias: args.moisture_bias,
         rainfall_scale: args.rainfall_scale,
-        render_scale,
         world_size,
     };
     config.validate()?;
 
     let world = generate_world(&config)?;
-    write_generation_outputs(&args.out_dir, seed, world, &config, args.export_tiles)
+    write_generation_outputs(
+        &args.out_dir,
+        seed,
+        world,
+        &config,
+        render_scale,
+        args.export_tiles,
+    )
 }
 
 fn tiles_path_from_input(input: &Path) -> PathBuf {
@@ -187,14 +190,10 @@ fn write_generation_outputs(
     seed: u64,
     world: World,
     config: &WorldConfig,
+    render_scale: u32,
     export_tiles: bool,
 ) -> Result<(), String> {
-    let image = render_world(
-        &world,
-        RenderConfig {
-            scale: config.render_scale,
-        },
-    );
+    let image = render_world(&world, render_scale);
     let metadata = build_metadata(&world, config);
     let run_dir = build_run_output_dir(out_dir, seed, OffsetDateTime::now_utc())?;
     let png_path = run_dir.join("map.png");
@@ -334,19 +333,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_tile_export_without_schema_version_deserializes_as_version_zero() {
-        let world = World::new(7, 2, 2, 0.52, 0);
-        let json = serde_json::to_string(&world).unwrap();
-        let export: TileExport = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(export.schema_version, 0);
-        assert_eq!(export.world.seed, 7);
-        assert_eq!(export.world.tiles.len(), 4);
+    fn current_tile_export_schema_is_version_five() {
+        assert_eq!(TILES_SCHEMA_VERSION, 5);
     }
 
     #[test]
-    fn current_tile_export_schema_is_version_four() {
-        assert_eq!(TILES_SCHEMA_VERSION, 4);
+    fn tile_export_requires_schema_version() {
+        let world = World::new(7, 2, 2, 0.52, 0);
+        let json = serde_json::to_string(&world).unwrap();
+        assert!(serde_json::from_str::<TileExport>(&json).is_err());
     }
 
     #[test]

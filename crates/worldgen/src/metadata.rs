@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{Biome, Surface, World, WorldConfig};
+use crate::{Biome, World, WorldConfig};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldMetadata {
@@ -11,7 +11,6 @@ pub struct WorldMetadata {
     pub temperature_bias: f32,
     pub moisture_bias: f32,
     pub rainfall_scale: f32,
-    pub render_scale: u32,
     pub world_size: u32,
     pub effective_world_size: f32,
     pub land_tiles: usize,
@@ -50,7 +49,6 @@ pub fn build_metadata(world: &World, config: &WorldConfig) -> WorldMetadata {
         temperature_bias: config.temperature_bias,
         moisture_bias: config.moisture_bias,
         rainfall_scale: config.rainfall_scale,
-        render_scale: config.render_scale,
         world_size: config.world_size,
         effective_world_size: world.effective_world_size(),
         land_tiles: tile_summary.land_tiles,
@@ -81,8 +79,8 @@ fn collect_tile_summary(world: &World) -> TileSummary {
     let mut counts = std::collections::BTreeMap::<String, (Biome, usize)>::new();
 
     for tile in &world.tiles {
-        highest_elevation = highest_elevation.max(tile.raw_elevation);
-        if tile.surface == Surface::Ocean {
+        highest_elevation = highest_elevation.max(tile.elevation);
+        if tile.is_ocean() {
             ocean_tiles += 1;
         } else {
             land_tiles += 1;

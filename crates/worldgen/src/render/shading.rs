@@ -85,7 +85,7 @@ pub(super) fn draw_tile_hillshaded(
                 let coarse = hash01(world.seed ^ 0x95A7_1D41, gx / 5, gy / 5);
                 let fine = hash01(world.seed ^ 0x2C67_54ED, gx / 2, gy / 2);
                 let grain = coarse * 0.72 + fine * 0.28 - 0.5;
-                let height_above_sea = (center_tile.raw_elevation - world.sea_level).max(0.0);
+                let height_above_sea = (center_tile.elevation - world.sea_level).max(0.0);
                 let relief = smoothstep(0.04, 0.34, height_above_sea);
                 let biome_strength = match center_biome {
                     Biome::Alpine | Biome::Foothills => 1.18,
@@ -108,7 +108,7 @@ pub(super) fn draw_tile_hillshaded(
 
 pub(super) fn compute_hillshade(world: &World, x: usize, y: usize) -> f32 {
     let center_biome = world.tiles[world.idx(x, y)].biome;
-    let center_elev = world.tiles[world.idx(x, y)].raw_elevation;
+    let center_elev = world.tiles[world.idx(x, y)].elevation;
     // Use the actual land elevation field across biome boundaries so the render
     // remains faithful to terrain height; clamp ocean neighbors to sea level.
     let get_elev = |xi: isize, yi: isize| -> f32 {
@@ -118,7 +118,7 @@ pub(super) fn compute_hillshade(world: &World, x: usize, y: usize) -> f32 {
         if neighbor.biome == Biome::Ocean {
             world.sea_level.min(center_elev)
         } else {
-            neighbor.raw_elevation
+            neighbor.elevation
         }
     };
     let xi = x as isize;
