@@ -1,5 +1,6 @@
 use noise::OpenSimplex;
 
+mod coast;
 mod commit;
 mod continents;
 mod detail;
@@ -10,6 +11,7 @@ mod tectonics;
 
 use crate::World;
 
+use coast::regularize_coastal_margins;
 use commit::{commit_terrain, finalize_sea_level};
 use detail::apply_mountain_crag_detail;
 use evolution::{apply_tectonic_equilibrium, relax_terrain};
@@ -26,5 +28,6 @@ pub(super) fn generate_terrain(world: &mut World, base: &OpenSimplex, ridge: &Op
     apply_mountain_crag_detail(world, ridge, &fields, &mut elevation);
 
     finalize_sea_level(world, &elevation);
+    regularize_coastal_margins(world, &mut elevation);
     commit_terrain(world, &elevation, &fields);
 }

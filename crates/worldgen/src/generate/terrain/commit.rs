@@ -41,7 +41,7 @@ pub(super) fn commit_terrain(world: &mut World, elevation: &[f32], fields: &Orog
 }
 
 pub(super) fn finalize_sea_level(world: &mut World, elevation: &[f32]) {
-    const MIN_LAND_FRAC: f32 = 0.25;
+    const MIN_LAND_FRAC: f32 = 0.40;
     let mut elevs = elevation.to_vec();
     elevs.sort_by(|a, b| a.total_cmp(b));
     let threshold_idx =

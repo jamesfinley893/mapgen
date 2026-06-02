@@ -86,7 +86,7 @@ fn ocean_tiles_are_boundary_connected() {
 
     while let Some(idx) = queue.pop_front() {
         let (x, y) = world.coords(idx);
-        for (nx, ny) in world.neighbors8(x, y) {
+        for (nx, ny) in cardinal_neighbors(&world, x, y) {
             let nidx = world.idx(nx, ny);
             if !visited[nidx] && world.tiles[nidx].is_ocean() {
                 visited[nidx] = true;
@@ -113,6 +113,24 @@ fn generated_worlds_have_ocean_coast_and_land_tiles() {
                 .tiles
                 .iter()
                 .any(|tile| tile.is_land() && !tile.is_coast())
+        );
+    }
+}
+
+#[test]
+fn fixed_seed_worlds_are_not_ocean_dominated() {
+    for seed in [42_u64, 97, 3000, 7073116918442829777, 12302556654306610728] {
+        let world = fixed_world(seed);
+        let ocean_tiles = world.tiles.iter().filter(|tile| tile.is_ocean()).count();
+        let ocean_fraction = ocean_tiles as f32 / world.tiles.len().max(1) as f32;
+
+        assert!(
+            ocean_fraction <= 0.62,
+            "world too ocean-dominated for seed {seed}: {ocean_fraction}"
+        );
+        assert!(
+            ocean_fraction >= 0.35,
+            "world has too little ocean for seed {seed}: {ocean_fraction}"
         );
     }
 }
@@ -465,6 +483,41 @@ fn fixed_seed_set_includes_multiple_major_landmasses() {
 }
 
 #[test]
+fn fixed_seed_coastlines_keep_smooth_continental_shape() {
+    for seed in [42_u64, 97, 3000, 7073116918442829777, 12302556654306610728] {
+        let world = fixed_world(seed);
+        let coast_tiles = world.tiles.iter().filter(|tile| tile.is_coast()).count();
+        let land_tiles = world.tiles.iter().filter(|tile| tile.is_land()).count();
+        let roughness = coastline_roughness(world);
+
+        assert!(coast_tiles > 0, "missing coastline for seed {seed}");
+        assert!(
+            roughness < 11.0,
+            "coastline too fragmented for seed {seed}: roughness={roughness}"
+        );
+        assert!(
+            coast_tiles < land_tiles / 2,
+            "too much land is one-tile coastline for seed {seed}: coast={coast_tiles} land={land_tiles}"
+        );
+    }
+}
+
+#[test]
+fn coastal_shelves_are_present_in_elevation_data() {
+    for seed in [42_u64, 97, 3000, 7073116918442829777, 12302556654306610728] {
+        let world = fixed_world(seed);
+        let (nearshore, shallow) = nearshore_ocean_depth_counts(world, 0.048);
+        let shallow_fraction = shallow as f32 / nearshore.max(1) as f32;
+
+        assert!(nearshore > 0, "missing nearshore ocean for seed {seed}");
+        assert!(
+            shallow_fraction > 0.80,
+            "nearshore shelf too sparse for seed {seed}: {shallow_fraction}"
+        );
+    }
+}
+
+#[test]
 fn render_world_produces_expected_dimensions() {
     let world = render_test_world(5, 5);
     let image = render_world(&world, 6);
@@ -592,6 +645,71 @@ fn edge_land_fractions(world: &World, band: usize) -> [f32; 4] {
         land[2] as f32 / total[2].max(1) as f32,
         land[3] as f32 / total[3].max(1) as f32,
     ]
+}
+
+fn coastline_roughness(world: &World) -> f32 {
+    let transitions = cardinal_land_ocean_transitions(world);
+    let land_tiles = world.tiles.iter().filter(|tile| tile.is_land()).count();
+    transitions as f32 / (land_tiles.max(1) as f32).sqrt()
+}
+
+fn cardinal_land_ocean_transitions(world: &World) -> usize {
+    let mut transitions = 0_usize;
+
+    for y in 0..world.height {
+        for x in 0..world.width {
+            let idx = world.idx(x, y);
+            let tile_is_ocean = world.tiles[idx].is_ocean();
+            if x + 1 < world.width {
+                let east_is_ocean = world.tiles[world.idx(x + 1, y)].is_ocean();
+                transitions += (tile_is_ocean != east_is_ocean) as usize;
+            }
+            if y + 1 < world.height {
+                let south_is_ocean = world.tiles[world.idx(x, y + 1)].is_ocean();
+                transitions += (tile_is_ocean != south_is_ocean) as usize;
+            }
+        }
+    }
+
+    transitions
+}
+
+fn nearshore_ocean_depth_counts(world: &World, max_depth: f32) -> (usize, usize) {
+    let mut nearshore = 0_usize;
+    let mut shallow = 0_usize;
+
+    for (idx, tile) in world.tiles.iter().enumerate() {
+        if !tile.is_ocean() {
+            continue;
+        }
+        let (x, y) = world.coords(idx);
+        if !world
+            .neighbors8(x, y)
+            .any(|(nx, ny)| world.tiles[world.idx(nx, ny)].is_land())
+        {
+            continue;
+        }
+        nearshore += 1;
+        shallow += ((world.sea_level - tile.elevation).max(0.0) <= max_depth) as usize;
+    }
+
+    (nearshore, shallow)
+}
+
+fn cardinal_neighbors(
+    world: &World,
+    x: usize,
+    y: usize,
+) -> impl Iterator<Item = (usize, usize)> + '_ {
+    [(-1_isize, 0_isize), (1, 0), (0, -1), (0, 1)]
+        .into_iter()
+        .filter_map(move |(dx, dy)| {
+            let nx = x as isize + dx;
+            let ny = y as isize + dy;
+            world
+                .in_bounds(nx, ny)
+                .then_some((nx as usize, ny as usize))
+        })
 }
 
 fn max_low_uplift_land_slope(world: &World) -> f32 {

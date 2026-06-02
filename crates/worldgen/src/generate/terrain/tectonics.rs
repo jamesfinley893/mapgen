@@ -80,19 +80,24 @@ pub(super) fn sample_tectonic_elevation(
 
     // Noise provides the broad-scale organic continent texture; lobe support shifts
     // which noise regions become land without replacing the noise signal entirely.
+    let margin_coherence = smoothstep(
+        0.18,
+        0.66,
+        continental.support + continental.interior * 0.20 - continental.ocean_basin * 0.18,
+    );
     let continental_density =
-        (continental.support * 0.36 + continent * 0.40 + shelves * 0.10 + craton * 0.12
+        (continental.support * 0.40 + continent * 0.34 + shelves * 0.12 + craton * 0.10
             - continental.ocean_basin * 0.18
             + continental.major_secondary_balance * 0.04)
             .clamp(0.0, 1.0);
     let continental_margin =
-        (continental.support * 0.42 + shelf_break * 0.20 + margin_variation * 0.16
-            - continental.ocean_basin * 0.20)
+        (continental.support * 0.48 + shelf_break * 0.20 + margin_variation * 0.18
+            - continental.ocean_basin * 0.22)
             .clamp(0.0, 1.0);
     let continent_mask = (continental_density * 0.72
-        + continental_margin * 0.12
+        + continental_margin * 0.16
         + continental.interior * 0.10
-        + plain_bands * 0.06)
+        + plain_bands * 0.03 * margin_coherence)
         .clamp(0.0, 1.0);
 
     let tectonics = sample_uplift_field(plates, xf, yf);
@@ -138,10 +143,11 @@ pub(super) fn sample_tectonic_elevation(
         * land_mask)
         .clamp(0.0, 1.0);
 
-    let basement = (continent_mask * 0.52
-        + plains * 0.12
-        + craton * 0.16
-        + plain_bands * 0.08
+    let margin_detail = smoothstep(0.30, 0.78, continent_mask);
+    let basement = (continent_mask * 0.54
+        + plains * (0.06 + margin_detail * 0.06)
+        + craton * (0.10 + continental.interior * 0.06)
+        + plain_bands * (0.03 + margin_detail * 0.05)
         + continental.interior * 0.08
         - basin_bias * 0.10
         - continental.ocean_basin * 0.12)
