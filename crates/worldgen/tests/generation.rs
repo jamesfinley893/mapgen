@@ -229,6 +229,27 @@ fn exported_tiles_include_bounded_geology_context() {
 }
 
 #[test]
+fn generator_does_not_emit_freshwater_without_hydrology() {
+    for seed in [42_u64, 97, 3000, 7073116918442829777, 12302556654306610728] {
+        let world = fixed_world(seed);
+        assert!(
+            world
+                .tiles
+                .iter()
+                .all(|tile| tile.water != WaterClass::Lake),
+            "generated lake tiles before lake hydrology for seed {seed}"
+        );
+        assert!(
+            world
+                .tiles
+                .iter()
+                .all(|tile| tile.biome != Biome::Freshwater),
+            "generated freshwater biomes before lake hydrology for seed {seed}"
+        );
+    }
+}
+
+#[test]
 fn tile_helpers_use_physical_water_fields() {
     let ocean_biome_land = Tile {
         water: WaterClass::Land,
@@ -335,6 +356,7 @@ fn lowlands_are_not_overwhelmingly_woodland_and_tundra() {
         let world = fixed_world(seed);
         let mut lowland = 0_usize;
         let mut dominant = 0_usize;
+        let mut biomes = Vec::new();
         for tile in &world.tiles {
             if tile.is_ocean() {
                 continue;
@@ -345,6 +367,9 @@ fn lowlands_are_not_overwhelmingly_woodland_and_tundra() {
                 continue;
             }
             lowland += 1;
+            if !biomes.contains(&tile.biome) {
+                biomes.push(tile.biome);
+            }
             if matches!(tile.biome, Biome::Woodland | Biome::Tundra) {
                 dominant += 1;
             }
@@ -353,6 +378,11 @@ fn lowlands_are_not_overwhelmingly_woodland_and_tundra() {
         assert!(
             fraction < 0.78,
             "lowland biome mix too narrow for seed {seed}: {fraction}"
+        );
+        assert!(
+            biomes.len() >= 4,
+            "lowland biome variety too narrow for seed {seed}: {:?}",
+            biomes
         );
     }
 }

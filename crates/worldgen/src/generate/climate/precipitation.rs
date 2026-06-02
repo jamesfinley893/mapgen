@@ -5,6 +5,10 @@ use crate::{World, WorldConfig};
 
 use super::fields::ClimateFields;
 
+const RAIN_SHADOW_WORLD_FRACTION: f32 = 0.28;
+const RAIN_SHADOW_MAP_FRACTION: f32 = 0.42;
+const MAX_RAIN_SHADOW_STEPS: usize = 192;
+
 pub(super) struct PrecipitationModel<'a> {
     fields: &'a ClimateFields,
     climate: &'a OpenSimplex,
@@ -42,10 +46,7 @@ impl<'a> PrecipitationModel<'a> {
             return 1.0;
         }
 
-        let ocean_influence = 1.0
-            - (self.fields.distance_to_ocean[idx] as f32
-                / (world.width.max(world.height) as f32 * 0.45))
-                .clamp(0.0, 1.0);
+        let maritime = self.fields.maritime_influence[idx];
         let shadow = rain_shadow(world, &self.fields.ocean, wind, x, y);
         // Wider transitions break the sharp moisture stripe at the Hadley cell boundary.
         let subtropical_dryness =
@@ -71,61 +72,93 @@ impl<'a> PrecipitationModel<'a> {
             0.55,
             2.0,
         );
-        let continentality = self.fields.regional_continentality[idx];
+        let continentality = self.fields.continentality[idx];
         let lowland = 1.0 - ((world.tiles[idx].elevation - world.sea_level) / 0.24).clamp(0.0, 1.0);
 
-        // Shift weight from the latitude-band (zonal) and directional rain-shadow terms toward
-        // noise, so biome zones are geographically varied rather than strict horizontal bands.
-        (ocean_influence * 0.34
+        // Keep latitude bands secondary to geography and noise so lowlands do not collapse
+        // into strict horizontal biome zones.
+        (maritime * 0.34
             + zonal * 0.18
             + noise * 0.22
             + monsoon * 0.08 * equatorial_wetness
             + shadow * 0.14
-            + self.fields.nearby_water[idx] * 0.16
             - continentality * 0.20 * (0.7 + subtropical_dryness * 0.45) * lowland)
             .clamp(0.0, 1.0)
     }
 }
 
-fn rain_shadow(world: &World, ocean: &[bool], wind: (f32, f32), x: usize, y: usize) -> f32 {
-    // Scan upwind for a moisture source, accumulating terrain barriers along the way.
-    let upwind = (-wind.0, -wind.1);
-    let mut moisture = 0.0_f32;
-    let mut barrier = 0.0_f32;
-    let mut found_ocean = false;
+struct WindScan {
+    ocean_fetch: f32,
+    barrier: f32,
+}
 
-    for step in 1_usize..=16 {
-        let nx = (x as f32 + upwind.0 * step as f32).round() as isize;
-        let ny = (y as f32 + upwind.1 * step as f32).round() as isize;
+fn rain_shadow(world: &World, ocean: &[bool], wind: (f32, f32), x: usize, y: usize) -> f32 {
+    // Scan upwind for ocean fetch while normalizing intervening terrain barriers by range.
+    let upwind = (-wind.0, -wind.1);
+    let scan_steps = rain_shadow_scan_steps(world);
+    let windward = scan_wind_path(world, ocean, upwind, x, y, scan_steps);
+    let leeward = if windward.ocean_fetch <= 0.02 {
+        scan_wind_path(world, ocean, wind, x, y, (scan_steps / 2).max(1)).ocean_fetch * 0.25
+    } else {
+        0.0
+    };
+
+    (windward.ocean_fetch + leeward - windward.barrier * 0.78).clamp(-0.65, 1.0)
+}
+
+fn scan_wind_path(
+    world: &World,
+    ocean: &[bool],
+    direction: (f32, f32),
+    x: usize,
+    y: usize,
+    scan_steps: usize,
+) -> WindScan {
+    let mut ocean_fetch = 0.0_f32;
+    let mut barrier = 0.0_f32;
+    let mut total_weight = 0.0_f32;
+
+    for step in 1..=scan_steps {
+        let nx = (x as f32 + direction.0 * step as f32).round() as isize;
+        let ny = (y as f32 + direction.1 * step as f32).round() as isize;
         if !world.in_bounds(nx, ny) {
             break;
         }
+
         let nidx = world.idx(nx as usize, ny as usize);
+        let proximity = 1.0 - smoothstep(0.0, 1.0, step as f32 / scan_steps as f32);
+        total_weight += proximity;
+
         if ocean[nidx] {
-            // Moisture decays with distance from coast so far-inland tiles still dry out.
-            let proximity = 1.0 - (step as f32 - 1.0) / 16.0;
-            moisture += 0.12 * proximity.max(0.03);
-            found_ocean = true;
-            break;
-        }
-        barrier += (world.tiles[nidx].elevation - world.sea_level).max(0.0) * 0.09;
-    }
-
-    if !found_ocean {
-        // Leeward scan: minor contribution from the downwind direction.
-        for step in 1_usize..=8 {
-            let nx = (x as f32 + wind.0 * step as f32).round() as isize;
-            let ny = (y as f32 + wind.1 * step as f32).round() as isize;
-            if !world.in_bounds(nx, ny) {
-                break;
-            }
-            let nidx = world.idx(nx as usize, ny as usize);
-            if ocean[nidx] {
-                moisture += 0.04;
-                break;
-            }
+            ocean_fetch += proximity;
+        } else {
+            let above_sea = (world.tiles[nidx].elevation - world.sea_level).max(0.0);
+            barrier += smoothstep(0.05, 0.45, above_sea) * proximity;
         }
     }
 
-    (moisture - barrier * 0.60).clamp(0.0, 1.0)
+    if total_weight <= f32::EPSILON {
+        WindScan {
+            ocean_fetch: 0.0,
+            barrier: 0.0,
+        }
+    } else {
+        WindScan {
+            ocean_fetch: (ocean_fetch / total_weight).clamp(0.0, 1.0),
+            barrier: (barrier / total_weight).clamp(0.0, 1.0),
+        }
+    }
+}
+
+fn rain_shadow_scan_steps(world: &World) -> usize {
+    let max_available = world.width.max(world.height).saturating_sub(1).max(1);
+    let min_steps = 8.min(max_available);
+    let max_steps = MAX_RAIN_SHADOW_STEPS.min(max_available).max(min_steps);
+    let world_steps = (world.effective_world_size() * RAIN_SHADOW_WORLD_FRACTION).round() as usize;
+    let map_steps =
+        (world.width.max(world.height) as f32 * RAIN_SHADOW_MAP_FRACTION).round() as usize;
+    world_steps
+        .min(map_steps)
+        .max(1)
+        .clamp(min_steps, max_steps)
 }

@@ -28,15 +28,15 @@ pub(super) fn sample_temperature(
     let lowland = 1.0 - ((elevation - world.sea_level) / 0.24).clamp(0.0, 1.0);
     let equatorial_warmth = (1.0 - lat.powf(1.08)).clamp(0.0, 1.0);
     let subtropical_cooling = smoothstep(0.16, 0.34, lat) * (1.0_f32 - smoothstep(0.46, 0.68, lat));
-    let nw = fields.nearby_water[idx];
-    let maritime_temp = nw * 0.06 + (1.0 - fields.regional_continentality[idx]) * 0.06;
+    let maritime_temp =
+        fields.maritime_influence[idx] * 0.08 + (1.0 - fields.continentality[idx]) * 0.04;
 
     (equatorial_warmth * 0.82 - subtropical_cooling * 0.04
         + climate_noise * 0.13
         + seasonal_noise * 0.08
         + maritime_temp
         - elevation * 0.34
-        - fields.regional_continentality[idx] * 0.07 * lowland
+        - fields.continentality[idx] * 0.07 * lowland
         + config.temperature_bias)
         .clamp(0.0, 1.0)
 }

@@ -37,7 +37,7 @@ pub(super) fn generate_climate(
             tile.moisture = precipitation;
             tile.precipitation = precipitation;
             tile.ocean_distance = fields.distance_to_ocean[idx];
-            tile.continentality = fields.regional_continentality[idx];
+            tile.continentality = fields.continentality[idx];
         }
     }
 }
