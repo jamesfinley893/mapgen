@@ -2,9 +2,28 @@ use noise::OpenSimplex;
 
 use crate::World;
 
-use super::continents::sample_continental_fields;
-use super::{ContinentalConfig, OrogenSample, Plate};
+use super::continents::{ContinentalConfig, sample_continental_fields};
 use crate::generate::util::{hash01, normalize, octave_noise, ridge_noise, smoothstep};
+
+#[derive(Clone, Copy)]
+pub(super) struct Plate {
+    x: f32,
+    y: f32,
+    vx: f32,
+    vy: f32,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct OrogenSample {
+    pub(super) basement: f32,
+    pub(super) axial_uplift: f32,
+    pub(super) shoulder_uplift: f32,
+    pub(super) plateau_support: f32,
+    pub(super) foreland_loading: f32,
+    pub(super) backarc_loading: f32,
+    pub(super) craton_stability: f32,
+    pub(super) basin_bias: f32,
+}
 
 pub(super) fn generate_plates(world: &World) -> Vec<Plate> {
     let ws = world.effective_world_size();

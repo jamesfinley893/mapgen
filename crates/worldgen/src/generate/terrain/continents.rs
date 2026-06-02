@@ -1,5 +1,39 @@
-use super::{ContinentalConfig, ContinentalFields, PreparedCut, PreparedLobe};
 use crate::generate::util::{hash01, smoothstep};
+
+pub(super) struct ContinentalFields {
+    pub(super) support: f32,
+    pub(super) interior: f32,
+    pub(super) seaway_cut: f32,
+    pub(super) ocean_basin: f32,
+    pub(super) major_secondary_balance: f32,
+}
+
+// Precomputed per-lobe parameters (seed-only, not tile-dependent).
+struct PreparedLobe {
+    cx: f32,
+    cy: f32,
+    sin_a: f32,
+    cos_a: f32,
+    rx: f32,
+    ry: f32,
+    strength: f32,
+}
+
+struct PreparedCut {
+    cx: f32,
+    cy: f32,
+    sin_a: f32,
+    cos_a: f32,
+    width: f32,
+    extent: f32,
+    strength: f32,
+}
+
+pub(super) struct ContinentalConfig {
+    land_lobes: Vec<PreparedLobe>,
+    basins: Vec<PreparedLobe>,
+    seaways: Vec<PreparedCut>,
+}
 
 pub(super) fn build_continental_config(
     seed: u64,
