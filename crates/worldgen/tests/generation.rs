@@ -202,6 +202,18 @@ fn exported_tiles_include_bounded_geology_context() {
             "tile {idx} continentality out of range: {}",
             tile.continentality
         );
+        for (field, value) in [
+            ("temperature", tile.temperature),
+            ("moisture", tile.moisture),
+            ("precipitation", tile.precipitation),
+        ] {
+            assert!(value.is_finite(), "tile {idx} {field} is not finite");
+            assert!(
+                (0.0..=1.0).contains(&value),
+                "tile {idx} {field} out of range: {value}"
+            );
+        }
+        assert_eq!(tile.moisture, tile.precipitation);
         if tile.is_ocean() {
             assert_eq!(tile.ocean_distance, 0);
         } else {
@@ -341,6 +353,26 @@ fn lowlands_are_not_overwhelmingly_woodland_and_tundra() {
         assert!(
             fraction < 0.78,
             "lowland biome mix too narrow for seed {seed}: {fraction}"
+        );
+    }
+}
+
+#[test]
+fn low_uplift_land_does_not_form_extreme_cliffs() {
+    for seed in [
+        42_u64,
+        97,
+        3000,
+        7073116918442829777,
+        12302556654306610728,
+        2113193422894607504,
+        16973655909001791133,
+    ] {
+        let world = generate_world(&fixed_config(seed)).unwrap();
+        let worst = max_low_uplift_land_slope(&world);
+        assert!(
+            worst < 0.09,
+            "low-uplift land has excessive slope for seed {seed}: {worst}"
         );
     }
 }
@@ -530,6 +562,15 @@ fn edge_land_fractions(world: &World, band: usize) -> [f32; 4] {
         land[2] as f32 / total[2].max(1) as f32,
         land[3] as f32 / total[3].max(1) as f32,
     ]
+}
+
+fn max_low_uplift_land_slope(world: &World) -> f32 {
+    world
+        .tiles
+        .iter()
+        .filter(|tile| tile.is_land() && tile.uplift < 0.08)
+        .map(|tile| tile.slope)
+        .fold(0.0_f32, f32::max)
 }
 
 fn major_landmass_count(world: &World, min_area: usize) -> usize {

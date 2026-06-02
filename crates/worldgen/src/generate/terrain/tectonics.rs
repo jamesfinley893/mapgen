@@ -80,17 +80,14 @@ pub(super) fn sample_tectonic_elevation(
 
     // Noise provides the broad-scale organic continent texture; lobe support shifts
     // which noise regions become land without replacing the noise signal entirely.
-    let seaway_land_cut = continental.seaway_cut * smoothstep(0.18, 0.62, continental.support);
     let continental_density =
         (continental.support * 0.36 + continent * 0.40 + shelves * 0.10 + craton * 0.12
             - continental.ocean_basin * 0.18
-            - seaway_land_cut * 0.14
             + continental.major_secondary_balance * 0.04)
             .clamp(0.0, 1.0);
     let continental_margin =
         (continental.support * 0.42 + shelf_break * 0.20 + margin_variation * 0.16
-            - continental.ocean_basin * 0.18
-            - seaway_land_cut * 0.14)
+            - continental.ocean_basin * 0.20)
             .clamp(0.0, 1.0);
     let continent_mask = (continental_density * 0.72
         + continental_margin * 0.12
@@ -136,7 +133,7 @@ pub(super) fn sample_tectonic_elevation(
         * land_mask)
         .clamp(0.0, 1.0);
     let basin_bias = (smoothstep(0.44, 0.82, basin_noise)
-        * (0.78 + seaway_land_cut * 0.34 + continental.ocean_basin * 0.18)
+        * (0.78 + continental.ocean_basin * 0.28)
         * (0.45 + (1.0 - boundary_narrow) * 0.4)
         * land_mask)
         .clamp(0.0, 1.0);
@@ -147,8 +144,7 @@ pub(super) fn sample_tectonic_elevation(
         + plain_bands * 0.08
         + continental.interior * 0.08
         - basin_bias * 0.10
-        - continental.ocean_basin * 0.10
-        - seaway_land_cut * 0.04)
+        - continental.ocean_basin * 0.12)
         .clamp(0.0, 1.0);
 
     OrogenSample {
@@ -164,29 +160,53 @@ pub(super) fn sample_tectonic_elevation(
 }
 
 fn sample_uplift_field(plates: &[Plate], xf: f32, yf: f32) -> f32 {
-    let mut best = (usize::MAX, f32::MAX, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
-    let mut second = (usize::MAX, f32::MAX, 0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
+    let mut total_weight = 0.0_f32;
+    let mut max_weight = 0.0_f32;
+    let mut mean_velocity = (0.0_f32, 0.0_f32);
 
-    for (i, plate) in plates.iter().enumerate() {
+    for plate in plates {
         let dx = xf - plate.x;
         let dy = yf - plate.y;
-        let dist2 = dx * dx + dy * dy;
-        if dist2 < best.1 {
-            second = best;
-            best = (i, dist2, dx, dy, plate.vx, plate.vy);
-        } else if dist2 < second.1 {
-            second = (i, dist2, dx, dy, plate.vx, plate.vy);
-        }
+        let weight = plate_influence(dx * dx + dy * dy);
+        total_weight += weight;
+        max_weight = max_weight.max(weight);
+        mean_velocity.0 += plate.vx * weight;
+        mean_velocity.1 += plate.vy * weight;
     }
 
-    let boundary_gap = (second.1.sqrt() - best.1.sqrt()).abs();
-    let boundary = (1.0 - smoothstep(0.012, 0.12, boundary_gap)).powf(1.65);
-    let normal = normalize((second.2 - best.2, second.3 - best.3));
-    let rel_velocity = (best.4 - second.4, best.5 - second.5);
-    let convergence =
-        ((rel_velocity.0 * normal.0 + rel_velocity.1 * normal.1) * 0.5 + 0.5).clamp(0.0, 1.0);
-    let shear = ((rel_velocity.0 * -normal.1 + rel_velocity.1 * normal.0).abs()).clamp(0.0, 1.0);
-    let orogeny = smoothstep(0.40, 0.90, convergence * 0.9 + shear * 0.18);
+    if total_weight <= f32::EPSILON {
+        return 0.0;
+    }
 
-    boundary * orogeny
+    mean_velocity.0 /= total_weight;
+    mean_velocity.1 /= total_weight;
+    let dominance = max_weight / total_weight;
+    let plate_mixing = (1.0 - dominance).clamp(0.0, 1.0);
+
+    let mut velocity_variance = 0.0_f32;
+    let mut convergence = 0.0_f32;
+    let mut shear = 0.0_f32;
+    for plate in plates {
+        let dx = xf - plate.x;
+        let dy = yf - plate.y;
+        let weight = plate_influence(dx * dx + dy * dy) / total_weight;
+        let relative_velocity = (plate.vx - mean_velocity.0, plate.vy - mean_velocity.1);
+        let radial = normalize((dx, dy));
+        velocity_variance += weight
+            * (relative_velocity.0 * relative_velocity.0
+                + relative_velocity.1 * relative_velocity.1);
+        convergence +=
+            weight * (relative_velocity.0 * radial.0 + relative_velocity.1 * radial.1).max(0.0);
+        shear += weight * (relative_velocity.0 * -radial.1 + relative_velocity.1 * radial.0).abs();
+    }
+
+    let mixed_boundary = smoothstep(0.18, 0.48, plate_mixing);
+    let strain = smoothstep(0.12, 0.56, velocity_variance.sqrt());
+    let compression = smoothstep(0.16, 0.58, convergence + shear * 0.16);
+
+    (mixed_boundary * strain * compression).clamp(0.0, 1.0)
+}
+
+fn plate_influence(dist2: f32) -> f32 {
+    1.0 / (dist2 + 0.006).powf(1.35)
 }

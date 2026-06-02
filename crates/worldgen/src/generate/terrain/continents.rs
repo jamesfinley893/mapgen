@@ -3,7 +3,6 @@ use crate::generate::util::{hash01, smoothstep};
 pub(super) struct ContinentalFields {
     pub(super) support: f32,
     pub(super) interior: f32,
-    pub(super) seaway_cut: f32,
     pub(super) ocean_basin: f32,
     pub(super) major_secondary_balance: f32,
 }
@@ -19,20 +18,9 @@ struct PreparedLobe {
     strength: f32,
 }
 
-struct PreparedCut {
-    cx: f32,
-    cy: f32,
-    sin_a: f32,
-    cos_a: f32,
-    width: f32,
-    extent: f32,
-    strength: f32,
-}
-
 pub(super) struct ContinentalConfig {
     land_lobes: Vec<PreparedLobe>,
     basins: Vec<PreparedLobe>,
-    seaways: Vec<PreparedCut>,
 }
 
 pub(super) fn build_continental_config(
@@ -42,10 +30,9 @@ pub(super) fn build_continental_config(
 ) -> ContinentalConfig {
     let world_area = world_units_x * world_units_y;
     let scale = world_area.sqrt();
-    // For a 1×1 world: 3–5 land lobes, 2–4 basins, 1–2 seaways. Scale counts with world size.
+    // For a 1×1 world: 3–5 land lobes and 2–4 basins. Scale counts with world size.
     let land_count = (3 + (seed as usize % 3)) + (scale * 2.0).floor() as usize;
     let basin_count = (2 + (seed.wrapping_mul(3) as usize % 3)) + (scale * 1.5).floor() as usize;
-    let seaway_count = (1 + (seed.wrapping_mul(5) as usize % 2)) + (scale * 0.8).floor() as usize;
 
     let mut land_lobes = Vec::with_capacity(land_count);
     for i in 0..land_count {
@@ -91,33 +78,7 @@ pub(super) fn build_continental_config(
         });
     }
 
-    let mut seaways = Vec::with_capacity(seaway_count);
-    for i in 0..seaway_count {
-        let cx = hash01(seed.wrapping_add(0x5EA0_1000), i * 5 + 1, 0) * (world_units_x * 1.4)
-            - world_units_x * 0.2;
-        let cy = hash01(seed.wrapping_add(0x5EA0_2000), i * 9 + 3, 0) * (world_units_y * 1.4)
-            - world_units_y * 0.2;
-        let angle = hash01(seed.wrapping_add(0x5EA0_3000), i * 13 + 5, 0) * std::f32::consts::TAU;
-        let width = 0.035 + hash01(seed.wrapping_add(0x5EA0_4000), i * 17 + 7, 0) * 0.09;
-        let extent = 0.28 + hash01(seed.wrapping_add(0x5EA0_5000), i * 19 + 9, 0) * 0.34;
-        let strength = 0.55 + hash01(seed.wrapping_add(0x5EA0_6000), i * 23 + 11, 0) * 0.30;
-        let (sin_a, cos_a) = angle.sin_cos();
-        seaways.push(PreparedCut {
-            cx,
-            cy,
-            sin_a,
-            cos_a,
-            width,
-            extent,
-            strength,
-        });
-    }
-
-    ContinentalConfig {
-        land_lobes,
-        basins,
-        seaways,
-    }
+    ContinentalConfig { land_lobes, basins }
 }
 
 pub(super) fn sample_continental_fields(
@@ -150,17 +111,11 @@ pub(super) fn sample_continental_fields(
         basin_max = basin_max.max(val);
     }
 
-    let mut seaway_cut = 0.0_f32;
-    for cut in &cfg.seaways {
-        seaway_cut = seaway_cut.max(eval_seaway(cut, xf, yf) * cut.strength);
-    }
-
     let dominant = strongest.clamp(0.0, 1.0);
     let secondary = second.clamp(0.0, 1.0);
     let blended =
         (dominant * 0.60 + secondary * 0.24 + (land_sum / land_count as f32).min(1.0) * 0.22
-            - basin_max * 0.22
-            - seaway_cut * 0.18)
+            - basin_max * 0.24)
             .clamp(0.0, 1.0);
     let support = (blended + (dominant - secondary).max(0.0) * 0.08).clamp(0.0, 1.0);
     let interior = ((interior_sum / land_count as f32) * 0.72 + dominant * 0.22 - basin_max * 0.10)
@@ -169,7 +124,6 @@ pub(super) fn sample_continental_fields(
     ContinentalFields {
         support,
         interior,
-        seaway_cut,
         ocean_basin: basin_max,
         major_secondary_balance: (secondary - dominant * 0.55).max(0.0),
     }
@@ -186,14 +140,4 @@ fn eval_lobe(lobe: &PreparedLobe, xf: f32, yf: f32, scale: f32) -> f32 {
     let ry = lobe.ry * scale;
     let radius = ((lx / rx).powi(2) + (ly / ry).powi(2)).sqrt();
     (1.0 - smoothstep(0.48, 1.40, radius)).clamp(0.0, 1.0)
-}
-
-fn eval_seaway(cut: &PreparedCut, xf: f32, yf: f32) -> f32 {
-    let dx = xf - cut.cx;
-    let dy = yf - cut.cy;
-    let along = dx * cut.cos_a + dy * cut.sin_a;
-    let perp = -dx * cut.sin_a + dy * cut.cos_a;
-    let width_term = 1.0 - smoothstep(cut.width * 0.55, cut.width, perp.abs());
-    let extent_term = 1.0 - smoothstep(cut.extent * 0.82, cut.extent, along.abs());
-    (width_term * extent_term).clamp(0.0, 1.0)
 }
