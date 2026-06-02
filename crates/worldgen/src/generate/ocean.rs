@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::{Biome, World};
+use crate::{WaterClass, World};
 
 pub(super) fn classify_ocean(world: &World) -> Vec<bool> {
     let mut ocean = vec![false; world.tile_count()];
@@ -32,15 +32,17 @@ pub(super) fn classify_ocean(world: &World) -> Vec<bool> {
 
 pub(super) fn mark_ocean_and_coast(world: &mut World, ocean: &[bool]) {
     for (idx, is_ocean) in ocean.iter().copied().enumerate().take(world.tile_count()) {
-        world.tiles[idx].biome = if is_ocean {
-            Biome::Ocean
+        let tile = &mut world.tiles[idx];
+        tile.water = if is_ocean {
+            WaterClass::Ocean
         } else {
-            Biome::TemperateGrassland
+            WaterClass::Land
         };
+        tile.coast = false;
     }
 
     for idx in 0..world.tile_count() {
-        if world.tiles[idx].is_ocean() {
+        if !world.tiles[idx].is_land() {
             continue;
         }
         let (x, y) = world.coords(idx);
@@ -48,7 +50,7 @@ pub(super) fn mark_ocean_and_coast(world: &mut World, ocean: &[bool]) {
             .neighbors8(x, y)
             .any(|(nx, ny)| world.tiles[world.idx(nx, ny)].is_ocean())
         {
-            world.tiles[idx].biome = Biome::Coast;
+            world.tiles[idx].coast = true;
         }
     }
 }

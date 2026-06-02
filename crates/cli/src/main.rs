@@ -9,7 +9,7 @@ use time::format_description::FormatItem;
 use time::macros::format_description;
 use worldgen::{World, WorldConfig, build_metadata, generate_world, render_world};
 
-const TILES_SCHEMA_VERSION: u32 = 5;
+const TILES_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Serialize, Deserialize)]
 struct TileExport {
@@ -98,10 +98,10 @@ fn run_render(args: RenderArgs) -> Result<(), String> {
     let export: TileExport =
         serde_json::from_str(&json).map_err(|err| format!("failed to parse tiles.json: {err}"))?;
     if export.schema_version != TILES_SCHEMA_VERSION {
-        eprintln!(
-            "warning: tiles.json schema version {} (current: {}); some fields may be missing or ignored",
+        return Err(format!(
+            "tiles.json schema version {} is not supported by this renderer (current: {})",
             export.schema_version, TILES_SCHEMA_VERSION
-        );
+        ));
     }
 
     let world = export.world;
@@ -333,8 +333,8 @@ mod tests {
     }
 
     #[test]
-    fn current_tile_export_schema_is_version_five() {
-        assert_eq!(TILES_SCHEMA_VERSION, 5);
+    fn current_tile_export_schema_is_version_six() {
+        assert_eq!(TILES_SCHEMA_VERSION, 6);
     }
 
     #[test]

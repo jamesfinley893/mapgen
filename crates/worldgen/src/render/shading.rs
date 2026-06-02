@@ -47,7 +47,7 @@ pub(super) fn draw_tile_hillshaded(
         let cy = cy.min(world.height.saturating_sub(1));
         // Land height is continuous across biome boundaries; only avoid blending
         // with ocean tiles, which use their own depth rendering.
-        if world.tiles[world.idx(cx, cy)].biome == Biome::Ocean {
+        if world.tiles[world.idx(cx, cy)].is_water() {
             h00
         } else {
             hillshade[world.idx(cx, cy)]
@@ -94,7 +94,7 @@ pub(super) fn draw_tile_hillshaded(
                     | Biome::Rainforest
                     | Biome::TropicalForest => 0.82,
                     Biome::Desert | Biome::PolarDesert => 0.74,
-                    Biome::Ocean => 0.0,
+                    Biome::Ocean | Biome::Freshwater => 0.0,
                     _ => 0.92,
                 };
                 let rugged = (center_tile.relief + center_tile.slope * 0.75).clamp(0.0, 1.0);
@@ -115,7 +115,7 @@ pub(super) fn compute_hillshade(world: &World, x: usize, y: usize) -> f32 {
         let cx = xi.clamp(0, world.width as isize - 1) as usize;
         let cy = yi.clamp(0, world.height as isize - 1) as usize;
         let neighbor = &world.tiles[world.idx(cx, cy)];
-        if neighbor.biome == Biome::Ocean {
+        if neighbor.is_water() {
             world.sea_level.min(center_elev)
         } else {
             neighbor.elevation

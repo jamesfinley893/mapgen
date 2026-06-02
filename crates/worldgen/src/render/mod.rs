@@ -8,7 +8,7 @@ mod coast;
 mod colors;
 mod shading;
 
-use crate::{Biome, World};
+use crate::World;
 
 pub fn render_world(world: &World, scale: u32) -> RgbaImage {
     let scale = scale.max(1);
@@ -52,7 +52,7 @@ fn draw_base_layer(
     for (idx, tile) in world.tiles.iter().enumerate() {
         let (x, y) = world.coords(idx);
 
-        if matches!(tile.biome, Biome::Ocean) {
+        if tile.is_ocean() {
             draw_ocean_tile(image, world, idx, x, y, scale);
         } else {
             draw_tile_hillshaded(
@@ -95,14 +95,14 @@ fn draw_ocean_tile(
 
 fn draw_land_features(image: &mut RgbaImage, world: &World, scale: u32) {
     for (idx, tile) in world.tiles.iter().enumerate() {
-        if tile.biome != Biome::Ocean {
+        if tile.is_land() {
             draw_coast_feature(image, world, idx, scale);
         }
     }
 }
 
 fn draw_coast_feature(image: &mut RgbaImage, world: &World, idx: usize, scale: u32) {
-    if world.tiles[idx].biome == Biome::Coast {
+    if world.tiles[idx].is_coast() {
         draw_coastline(image, world, idx, scale);
     }
 }

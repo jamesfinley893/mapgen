@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 use worldgen::{
-    Biome, MountainFeature, Tile, World, WorldConfig, build_metadata, generate_world,
+    Biome, MountainFeature, Tile, WaterClass, World, WorldConfig, build_metadata, generate_world,
     mountain_feature_for_tile, render_world,
 };
 
@@ -182,6 +182,21 @@ fn exported_tiles_include_bounded_geology_context() {
             "tile {idx} relief out of range: {}",
             tile.relief
         );
+        assert!(tile.uplift.is_finite(), "tile {idx} uplift is not finite");
+        assert!(
+            (0.0..=1.0).contains(&tile.uplift),
+            "tile {idx} uplift out of range: {}",
+            tile.uplift
+        );
+        assert!(
+            tile.mountain_presence.is_finite(),
+            "tile {idx} mountain_presence is not finite"
+        );
+        assert!(
+            (0.0..=1.0).contains(&tile.mountain_presence),
+            "tile {idx} mountain_presence out of range: {}",
+            tile.mountain_presence
+        );
         assert!(
             (0.0..=1.0).contains(&tile.continentality),
             "tile {idx} continentality out of range: {}",
@@ -191,12 +206,35 @@ fn exported_tiles_include_bounded_geology_context() {
             assert_eq!(tile.ocean_distance, 0);
         } else {
             assert!(tile.ocean_distance > 0);
+            assert_ne!(tile.biome, Biome::Ocean);
         }
+        assert!(!tile.is_coast() || tile.is_land());
         assert_eq!(
             tile.mountain_feature,
             mountain_feature_for_tile(&world, idx)
         );
     }
+}
+
+#[test]
+fn tile_helpers_use_physical_water_fields() {
+    let ocean_biome_land = Tile {
+        water: WaterClass::Land,
+        coast: true,
+        biome: Biome::Ocean,
+        ..Tile::default()
+    };
+    assert!(ocean_biome_land.is_land());
+    assert!(!ocean_biome_land.is_ocean());
+    assert!(ocean_biome_land.is_coast());
+
+    let forest_biome_ocean = Tile {
+        water: WaterClass::Ocean,
+        biome: Biome::TemperateForest,
+        ..Tile::default()
+    };
+    assert!(forest_biome_ocean.is_ocean());
+    assert!(!forest_biome_ocean.is_land());
 }
 
 #[test]
@@ -378,6 +416,7 @@ fn tiny_coastal_islets_do_not_draw_checkerboard_coastline() {
     let mut world = render_test_world(5, 5);
     for tile in &mut world.tiles {
         *tile = Tile {
+            water: WaterClass::Ocean,
             biome: Biome::Ocean,
             elevation: 0.30,
             ..Tile::default()
@@ -385,7 +424,9 @@ fn tiny_coastal_islets_do_not_draw_checkerboard_coastline() {
     }
     let islet = world.idx(2, 2);
     world.tiles[islet] = Tile {
-        biome: Biome::Coast,
+        water: WaterClass::Land,
+        coast: true,
+        biome: Biome::TemperateGrassland,
         elevation: 0.53,
         ..Tile::default()
     };
@@ -416,6 +457,7 @@ fn render_test_world(width: usize, height: usize) -> World {
     let mut world = World::new(7, width, height, 0.50, 0);
     for tile in &mut world.tiles {
         *tile = Tile {
+            water: WaterClass::Land,
             biome: Biome::TemperateGrassland,
             elevation: 0.56,
             temperature: 0.55,

@@ -2,19 +2,24 @@ use crate::{Biome, MountainFeature, World};
 
 pub fn mountain_feature_for_tile(world: &World, idx: usize) -> MountainFeature {
     let tile = &world.tiles[idx];
-    match tile.biome {
-        Biome::Foothills => MountainFeature::Foothill,
-        Biome::Alpine => {
-            if matches!(
-                tile.mountain_feature,
-                MountainFeature::AlpineSlope | MountainFeature::Ridge | MountainFeature::Summit
-            ) {
-                tile.mountain_feature
-            } else {
-                classify_alpine_feature(world, idx)
-            }
-        }
-        _ => MountainFeature::None,
+    if !tile.is_land() {
+        return MountainFeature::None;
+    }
+
+    let height_above_sea = tile.elevation - world.sea_level;
+    let ruggedness = (tile.relief + tile.slope * 0.65).clamp(0.0, 1.0);
+    if height_above_sea >= 0.34
+        && tile.mountain_presence >= 0.46
+        && (ruggedness > 0.022 || height_above_sea >= 0.42)
+    {
+        classify_alpine_feature(world, idx)
+    } else if height_above_sea >= 0.24
+        && tile.mountain_presence >= 0.22
+        && (ruggedness > 0.018 || tile.uplift >= 0.42)
+    {
+        MountainFeature::Foothill
+    } else {
+        MountainFeature::None
     }
 }
 
@@ -22,10 +27,9 @@ pub fn permanent_snow_cover(world: &World, idx: usize) -> f32 {
     let tile = &world.tiles[idx];
     let height_above_sea = (tile.elevation - world.sea_level).max(0.0);
 
-    let (snow_line, melt_band, max_cover) = match tile.biome {
-        Biome::Alpine => {
-            let feature = classify_alpine_feature(world, idx);
-            let (line_offset, max_cover) = match feature {
+    let (snow_line, melt_band, max_cover) = match tile.mountain_feature {
+        MountainFeature::Summit | MountainFeature::Ridge | MountainFeature::AlpineSlope => {
+            let (line_offset, max_cover) = match tile.mountain_feature {
                 MountainFeature::Summit => (0.00, 0.75),
                 MountainFeature::Ridge => (0.04, 0.48),
                 MountainFeature::AlpineSlope => (0.10, 0.22),
@@ -35,7 +39,7 @@ pub fn permanent_snow_cover(world: &World, idx: usize) -> f32 {
                 .min(world.sea_level + 0.56);
             (snow_line, 0.12, max_cover)
         }
-        Biome::Foothills => {
+        MountainFeature::Foothill => {
             if tile.temperature > 0.28 || height_above_sea < 0.34 {
                 return 0.0;
             }
@@ -43,7 +47,7 @@ pub fn permanent_snow_cover(world: &World, idx: usize) -> f32 {
                 (world.sea_level + 0.34 + tile.temperature * 0.14).min(world.sea_level + 0.54);
             (snow_line, 0.12, 0.18)
         }
-        Biome::Tundra | Biome::PolarDesert => {
+        MountainFeature::None if matches!(tile.biome, Biome::Tundra | Biome::PolarDesert) => {
             if tile.temperature > 0.16 || height_above_sea < 0.28 {
                 return 0.0;
             }
@@ -65,7 +69,7 @@ fn classify_alpine_feature(world: &World, idx: usize) -> MountainFeature {
     let ruggedness = (tile.relief + tile.slope * 0.65).clamp(0.0, 1.0);
     let mut higher_neighbors = 0_u8;
     let mut lower_neighbors = 0_u8;
-    let mut alpine_neighbors = 0_u8;
+    let mut mountain_neighbors = 0_u8;
     let mut min_elev = elevation;
     let mut max_elev = elevation;
 
@@ -73,8 +77,8 @@ fn classify_alpine_feature(world: &World, idx: usize) -> MountainFeature {
         let neighbor = &world.tiles[world.idx(nx, ny)];
         min_elev = min_elev.min(neighbor.elevation);
         max_elev = max_elev.max(neighbor.elevation);
-        if matches!(neighbor.biome, Biome::Alpine) {
-            alpine_neighbors += 1;
+        if neighbor.mountain_presence >= 0.46 && neighbor.is_land() {
+            mountain_neighbors += 1;
         }
         if neighbor.elevation > elevation + 0.004 {
             higher_neighbors += 1;
@@ -91,7 +95,7 @@ fn classify_alpine_feature(world: &World, idx: usize) -> MountainFeature {
     {
         MountainFeature::Summit
     } else if height_above_sea >= 0.34
-        && alpine_neighbors >= 2
+        && mountain_neighbors >= 2
         && (relief >= 0.022 || ruggedness >= 0.030)
         && higher_neighbors <= 3
     {
@@ -104,14 +108,23 @@ fn classify_alpine_feature(world: &World, idx: usize) -> MountainFeature {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Tile;
+    use crate::{Tile, WaterClass};
 
     fn one_tile_world(biome: Biome, elevation: f32, temperature: f32) -> World {
         let mut world = World::new(1, 1, 1, 0.50, 0);
+        let (mountain_presence, relief, mountain_feature) = match biome {
+            Biome::Alpine => (0.72, 0.04, MountainFeature::AlpineSlope),
+            Biome::Foothills => (0.40, 0.03, MountainFeature::Foothill),
+            _ => (0.0, 0.0, MountainFeature::None),
+        };
         world.tiles[0] = Tile {
             elevation,
+            relief,
+            mountain_presence,
             temperature,
+            water: WaterClass::Land,
             biome,
+            mountain_feature,
             ..Tile::default()
         };
         world
@@ -134,7 +147,9 @@ mod tests {
             let idx = world.idx(x, y);
             world.tiles[idx] = Tile {
                 elevation: neighbor_elevations[i],
+                mountain_presence: 0.72,
                 temperature: 0.04,
+                water: WaterClass::Land,
                 biome: Biome::Alpine,
                 ..Tile::default()
             };
@@ -143,7 +158,9 @@ mod tests {
         let center = world.idx(1, 1);
         world.tiles[center] = Tile {
             elevation: center_elevation,
+            mountain_presence: 0.78,
             temperature: 0.04,
+            water: WaterClass::Land,
             biome: Biome::Alpine,
             ..Tile::default()
         };

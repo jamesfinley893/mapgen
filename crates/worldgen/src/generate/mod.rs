@@ -9,7 +9,7 @@ use noise::OpenSimplex;
 use crate::features::mountain_feature_for_tile;
 use crate::{MountainFeature, World, WorldConfig};
 
-pub use biomes::biome_for_tile;
+pub use biomes::{BiomeInputs, biome_for_tile};
 pub(crate) use util::{hash01, smoothstep};
 
 pub fn generate_world(config: &WorldConfig) -> Result<World, String> {
@@ -30,9 +30,9 @@ pub fn generate_world(config: &WorldConfig) -> Result<World, String> {
     terrain::generate_terrain(&mut world, &base, &ridge);
     let ocean = ocean::classify_ocean(&world);
     ocean::mark_ocean_and_coast(&mut world, &ocean);
+    assign_mountain_features(&mut world);
     climate::generate_climate(&mut world, config, &ocean, &climate_noise);
     biomes::assign_biomes(&mut world);
-    assign_mountain_features(&mut world);
 
     Ok(world)
 }

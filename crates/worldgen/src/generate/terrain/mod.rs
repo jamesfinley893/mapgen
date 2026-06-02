@@ -98,10 +98,10 @@ pub(super) fn generate_terrain(world: &mut World, base: &OpenSimplex, ridge: &Op
     apply_mountain_crag_detail(world, ridge, &fields, &mut elevation);
 
     finalize_sea_level(world, &elevation);
-    commit_terrain(world, &elevation);
+    commit_terrain(world, &elevation, &fields);
 }
 
-fn commit_terrain(world: &mut World, elevation: &[f32]) {
+fn commit_terrain(world: &mut World, elevation: &[f32], fields: &OrogenFields) {
     let mut slopes = vec![0.0_f32; world.tile_count()];
     let mut relief = vec![0.0_f32; world.tile_count()];
 
@@ -127,7 +127,31 @@ fn commit_terrain(world: &mut World, elevation: &[f32]) {
         tile.elevation = elevation[idx];
         tile.slope = slopes[idx];
         tile.relief = relief[idx];
+        tile.uplift = orogenic_uplift_signal(fields, idx);
+        tile.mountain_presence = mountain_presence(
+            world.sea_level,
+            elevation[idx],
+            slopes[idx],
+            relief[idx],
+            tile.uplift,
+        );
     }
+}
+
+fn orogenic_uplift_signal(fields: &OrogenFields, idx: usize) -> f32 {
+    (fields.axial_uplift[idx] * 1.0
+        + fields.shoulder_uplift[idx] * 0.45
+        + fields.plateau_support[idx] * 0.30
+        - fields.basin_bias[idx] * 0.18)
+        .clamp(0.0, 1.0)
+}
+
+fn mountain_presence(sea_level: f32, elevation: f32, slope: f32, relief: f32, uplift: f32) -> f32 {
+    let height = (elevation - sea_level).max(0.0);
+    let highland = smoothstep(0.22, 0.42, height);
+    let rugged = smoothstep(0.018, 0.070, relief + slope * 0.72);
+    let tectonic = smoothstep(0.10, 0.62, uplift);
+    (highland * 0.52 + rugged * 0.24 + tectonic * 0.42 + highland * tectonic * 0.24).clamp(0.0, 1.0)
 }
 
 fn finalize_sea_level(world: &mut World, elevation: &[f32]) {

@@ -7,10 +7,10 @@ mod world;
 
 pub use config::WorldConfig;
 pub use features::{mountain_feature_for_tile, permanent_snow_cover};
-pub use generate::{biome_for_tile, generate_world};
+pub use generate::{BiomeInputs, biome_for_tile, generate_world};
 pub use metadata::{WorldMetadata, build_metadata};
 pub use render::render_world;
-pub use world::{Biome, MountainFeature, Tile, World};
+pub use world::{Biome, MountainFeature, Tile, WaterClass, World};
 
 #[cfg(test)]
 mod tests {
@@ -39,24 +39,62 @@ mod tests {
     #[test]
     fn biome_thresholds_are_stable() {
         assert_eq!(
-            biome_for_tile(false, false, 0.6, 0.5, 0.8, 0.9),
+            biome_for_tile(BiomeInputs {
+                elevation: 0.6,
+                temperature: 0.8,
+                moisture: 0.9,
+                ..BiomeInputs::default()
+            }),
             Biome::Rainforest
         );
         assert_eq!(
-            biome_for_tile(false, false, 0.58, 0.5, 0.45, 0.12),
+            biome_for_tile(BiomeInputs {
+                elevation: 0.58,
+                temperature: 0.45,
+                moisture: 0.12,
+                ..BiomeInputs::default()
+            }),
             Biome::Desert
         );
         assert_eq!(
-            biome_for_tile(false, false, 0.9, 0.5, 0.4, 0.5),
+            biome_for_tile(BiomeInputs {
+                elevation: 0.9,
+                temperature: 0.4,
+                moisture: 0.5,
+                mountain_feature: MountainFeature::AlpineSlope,
+                mountain_presence: 1.0,
+                ..BiomeInputs::default()
+            }),
             Biome::Alpine
         );
         assert_eq!(
-            biome_for_tile(true, false, 0.1, 0.5, 0.4, 0.5),
+            biome_for_tile(BiomeInputs {
+                water: WaterClass::Ocean,
+                elevation: 0.1,
+                temperature: 0.4,
+                moisture: 0.5,
+                ..BiomeInputs::default()
+            }),
             Biome::Ocean
         );
         assert_eq!(
-            biome_for_tile(false, true, 0.55, 0.5, 0.4, 0.5),
-            Biome::Coast
+            biome_for_tile(BiomeInputs {
+                water: WaterClass::Lake,
+                elevation: 0.4,
+                temperature: 0.4,
+                moisture: 1.0,
+                ..BiomeInputs::default()
+            }),
+            Biome::Freshwater
+        );
+        assert_eq!(
+            biome_for_tile(BiomeInputs {
+                elevation: 0.55,
+                temperature: 0.4,
+                moisture: 0.5,
+                ..BiomeInputs::default()
+            }),
+            Biome::Woodland
         );
     }
 

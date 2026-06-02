@@ -1,24 +1,32 @@
-use crate::{Biome, World};
+use crate::{Biome, MountainFeature, WaterClass, World};
 
 #[derive(Clone, Copy)]
-struct BiomeContext {
-    is_ocean: bool,
-    is_coast: bool,
-    elevation: f32,
-    sea_level: f32,
-    temperature: f32,
-    moisture: f32,
-    support: f32,
-    proximity: f32,
-    relief: f32,
+pub struct BiomeInputs {
+    pub water: WaterClass,
+    pub elevation: f32,
+    pub sea_level: f32,
+    pub temperature: f32,
+    pub moisture: f32,
+    pub mountain_feature: MountainFeature,
+    pub mountain_presence: f32,
+    pub mountain_proximity: f32,
+    pub relief: f32,
 }
 
-#[derive(Clone, Copy)]
-struct NeighborSupportSpec {
-    radius: isize,
-    full_threshold: f32,
-    partial_threshold: f32,
-    partial_weight: f32,
+impl Default for BiomeInputs {
+    fn default() -> Self {
+        Self {
+            water: WaterClass::Land,
+            elevation: 0.0,
+            sea_level: 0.5,
+            temperature: 0.0,
+            moisture: 0.0,
+            mountain_feature: MountainFeature::None,
+            mountain_presence: 0.0,
+            mountain_proximity: 0.0,
+            relief: 0.08,
+        }
+    }
 }
 
 pub(super) fn assign_biomes(world: &mut World) {
@@ -33,69 +41,26 @@ pub(super) fn assign_biomes(world: &mut World) {
 
 fn biome_for_world_tile(world: &World, idx: usize) -> Biome {
     let tile = &world.tiles[idx];
-    biome_for_tile_with_support(BiomeContext {
-        is_ocean: tile.is_ocean(),
-        is_coast: tile.is_coast(),
+    biome_for_tile(BiomeInputs {
+        water: tile.water,
         elevation: tile.elevation,
         sea_level: world.sea_level,
         temperature: tile.temperature,
         moisture: tile.moisture,
-        support: mountain_support(world, idx),
-        proximity: mountain_proximity(world, idx),
+        mountain_feature: tile.mountain_feature,
+        mountain_presence: tile.mountain_presence,
+        mountain_proximity: mountain_proximity(world, idx),
         relief: tile.relief,
     })
 }
 
-fn mountain_support(world: &World, idx: usize) -> f32 {
-    let high_threshold = world.sea_level + 0.24;
-    let alpine_threshold = world.sea_level + 0.34;
-    weighted_neighbor_support(
-        world,
-        idx,
-        NeighborSupportSpec {
-            radius: 2,
-            full_threshold: alpine_threshold,
-            partial_threshold: high_threshold,
-            partial_weight: 0.55,
-        },
-        |dx, dy| {
-            let dist = dx.abs().max(dy.abs()) as f32;
-            if dist <= 1.0 { 1.0 } else { 0.45 }
-        },
-    )
-}
-
 fn mountain_proximity(world: &World, idx: usize) -> f32 {
-    let alpine_threshold = world.sea_level + 0.38;
-    let ridge_threshold = world.sea_level + 0.32;
-    weighted_neighbor_support(
-        world,
-        idx,
-        NeighborSupportSpec {
-            radius: 4,
-            full_threshold: alpine_threshold,
-            partial_threshold: ridge_threshold,
-            partial_weight: 0.45,
-        },
-        |dx, dy| {
-            let dist = ((dx * dx + dy * dy) as f32).sqrt();
-            (1.0 / (1.0 + dist)).clamp(0.12, 0.7)
-        },
-    )
-}
-
-fn weighted_neighbor_support(
-    world: &World,
-    idx: usize,
-    spec: NeighborSupportSpec,
-    weight_for: impl Fn(isize, isize) -> f32,
-) -> f32 {
     let (x, y) = world.coords(idx);
     let mut support = 0.0_f32;
     let mut total = 0.0_f32;
 
-    for dy in -spec.radius..=spec.radius {
-        for dx in -spec.radius..=spec.radius {
+    for dy in -4_isize..=4 {
+        for dx in -4_isize..=4 {
             if dx == 0 && dy == 0 {
                 continue;
             }
@@ -105,14 +70,13 @@ fn weighted_neighbor_support(
                 continue;
             }
             let nidx = world.idx(nx as usize, ny as usize);
-            let weight = weight_for(dx, dy);
-            let elev = world.tiles[nidx].elevation;
-            total += weight;
-            if elev > spec.full_threshold {
-                support += weight;
-            } else if elev > spec.partial_threshold {
-                support += weight * spec.partial_weight;
+            if !world.tiles[nidx].is_land() {
+                continue;
             }
+            let dist = ((dx * dx + dy * dy) as f32).sqrt();
+            let weight = (1.0 / (1.0 + dist)).clamp(0.12, 0.7);
+            total += weight;
+            support += world.tiles[nidx].mountain_presence * weight;
         }
     }
 
@@ -123,48 +87,27 @@ fn weighted_neighbor_support(
     }
 }
 
-pub fn biome_for_tile(
-    is_ocean: bool,
-    is_coast: bool,
-    elevation: f32,
-    sea_level: f32,
-    temperature: f32,
-    moisture: f32,
-) -> Biome {
-    biome_for_tile_with_support(BiomeContext {
-        is_ocean,
-        is_coast,
-        elevation,
-        sea_level,
-        temperature,
-        moisture,
-        support: 1.0,
-        proximity: 1.0,
-        relief: 0.08,
-    })
-}
-
-fn biome_for_tile_with_support(ctx: BiomeContext) -> Biome {
-    if ctx.is_ocean {
-        Biome::Ocean
-    } else if ctx.is_coast {
-        Biome::Coast
-    } else {
-        land_biome_with_support(ctx)
+pub fn biome_for_tile(ctx: BiomeInputs) -> Biome {
+    match ctx.water {
+        WaterClass::Ocean => Biome::Ocean,
+        WaterClass::Lake => Biome::Freshwater,
+        WaterClass::Land => land_biome_with_support(ctx),
     }
 }
 
-fn land_biome_with_support(ctx: BiomeContext) -> Biome {
-    if ctx.elevation > ctx.sea_level + 0.36
-        && ctx.support > 0.46
-        && (ctx.relief > 0.022 || ctx.elevation > ctx.sea_level + 0.42)
+fn land_biome_with_support(ctx: BiomeInputs) -> Biome {
+    if matches!(
+        ctx.mountain_feature,
+        MountainFeature::AlpineSlope | MountainFeature::Ridge | MountainFeature::Summit
+    ) && ctx.mountain_presence > 0.40
     {
         return Biome::Alpine;
     }
-    if ctx.elevation > ctx.sea_level + 0.27
-        && ctx.support > 0.18
-        && ctx.proximity > 0.16
-        && ctx.relief > 0.020
+    if ctx.mountain_feature == MountainFeature::Foothill
+        || (ctx.elevation > ctx.sea_level + 0.27
+            && ctx.mountain_presence > 0.22
+            && ctx.mountain_proximity > 0.14
+            && ctx.relief > 0.018)
     {
         return Biome::Foothills;
     }

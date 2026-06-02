@@ -30,7 +30,7 @@ fn tile_land_color(
     let tile = &world.tiles[idx];
     let (x, y) = world.coords(idx);
     let mut color = biome_color_climatic(biome, tile.temperature, moisture);
-    if biome != Biome::Ocean {
+    if tile.is_land() {
         let height_above_sea = (tile.elevation - world.sea_level).max(0.0);
         if matches!(biome, Biome::Alpine) {
             let alpine_t = ((height_above_sea - 0.36) / 0.08).clamp(0.0, 1.0);
@@ -70,7 +70,7 @@ pub(super) fn soften_biome_edges(world: &World, colors: &[Rgba<u8>]) -> Vec<Rgba
     for idx in 0..world.tiles.len() {
         let tile = &world.tiles[idx];
         let my_biome = tile.biome;
-        if my_biome == Biome::Ocean {
+        if tile.is_water() {
             continue;
         }
         let (x, y) = world.coords(idx);
@@ -81,7 +81,7 @@ pub(super) fn soften_biome_edges(world: &World, colors: &[Rgba<u8>]) -> Vec<Rgba
         for (nx, ny) in world.neighbors8(x, y) {
             let nidx = world.idx(nx, ny);
             let nb = world.tiles[nidx].biome;
-            if nb == my_biome || nb == Biome::Ocean {
+            if nb == my_biome || world.tiles[nidx].is_water() {
                 continue;
             }
             r += colors[nidx][0] as f32;
@@ -189,7 +189,7 @@ fn biome_color_climatic(biome: Biome, temperature: f32, moisture: f32) -> Rgba<u
 fn biome_color(biome: Biome) -> Rgba<u8> {
     match biome {
         Biome::Ocean => Rgba([38, 84, 148, 255]),
-        Biome::Coast => Rgba([204, 198, 148, 255]),
+        Biome::Freshwater => Rgba([62, 128, 172, 255]),
         Biome::PolarDesert => Rgba([212, 220, 218, 255]),
         Biome::Tundra => Rgba([148, 168, 126, 255]),
         Biome::BorealForest => Rgba([64, 112, 68, 255]),

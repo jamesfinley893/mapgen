@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Biome {
     Ocean,
-    Coast,
+    Freshwater,
     PolarDesert,
     Tundra,
     BorealForest,
@@ -17,6 +17,14 @@ pub enum Biome {
     TropicalForest,
     Rainforest,
     Alpine,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WaterClass {
+    #[default]
+    Ocean,
+    Lake,
+    Land,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,11 +43,15 @@ pub struct Tile {
     pub elevation: f32,
     pub slope: f32,
     pub relief: f32,
+    pub uplift: f32,
+    pub mountain_presence: f32,
     pub temperature: f32,
     pub moisture: f32,
     pub precipitation: f32,
     pub continentality: f32,
     pub ocean_distance: u16,
+    pub water: WaterClass,
+    pub coast: bool,
     pub biome: Biome,
     pub mountain_feature: MountainFeature,
 }
@@ -50,11 +62,15 @@ impl Default for Tile {
             elevation: 0.0,
             slope: 0.0,
             relief: 0.0,
+            uplift: 0.0,
+            mountain_presence: 0.0,
             temperature: 0.0,
             moisture: 0.0,
             precipitation: 0.0,
             continentality: 0.0,
             ocean_distance: u16::MAX,
+            water: WaterClass::Ocean,
+            coast: false,
             biome: Biome::Ocean,
             mountain_feature: MountainFeature::None,
         }
@@ -63,15 +79,19 @@ impl Default for Tile {
 
 impl Tile {
     pub fn is_ocean(&self) -> bool {
-        self.biome == Biome::Ocean
+        self.water == WaterClass::Ocean
     }
 
     pub fn is_coast(&self) -> bool {
-        self.biome == Biome::Coast
+        self.coast
     }
 
     pub fn is_land(&self) -> bool {
-        !self.is_ocean()
+        self.water == WaterClass::Land
+    }
+
+    pub fn is_water(&self) -> bool {
+        !self.is_land()
     }
 }
 
